@@ -26,12 +26,15 @@ then blocks inside write() and the stream silently stalls while poll()
 still reports it alive. A temp file gives the same diagnostic value
 (read its tail once death is detected) without that failure mode, and
 without needing a reader thread in a node that has no concurrency today.
+Every path that ends a stream removes that file - a toggle-heavy operator
+session must not leave one orphaned file per enable in /tmp forever.
 """
 
 import json
 import shutil
 import subprocess
 import tempfile
+from pathlib import Path
 
 import rclpy
 from rclpy.node import Node
@@ -122,6 +125,11 @@ class VideoSender(Node):
                                     f"@{request.fps} {request.bitrate_kbps}kbps")
         argv = build_pipeline(request)
         try:
+            # A stale path should never survive to here - _on_request always
+            # runs _stop_stream first - but a leftover file is worse than a
+            # defensive check, so a path that slipped through gets removed
+            # rather than silently orphaned.
+            self._remove_stderr_file()
             stderr_file = tempfile.NamedTemporaryFile(
                 mode='w', prefix='video_sender_stderr_', delete=False)
             self._stderr_path = stderr_file.name
@@ -144,6 +152,7 @@ class VideoSender(Node):
         except subprocess.TimeoutExpired:
             self._process.kill()
         self._process = None
+        self._remove_stderr_file()
 
     def _publish_status_tick(self) -> None:
         # A pipeline can die long after it started - a camera unplugged, an
@@ -153,6 +162,7 @@ class VideoSender(Node):
             code = self._process.poll()
             if code is not None:
                 detail = self._stderr_tail()
+                self._remove_stderr_file()
                 self._process = None
                 self._set_state('failed', detail if detail else f"pipeline exited ({code})")
                 return
@@ -167,6 +177,12 @@ class VideoSender(Node):
         except OSError:
             return ''
         return lines[-1] if lines else ''
+
+    def _remove_stderr_file(self) -> None:
+        if self._stderr_path is None:
+            return
+        Path(self._stderr_path).unlink(missing_ok=True)
+        self._stderr_path = None
 
     def _set_state(self, state: str, detail: str) -> None:
         self._state = state

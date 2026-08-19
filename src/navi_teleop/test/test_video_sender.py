@@ -186,7 +186,8 @@ def test_process_death_while_streaming_reports_failed_with_stderr_tail(sender):
     # readable once the process is gone.
     node, launcher = sender
     node._on_request(_request({"enable": True, "host": "127.0.0.1", "port": 5600}))
-    with open(node._stderr_path, 'w') as f:
+    stderr_path = node._stderr_path
+    with open(stderr_path, 'w') as f:
         f.write("warning: dropped frame\nERROR: v4l2src0: Internal data flow error\n")
     launcher.process.returncode = 1
 
@@ -194,3 +195,22 @@ def test_process_death_while_streaming_reports_failed_with_stderr_tail(sender):
 
     assert node._state == 'failed'
     assert "Internal data flow error" in node._detail
+    # The tail must be read before the file is removed, not instead of it -
+    # a stderr temp file per death should not outlive the death it explains.
+    assert not os.path.exists(stderr_path)
+    assert node._stderr_path is None
+
+
+def test_disable_removes_the_stderr_temp_file(sender):
+    # A stream that ends leaves nothing behind: every enable creates a new
+    # stderr temp file, so an operator toggling video on and off across a
+    # session must not accumulate one orphaned file per enable in /tmp.
+    node, launcher = sender
+    node._on_request(_request({"enable": True, "host": "127.0.0.1", "port": 5600}))
+    stderr_path = node._stderr_path
+    assert os.path.exists(stderr_path)
+
+    node._on_request(_request({"enable": False}))
+
+    assert not os.path.exists(stderr_path)
+    assert node._stderr_path is None
