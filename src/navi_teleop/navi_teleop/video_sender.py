@@ -13,11 +13,25 @@ stack and can run whether or not that stack is up.
 The pipeline runs as a gst-launch-1.0 subprocess rather than through
 PyGObject: it needs no Python bindings on either machine, and a pipeline
 that dies on a bad frame kills a subprocess instead of this node.
+
+A malformed request never tears down a stream that is already healthy:
+the ceilings exist so a bad ask gets refused, not so a refusal can make
+the operator believe video stopped when it did not. Status only becomes
+failed when nothing is actually running.
+
+The child's stderr goes to a temp file rather than a pipe. Nothing reads
+a pipe until the process is already found dead, and a flaky UVC device
+can fill the OS pipe buffer with warnings faster than that - the child
+then blocks inside write() and the stream silently stalls while poll()
+still reports it alive. A temp file gives the same diagnostic value
+(read its tail once death is detected) without that failure mode, and
+without needing a reader thread in a node that has no concurrency today.
 """
 
 import json
 import shutil
 import subprocess
+import tempfile
 
 import rclpy
 from rclpy.node import Node
@@ -59,6 +73,7 @@ class VideoSender(Node):
 
         self._launcher = launcher
         self._process: subprocess.Popen | None = None
+        self._stderr_path: str | None = None
 
         self._status_publisher = self.create_publisher(String, '/video_status', 10)
         self.create_subscription(String, '/video_request', self._on_request, 10)
@@ -84,8 +99,12 @@ class VideoSender(Node):
         try:
             request = parse_request(msg.data, **self._limits())
         except InvalidRequest as exc:
-            self._set_state('failed', str(exc))
             self.get_logger().warn(f"rejected video request: {exc}")
+            # A healthy stream keeps reporting streaming through a bad
+            # request that arrives later - refusing it must not make the
+            # operator believe video stopped when it did not.
+            if self._state != 'streaming':
+                self._set_state('failed', str(exc))
             return
 
         self._stop_stream()
@@ -103,8 +122,12 @@ class VideoSender(Node):
                                     f"@{request.fps} {request.bitrate_kbps}kbps")
         argv = build_pipeline(request)
         try:
-            self._process = self._launcher(argv, stdout=subprocess.DEVNULL,
-                                           stderr=subprocess.PIPE)
+            stderr_file = tempfile.NamedTemporaryFile(
+                mode='w', prefix='video_sender_stderr_', delete=False)
+            self._stderr_path = stderr_file.name
+            with stderr_file:
+                self._process = self._launcher(argv, stdout=subprocess.DEVNULL,
+                                               stderr=stderr_file)
         except OSError as exc:
             self._set_state('failed', f"could not start pipeline: {exc}")
             return
@@ -129,14 +152,21 @@ class VideoSender(Node):
         if self._state == 'streaming' and self._process is not None:
             code = self._process.poll()
             if code is not None:
-                stderr = b''
-                if self._process.stderr is not None:
-                    stderr = self._process.stderr.read() or b''
-                detail = stderr.decode(errors='replace').strip().splitlines()
+                detail = self._stderr_tail()
                 self._process = None
-                self._set_state('failed', detail[-1] if detail else f"pipeline exited ({code})")
+                self._set_state('failed', detail if detail else f"pipeline exited ({code})")
                 return
         self._publish_status()
+
+    def _stderr_tail(self) -> str:
+        if self._stderr_path is None:
+            return ''
+        try:
+            with open(self._stderr_path, 'r', errors='replace') as f:
+                lines = f.read().strip().splitlines()
+        except OSError:
+            return ''
+        return lines[-1] if lines else ''
 
     def _set_state(self, state: str, detail: str) -> None:
         self._state = state
