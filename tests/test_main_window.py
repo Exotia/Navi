@@ -41,12 +41,23 @@ class FakeRos:
         pass
 
 
-def make_window(qtbot):
+def make_fake_client_factory():
+    def factory(host, port=9090):
+        return RosBridgeClient(host=host, port=port, ros_factory=FakeRos, topic_factory=FakeTopic)
+    return factory
+
+
+def make_window(qtbot, initial_host="localhost"):
     FakeRos.instances.clear()
-    client = RosBridgeClient(host="localhost", ros_factory=FakeRos, topic_factory=FakeTopic)
-    window = MainWindow(client)
+    window = MainWindow(ros_client_factory=make_fake_client_factory(), initial_host=initial_host)
     qtbot.addWidget(window)
-    return window, client
+    if initial_host:
+        # MainWindow itself never auto-connects from its constructor (see
+        # test_initial_host_prefills_but_does_not_auto_connect below) - only
+        # ground_station.main defers this call via QTimer.singleShot after
+        # the event loop starts. Tests call it directly and synchronously.
+        window._connect_to(initial_host, 9090)
+    return window, window.ros_client
 
 
 def test_main_window_starts_on_dashboard_page(qtbot):
@@ -84,11 +95,11 @@ def test_twist_message_updates_drive_card(qtbot):
 
 
 def test_connection_changed_updates_label(qtbot):
-    window, client = make_window(qtbot)
+    window, _ = make_window(qtbot, initial_host=None)
 
     assert window.connection_label.text() == "ROSBRIDGE: DISCONNECTED"
 
-    client.connect()
+    window._connect_to("localhost", 9090)
 
     assert window.connection_label.text() == "ROSBRIDGE: CONNECTED"
 
@@ -161,3 +172,59 @@ def test_nodes_received_updates_node_list(qtbot):
     assert window.dashboard_page.node_list.row_count() == 2
     row_texts = {window.dashboard_page.node_list.row_text(i) for i in range(2)}
     assert row_texts == {"/cmd_vel_bridge  (up)", "/rosbridge_websocket  (up)"}
+
+
+def test_no_initial_host_leaves_ros_client_unset(qtbot):
+    window, client = make_window(qtbot, initial_host=None)
+
+    assert client is None
+    assert window.ros_client is None
+    assert window.host_input.text() == ""
+    assert window.connection_label.text() == "ROSBRIDGE: DISCONNECTED"
+
+
+def test_initial_host_prefills_but_does_not_auto_connect(qtbot):
+    FakeRos.instances.clear()
+    window = MainWindow(ros_client_factory=make_fake_client_factory(), initial_host="orin.local")
+    qtbot.addWidget(window)
+
+    # MainWindow's constructor only pre-fills the field - it never connects
+    # on its own. Only ground_station.main's deferred singleShot call (or a
+    # user clicking Connect) actually triggers a connection attempt.
+    assert window.host_input.text() == "orin.local"
+    assert window.ros_client is None
+    assert FakeRos.instances == []
+
+
+def test_connect_button_with_typed_host_connects(qtbot):
+    window, _ = make_window(qtbot, initial_host=None)
+
+    window.host_input.setText("192.168.1.50")
+    window.port_input.setText("9090")
+    window._on_connect_clicked()
+
+    assert window.ros_client is not None
+    assert window.connection_label.text() == "ROSBRIDGE: CONNECTED"
+
+
+def test_connect_button_with_blank_host_does_nothing(qtbot):
+    window, _ = make_window(qtbot, initial_host=None)
+
+    window.host_input.setText("   ")
+    window._on_connect_clicked()
+
+    assert window.ros_client is None
+
+
+def test_reconnecting_to_a_new_host_closes_the_previous_client(qtbot):
+    window, first_client = make_window(qtbot, initial_host="192.168.1.50")
+    first_ros = FakeRos.instances[-1]
+    assert first_ros.is_connected is True
+
+    window.host_input.setText("192.168.1.60")
+    window._on_connect_clicked()
+
+    assert first_ros.is_connected is False
+    assert window.ros_client is not first_client
+    assert len(FakeRos.instances) == 2
+    assert FakeRos.instances[-1].is_connected is True

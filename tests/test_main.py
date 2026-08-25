@@ -1,12 +1,12 @@
-import pytest
-
 from ground_station.main import build_arg_parser
 
 
-def test_host_is_required():
+def test_host_is_optional_and_defaults_to_none():
     parser = build_arg_parser()
-    with pytest.raises(SystemExit):
-        parser.parse_args([])
+    args = parser.parse_args([])
+
+    assert args.host is None
+    assert args.port == 9090
 
 
 def test_port_defaults_to_9090_when_omitted():

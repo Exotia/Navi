@@ -1,5 +1,8 @@
+import sys
+
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QStackedWidget
+from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+                                QStackedWidget, QLineEdit, QPushButton)
 
 from ground_station import theme
 from ground_station.models import DriveState, NodeRegistry
@@ -9,22 +12,34 @@ from ground_station.ui.drive_detail_page import DriveDetailPage
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, ros_client: RosBridgeClient, node_poll_interval_ms: int = 2000,
+    def __init__(self, ros_client_factory=RosBridgeClient, initial_host: str | None = None,
+                 initial_port: int = 9090, node_poll_interval_ms: int = 2000,
                  staleness_check_interval_ms: int = 500, stale_after_seconds: float = 1.0):
         super().__init__()
         self.stale_after_seconds = stale_after_seconds
         self.setWindowTitle("Asterope Ground Station")
-        self.ros_client = ros_client
+        self.ros_client_factory = ros_client_factory
+        self.ros_client: RosBridgeClient | None = None
         self.drive_state = DriveState()
         self.node_registry = NodeRegistry()
 
         self.connection_label = QLabel("ROSBRIDGE: DISCONNECTED")
         self.connection_label.setStyleSheet(f"color: {theme.TEXT_DIM};")
 
+        self.host_input = QLineEdit(initial_host or "")
+        self.host_input.setPlaceholderText("rosbridge host, e.g. 192.168.1.50")
+        self.port_input = QLineEdit(str(initial_port))
+        self.port_input.setFixedWidth(60)
+        self.connect_button = QPushButton("Connect")
+        self.connect_button.clicked.connect(self._on_connect_clicked)
+
         header = QWidget()
         header_layout = QHBoxLayout(header)
         header_layout.addWidget(QLabel("ASTEROPE GROUND STATION"))
         header_layout.addStretch()
+        header_layout.addWidget(self.host_input)
+        header_layout.addWidget(self.port_input)
+        header_layout.addWidget(self.connect_button)
         header_layout.addWidget(self.connection_label)
 
         self.dashboard_page = DashboardPage()
@@ -46,17 +61,51 @@ class MainWindow(QMainWindow):
             lambda: self.stacked_widget.setCurrentWidget(self.dashboard_page)
         )
 
-        self.ros_client.signals.twist_received.connect(self._on_twist)
-        self.ros_client.signals.nodes_received.connect(self._on_nodes)
-        self.ros_client.signals.connection_changed.connect(self._on_connection_changed)
-
         self._node_poll_timer = QTimer(self)
-        self._node_poll_timer.timeout.connect(self.ros_client.poll_nodes)
+        self._node_poll_timer.timeout.connect(self._poll_nodes)
         self._node_poll_timer.start(node_poll_interval_ms)
 
         self._staleness_timer = QTimer(self)
         self._staleness_timer.timeout.connect(self._check_staleness)
         self._staleness_timer.start(staleness_check_interval_ms)
+
+    def _poll_nodes(self) -> None:
+        if self.ros_client is not None:
+            self.ros_client.poll_nodes()
+
+    def _on_connect_clicked(self) -> None:
+        host = self.host_input.text().strip()
+        if not host:
+            return
+        try:
+            port = int(self.port_input.text().strip())
+        except ValueError:
+            port = 9090
+        self._connect_to(host, port)
+
+    def _connect_to(self, host: str, port: int) -> None:
+        """(Re)connect to a rosbridge server at host:port, discarding any
+        previous connection. Safe to call synchronously (from a button
+        click, after the event loop is already running) or deferred via
+        QTimer.singleShot(0, ...) for an initial connect at startup, so a
+        slow/failed connection attempt doesn't block the window from
+        painting first."""
+        if self.ros_client is not None:
+            try:
+                self.ros_client.close()
+            except Exception:
+                pass
+
+        self.ros_client = self.ros_client_factory(host, port)
+        self.ros_client.signals.twist_received.connect(self._on_twist)
+        self.ros_client.signals.nodes_received.connect(self._on_nodes)
+        self.ros_client.signals.connection_changed.connect(self._on_connection_changed)
+
+        try:
+            self.ros_client.connect()
+            self.ros_client.subscribe_cmd_vel()
+        except Exception as exc:
+            print(f"ground_station: failed to connect to rosbridge: {exc}", file=sys.stderr)
 
     def _on_twist(self, msg: dict) -> None:
         linear = msg.get("linear", {})
