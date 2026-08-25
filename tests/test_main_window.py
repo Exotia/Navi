@@ -117,7 +117,7 @@ def test_back_from_detail_returns_to_dashboard(qtbot):
 def test_twist_message_updates_drive_card(qtbot):
     window, client = make_window(qtbot)
     client.connect()
-    client.subscribe_cmd_vel()
+    client.subscribe_manual_twist()
 
     # calling the slot directly here: it's a plain method, not a signal to
     # wait on — the signal->slot wiring itself is covered by
@@ -265,7 +265,7 @@ def test_reconnecting_to_a_new_host_closes_the_previous_client(qtbot):
     assert FakeRos.instances[-1].is_connected is True
 
 
-def test_gamepad_publishes_cmd_vel_when_gamepad_and_rosbridge_both_present(qtbot):
+def test_gamepad_publishes_manual_twist_when_gamepad_and_rosbridge_both_present(qtbot):
     gamepad = FakeGamepadReader(connected=True, twist=(0.4, -0.05, 0.1))
     window, _ = make_window(qtbot, initial_host="localhost", gamepad_reader=gamepad)
 
@@ -276,6 +276,9 @@ def test_gamepad_publishes_cmd_vel_when_gamepad_and_rosbridge_both_present(qtbot
         "linear": {"x": 0.4, "y": -0.05, "z": 0.0},
         "angular": {"x": 0.0, "y": 0.0, "z": 0.1},
     }]
+    # the local display path is independent of the connection, but should
+    # of course also reflect the same reading
+    assert "0.40" in window.dashboard_page.drive_card.vx_label.text()
 
 
 def test_gamepad_disconnected_does_not_publish(qtbot):
@@ -287,14 +290,19 @@ def test_gamepad_disconnected_does_not_publish(qtbot):
     assert FakeTopic.instances[-1].published_messages == []
 
 
-def test_gamepad_connected_but_rosbridge_not_connected_does_not_publish(qtbot):
-    gamepad = FakeGamepadReader(connected=True, twist=(0.4, 0.0, 0.0))
+def test_gamepad_updates_local_display_even_without_a_rosbridge_connection(qtbot):
+    # per the design: gamepad input + the Twist it produces should always
+    # be visible in the GS, regardless of whether anything is connected -
+    # publishing to the rover is a separate concern for a later module.
+    gamepad = FakeGamepadReader(connected=True, twist=(0.4, 0.0, 0.2))
     window, client = make_window(qtbot, initial_host=None, gamepad_reader=gamepad)
     assert client is None
 
-    # must not raise even though there's no ros_client at all yet
     window._poll_gamepad()
 
+    assert "0.40" in window.dashboard_page.drive_card.vx_label.text()
+    assert "0.20" in window.dashboard_page.drive_card.wz_label.text()
+    # no rosbridge connection at all yet, so nothing to publish on
     assert FakeTopic.instances == []
 
 
@@ -314,8 +322,9 @@ def test_gamepad_disconnect_sends_one_zero_velocity_stop_then_stays_quiet(qtbot)
         "linear": {"x": 0.0, "y": 0.0, "z": 0.0},
         "angular": {"x": 0.0, "y": 0.0, "z": 0.0},
     }
+    assert "0.00" in window.dashboard_page.drive_card.vx_label.text()
 
-    # still disconnected on a later poll - must not publish again
+    # still disconnected on a later poll - must not publish (or re-display) again
     window._poll_gamepad()
 
     assert len(topic.published_messages) == 2

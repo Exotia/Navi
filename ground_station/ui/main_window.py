@@ -107,9 +107,14 @@ class MainWindow(QMainWindow):
             self.ros_client.poll_nodes()
 
     def _poll_gamepad(self) -> None:
-        """Publishes gamepad stick position as /cmd_vel automatically once
-        both a gamepad and a rosbridge connection are present - no manual
-        "enable driving" step. On disconnect, publishes one zero-velocity
+        """Shows the gamepad's current stick-derived Twist on the Drive
+        card/detail page unconditionally - this display never depends on a
+        rosbridge connection. Separately, once both a gamepad and a
+        rosbridge connection are present, also publishes it on
+        /manual_twist automatically (no manual "enable driving" step) - a
+        raw stream nothing subscribes to yet; deciding whether this becomes
+        the rover's actual /cmd_vel is a later mode-supervisor module's
+        job, not this one's. On disconnect, publishes one zero-velocity
         Twist as a fail-safe stop rather than leaving the rover at its last
         command forever, then stops publishing until the gamepad returns."""
         connected = self.gamepad_reader.poll()
@@ -117,13 +122,15 @@ class MainWindow(QMainWindow):
 
         if connected:
             self._gamepad_was_connected = True
+            linear_x, linear_y, angular_z = self.gamepad_reader.read_twist()
+            self._update_drive_display(linear_x, linear_y, angular_z)
             if rosbridge_ready:
-                linear_x, linear_y, angular_z = self.gamepad_reader.read_twist()
-                self.ros_client.publish_cmd_vel(linear_x, linear_y, angular_z)
+                self.ros_client.publish_manual_twist(linear_x, linear_y, angular_z)
         elif self._gamepad_was_connected:
             self._gamepad_was_connected = False
+            self._update_drive_display(0.0, 0.0, 0.0)
             if rosbridge_ready:
-                self.ros_client.publish_cmd_vel(0.0, 0.0, 0.0)
+                self.ros_client.publish_manual_twist(0.0, 0.0, 0.0)
 
     def _on_connect_clicked(self) -> None:
         host = self.host_input.text().strip()
@@ -155,20 +162,26 @@ class MainWindow(QMainWindow):
 
         try:
             self.ros_client.connect()
-            self.ros_client.subscribe_cmd_vel()
+            self.ros_client.subscribe_manual_twist()
         except Exception as exc:
             print(f"ground_station: failed to connect to rosbridge: {exc}", file=sys.stderr)
 
-    def _on_twist(self, msg: dict) -> None:
-        linear = msg.get("linear", {})
-        angular = msg.get("angular", {})
-        self.drive_state.ingest(linear.get("x", 0.0), linear.get("y", 0.0), angular.get("z", 0.0))
+    def _update_drive_display(self, linear_x: float, linear_y: float, angular_z: float) -> None:
+        self.drive_state.ingest(linear_x, linear_y, angular_z)
         self.dashboard_page.drive_card.update_from(self.drive_state)
         self.drive_detail_page.update_from(self.drive_state)
         self.drive_detail_page.append_raw_message(
-            f"linear.x={linear.get('x', 0.0):.2f} linear.y={linear.get('y', 0.0):.2f} "
-            f"angular.z={angular.get('z', 0.0):.2f}"
+            f"linear.x={linear_x:.2f} linear.y={linear_y:.2f} angular.z={angular_z:.2f}"
         )
+
+    def _on_twist(self, msg: dict) -> None:
+        """Fires when our own /manual_twist publish loops back through
+        rosbridge - a wire-level integration check, not the primary display
+        path (that's _poll_gamepad calling _update_drive_display directly,
+        which works even without a connection)."""
+        linear = msg.get("linear", {})
+        angular = msg.get("angular", {})
+        self._update_drive_display(linear.get("x", 0.0), linear.get("y", 0.0), angular.get("z", 0.0))
 
     def _on_nodes(self, names: list) -> None:
         self.node_registry.update(names)
