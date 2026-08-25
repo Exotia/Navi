@@ -72,6 +72,23 @@ def test_twist_message_updates_drive_card(qtbot):
 
 def test_connection_changed_updates_label(qtbot):
     window, client = make_window(qtbot)
+
+    assert window.connection_label.text() == "ROSBRIDGE: DISCONNECTED"
+
     client.connect()
 
-    assert "CONNECTED" in window.connection_label.text()
+    assert window.connection_label.text() == "ROSBRIDGE: CONNECTED"
+
+
+def test_nodes_received_updates_node_list(qtbot):
+    window, _ = make_window(qtbot)
+
+    # calling the slot directly here, same pattern as
+    # test_twist_message_updates_drive_card: the signal->slot wiring itself
+    # is covered by test_ros_client.py's
+    # test_poll_nodes_emits_nodes_received_signal.
+    window._on_nodes(["/cmd_vel_bridge", "/rosbridge_websocket"])
+
+    assert window.dashboard_page.node_list.row_count() == 2
+    row_texts = {window.dashboard_page.node_list.row_text(i) for i in range(2)}
+    assert row_texts == {"/cmd_vel_bridge  (up)", "/rosbridge_websocket  (up)"}
