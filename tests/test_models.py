@@ -1,5 +1,5 @@
 import pytest
-from ground_station.models import DriveState
+from ground_station.models import DriveState, NodeRegistry
 
 
 def test_ingest_stores_latest_sample():
@@ -47,3 +47,39 @@ def test_seconds_since_last_computes_elapsed_time():
     state = DriveState()
     state.ingest(0.0, 0.0, 0.0, now=10.0)
     assert state.seconds_since_last(now=10.5) == pytest.approx(0.5)
+
+
+def test_update_marks_present_nodes_alive():
+    registry = NodeRegistry()
+    registry.update(["/cmd_vel_bridge", "/rosbridge_websocket"], now=10.0)
+
+    names = [n.name for n in registry.snapshot()]
+    assert names == ["/cmd_vel_bridge", "/rosbridge_websocket"]
+    assert all(n.alive for n in registry.snapshot())
+
+
+def test_update_marks_missing_nodes_stale_after_timeout():
+    registry = NodeRegistry(stale_after_seconds=1.0)
+    registry.update(["/cmd_vel_bridge"], now=0.0)
+    # node no longer reported present, and enough time has passed
+    registry.update([], now=2.0)
+
+    status = registry.snapshot()[0]
+    assert status.name == "/cmd_vel_bridge"
+    assert status.alive is False
+
+
+def test_update_keeps_node_alive_within_stale_window():
+    registry = NodeRegistry(stale_after_seconds=5.0)
+    registry.update(["/cmd_vel_bridge"], now=0.0)
+    registry.update([], now=1.0)  # missing from this poll, but within window
+
+    assert registry.snapshot()[0].alive is True
+
+
+def test_snapshot_is_sorted_by_name():
+    registry = NodeRegistry()
+    registry.update(["/zzz_node", "/aaa_node"], now=0.0)
+
+    names = [n.name for n in registry.snapshot()]
+    assert names == ["/aaa_node", "/zzz_node"]
