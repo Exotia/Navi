@@ -1,0 +1,72 @@
+"""Pure-Python state models for the ground station — no Qt or ROS imports."""
+
+from dataclasses import dataclass, field
+from time import monotonic
+
+
+@dataclass
+class TwistSample:
+    linear_x: float
+    linear_y: float
+    angular_z: float
+    received_at: float
+
+
+class DriveState:
+    """Tracks the latest /cmd_vel Twist message and its incoming rate."""
+
+    def __init__(self, rate_window_seconds: float = 2.0):
+        self.rate_window_seconds = rate_window_seconds
+        self.latest: TwistSample | None = None
+        self._timestamps: list[float] = []
+
+    def ingest(self, linear_x: float, linear_y: float, angular_z: float,
+               now: float | None = None) -> None:
+        now = monotonic() if now is None else now
+        self.latest = TwistSample(linear_x, linear_y, angular_z, now)
+        self._timestamps.append(now)
+        cutoff = now - self.rate_window_seconds
+        self._timestamps = [t for t in self._timestamps if t >= cutoff]
+
+    @property
+    def rate_hz(self) -> float:
+        if len(self._timestamps) < 2:
+            return 0.0
+        span = self._timestamps[-1] - self._timestamps[0]
+        if span <= 0:
+            return 0.0
+        return (len(self._timestamps) - 1) / span
+
+    def seconds_since_last(self, now: float | None = None) -> float | None:
+        if self.latest is None:
+            return None
+        now = monotonic() if now is None else now
+        return now - self.latest.received_at
+
+
+@dataclass
+class NodeStatus:
+    name: str
+    alive: bool
+    last_seen: float
+
+
+class NodeRegistry:
+    """Tracks which ROS2 nodes are currently present, from periodic polls
+    of rosbridge's rosapi node list."""
+
+    def __init__(self, stale_after_seconds: float = 5.0):
+        self.stale_after_seconds = stale_after_seconds
+        self._nodes: dict[str, NodeStatus] = {}
+
+    def update(self, present_node_names: list[str], now: float | None = None) -> None:
+        now = monotonic() if now is None else now
+        for name in present_node_names:
+            self._nodes[name] = NodeStatus(name=name, alive=True, last_seen=now)
+        cutoff = now - self.stale_after_seconds
+        for status in self._nodes.values():
+            if status.last_seen < cutoff:
+                status.alive = False
+
+    def snapshot(self) -> list[NodeStatus]:
+        return sorted(self._nodes.values(), key=lambda s: s.name)
