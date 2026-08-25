@@ -1,5 +1,6 @@
 from ground_station.models import DriveState, NodeStatus
 from ground_station.ui.drive_card import DriveCard
+from ground_station.ui.drive_detail_page import DriveDetailPage
 from ground_station.ui.node_list_widget import NodeListWidget
 
 
@@ -49,3 +50,30 @@ def test_node_list_widget_shows_a_row_per_node(qtbot):
     assert widget.row_count() == 2
     assert "cmd_vel_bridge" in widget.row_text(0)
     assert "amcl" in widget.row_text(1)
+
+
+def test_drive_detail_page_updates_from_state(qtbot):
+    page = DriveDetailPage()
+    qtbot.addWidget(page)
+    state = DriveState()
+    state.ingest(0.42, -0.05, 0.10, now=10.0)
+
+    page.update_from(state)
+
+    assert "0.42" in page.vx_label.text()
+    assert "0.10" in page.wz_label.text()
+
+
+def test_drive_detail_page_appends_raw_messages():
+    page = DriveDetailPage()
+    page.append_raw_message("linear.x=0.42 linear.y=-0.05 angular.z=0.10")
+
+    assert "0.42" in page.raw_log.toPlainText()
+
+
+def test_drive_detail_page_emits_back_requested(qtbot):
+    page = DriveDetailPage()
+    qtbot.addWidget(page)
+
+    with qtbot.waitSignal(page.back_requested, timeout=1000):
+        page.back_link.mousePressEvent(None)
