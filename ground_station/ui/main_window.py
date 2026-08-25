@@ -18,24 +18,48 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.stale_after_seconds = stale_after_seconds
         self.setWindowTitle("Asterope Ground Station")
+        self.setStyleSheet(f"QMainWindow {{ background-color: {theme.BG}; }}")
         self.ros_client_factory = ros_client_factory
         self.ros_client: RosBridgeClient | None = None
         self.drive_state = DriveState()
         self.node_registry = NodeRegistry()
 
+        input_style = (
+            f"background-color: {theme.PANEL}; color: {theme.TEXT}; "
+            f"border: 1px solid {theme.BORDER}; border-radius: 4px; padding: 4px 8px; "
+            f"font-family: {theme.MONO_FONT_FAMILY};"
+        )
+        button_style = (
+            f"QPushButton {{ background-color: {theme.PANEL}; color: {theme.TEXT}; "
+            f"border: 1px solid {theme.BORDER}; border-radius: 4px; padding: 4px 14px; }} "
+            f"QPushButton:hover {{ border-color: {theme.ACCENT}; }} "
+            f"QPushButton:pressed {{ background-color: {theme.BORDER}; }}"
+        )
+
         self.connection_label = QLabel("ROSBRIDGE: DISCONNECTED")
-        self.connection_label.setStyleSheet(f"color: {theme.TEXT_DIM};")
+        self.connection_label.setStyleSheet(
+            f"color: {theme.TEXT_DIM}; background-color: {theme.PANEL}; "
+            f"border: 1px solid {theme.BORDER}; border-radius: 4px; padding: 6px 12px; "
+            f"font-family: {theme.MONO_FONT_FAMILY};"
+        )
 
         self.host_input = QLineEdit(initial_host or "")
         self.host_input.setPlaceholderText("rosbridge host, e.g. 192.168.1.50")
+        self.host_input.setStyleSheet(input_style)
         self.port_input = QLineEdit(str(initial_port))
         self.port_input.setFixedWidth(60)
+        self.port_input.setStyleSheet(input_style)
         self.connect_button = QPushButton("Connect")
+        self.connect_button.setStyleSheet(button_style)
         self.connect_button.clicked.connect(self._on_connect_clicked)
 
+        title_label = QLabel("ASTEROPE GROUND STATION")
+        title_label.setStyleSheet(f"color: {theme.TEXT}; font-weight: 600; font-size: 16px;")
+
         header = QWidget()
+        header.setStyleSheet(f"background-color: {theme.BG};")
         header_layout = QHBoxLayout(header)
-        header_layout.addWidget(QLabel("ASTEROPE GROUND STATION"))
+        header_layout.addWidget(title_label)
         header_layout.addStretch()
         header_layout.addWidget(self.host_input)
         header_layout.addWidget(self.port_input)
@@ -49,6 +73,7 @@ class MainWindow(QMainWindow):
         self.stacked_widget.addWidget(self.drive_detail_page)
 
         central = QWidget()
+        central.setStyleSheet(f"background-color: {theme.BG};")
         layout = QVBoxLayout(central)
         layout.addWidget(header)
         layout.addWidget(self.stacked_widget)
@@ -126,7 +151,11 @@ class MainWindow(QMainWindow):
         text = "ROSBRIDGE: CONNECTED" if connected else "ROSBRIDGE: DISCONNECTED"
         color = theme.OK if connected else theme.TEXT_DIM
         self.connection_label.setText(text)
-        self.connection_label.setStyleSheet(f"color: {color};")
+        self.connection_label.setStyleSheet(
+            f"color: {color}; background-color: {theme.PANEL}; "
+            f"border: 1px solid {theme.BORDER}; border-radius: 4px; padding: 6px 12px; "
+            f"font-family: {theme.MONO_FONT_FAMILY};"
+        )
 
     def _check_staleness(self) -> None:
         elapsed = self.drive_state.seconds_since_last()

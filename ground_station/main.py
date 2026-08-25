@@ -2,8 +2,10 @@ import argparse
 import sys
 
 from PySide6.QtCore import QTimer
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
+from ground_station import theme
 from ground_station.ros_client import RosBridgeClient
 from ground_station.ui.main_window import MainWindow
 
@@ -21,6 +23,7 @@ def main() -> None:
     args = build_arg_parser().parse_args()
 
     app = QApplication(sys.argv)
+    app.setFont(QFont(theme.FONT_FAMILY))
     window = MainWindow(ros_client_factory=RosBridgeClient, initial_host=args.host, initial_port=args.port)
     window.resize(1440, 900)
     window.show()
