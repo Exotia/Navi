@@ -22,6 +22,7 @@ class RosBridgeClient:
 
     def connect(self) -> None:
         self._ros.on_ready(lambda: self.signals.connection_changed.emit(True))
+        self._ros.on("close", lambda *args: self.signals.connection_changed.emit(False))
         self._ros.run()
 
     def close(self) -> None:

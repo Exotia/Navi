@@ -24,6 +24,32 @@ def test_drive_card_updates_from_state(qtbot):
     assert "0.10" in card.wz_label.text()
 
 
+def test_drive_card_mark_stale_shows_zero_hz_no_data(qtbot):
+    card = DriveCard()
+    qtbot.addWidget(card)
+    state = DriveState()
+    state.ingest(0.42, -0.05, 0.10, now=10.0)
+    card.update_from(state)
+
+    card.mark_stale()
+
+    assert "0 Hz" in card.rate_label.text()
+    assert "no data" in card.rate_label.text()
+
+
+def test_drive_card_update_from_clears_stale_indication(qtbot):
+    card = DriveCard()
+    qtbot.addWidget(card)
+    card.mark_stale()
+
+    state = DriveState()
+    state.ingest(0.42, -0.05, 0.10, now=10.0)
+    state.ingest(0.42, -0.05, 0.10, now=10.1)
+    card.update_from(state)
+
+    assert "no data" not in card.rate_label.text()
+
+
 def test_drive_card_emits_details_requested_on_click(qtbot):
     card = DriveCard()
     qtbot.addWidget(card)
@@ -63,6 +89,31 @@ def test_drive_detail_page_updates_from_state(qtbot):
 
     assert "0.42" in page.vx_label.text()
     assert "0.10" in page.wz_label.text()
+
+
+def test_drive_detail_page_mark_stale_shows_zero_hz_no_data(qtbot):
+    page = DriveDetailPage()
+    qtbot.addWidget(page)
+    state = DriveState()
+    state.ingest(0.42, -0.05, 0.10, now=10.0)
+    page.update_from(state)
+
+    page.mark_stale()
+
+    assert "0 Hz" in page.link_label.text()
+    assert "no data" in page.link_label.text()
+
+
+def test_drive_detail_page_update_from_clears_stale_indication(qtbot):
+    page = DriveDetailPage()
+    qtbot.addWidget(page)
+    page.mark_stale()
+
+    state = DriveState()
+    state.ingest(0.42, -0.05, 0.10, now=10.0)
+    page.update_from(state)
+
+    assert "no data" not in page.link_label.text()
 
 
 def test_drive_detail_page_appends_raw_messages():

@@ -22,8 +22,11 @@ class DriveDetailPage(QWidget):
         self.vx_label = QLabel("vx (cmd)  --")
         self.vy_label = QLabel("vy (cmd)  --")
         self.wz_label = QLabel("wz (cmd)  --")
-        for label in (self.vx_label, self.vy_label, self.wz_label):
-            label.setStyleSheet(f"font-family: {theme.MONO_FONT_FAMILY}; font-size: 16px;")
+        self.link_label = QLabel("/cmd_vel  --")
+        self._live_style = f"font-family: {theme.MONO_FONT_FAMILY}; font-size: 16px;"
+        self._stale_style = f"font-family: {theme.MONO_FONT_FAMILY}; font-size: 16px; color: {theme.TEXT_DIM};"
+        for label in (self.vx_label, self.vy_label, self.wz_label, self.link_label):
+            label.setStyleSheet(self._live_style)
 
         self.raw_log = QPlainTextEdit()
         self.raw_log.setReadOnly(True)
@@ -42,6 +45,7 @@ class DriveDetailPage(QWidget):
         layout.addWidget(self.vx_label)
         layout.addWidget(self.vy_label)
         layout.addWidget(self.wz_label)
+        layout.addWidget(self.link_label)
         layout.addWidget(QLabel("RAW MESSAGES"))
         layout.addWidget(self.raw_log)
 
@@ -54,6 +58,16 @@ class DriveDetailPage(QWidget):
         self.vx_label.setText(f"vx (cmd)  {state.latest.linear_x:.2f} m/s")
         self.vy_label.setText(f"vy (cmd)  {state.latest.linear_y:.2f} m/s")
         self.wz_label.setText(f"wz (cmd)  {state.latest.angular_z:.2f} rad/s")
+        self.link_label.setText(f"/cmd_vel  {state.rate_hz:.0f} Hz")
+        for label in (self.vx_label, self.vy_label, self.wz_label, self.link_label):
+            label.setStyleSheet(self._live_style)
+
+    def mark_stale(self) -> None:
+        """No new /cmd_vel sample has arrived recently — dim the readouts and
+        show 0 Hz rather than letting stale numbers sit there looking live."""
+        self.link_label.setText("/cmd_vel  0 Hz (no data)")
+        for label in (self.vx_label, self.vy_label, self.wz_label, self.link_label):
+            label.setStyleSheet(self._stale_style)
 
     def append_raw_message(self, text: str) -> None:
         self.raw_log.appendPlainText(text)

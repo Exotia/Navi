@@ -47,3 +47,14 @@ class DriveCard(QWidget):
         self.vy_label.setText(f"vy (cmd)  {state.latest.linear_y:.2f} m/s")
         self.wz_label.setText(f"wz (cmd)  {state.latest.angular_z:.2f} rad/s")
         self.rate_label.setText(f"/cmd_vel  {state.rate_hz:.0f} Hz")
+        self.rate_label.setStyleSheet(
+            f"color: {theme.TEXT}; font-family: {theme.MONO_FONT_FAMILY}; border: none;"
+        )
+
+    def mark_stale(self) -> None:
+        """No new /cmd_vel sample has arrived recently — show 0 Hz / no-data
+        rather than letting the last-computed rate sit there looking live."""
+        self.rate_label.setText("/cmd_vel  0 Hz (no data)")
+        self.rate_label.setStyleSheet(
+            f"color: {theme.TEXT_DIM}; font-family: {theme.MONO_FONT_FAMILY}; border: none;"
+        )

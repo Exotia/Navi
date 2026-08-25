@@ -19,4 +19,7 @@ isn't available in the dev sandbox this plan was built in.
      live values and a scrolling raw-message log; "back to dashboard"
      returns to the dashboard.
 5. Stop the `ros2 topic pub` command and confirm the Drive card's Hz
-   reading decays toward 0 (no new samples entering the rate window).
+   reading drops to "0 Hz (no data)" within about a second (the staleness
+   check firing once no new samples have entered the rate window), and
+   that the Drive detail page's `/cmd_vel` readout shows the same
+   stale/no-data indication.

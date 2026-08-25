@@ -24,10 +24,19 @@ class FakeRos:
         self.is_connected = False
         self.ready_callback = None
         self.get_nodes_callback = None
+        self._event_callbacks = {}
         FakeRos.instances.append(self)
 
     def on_ready(self, callback):
         self.ready_callback = callback
+
+    def on(self, event_name, callback):
+        self._event_callbacks[event_name] = callback
+
+    def trigger_event(self, event_name, *args):
+        callback = self._event_callbacks.get(event_name)
+        if callback:
+            callback(*args)
 
     def run(self):
         self.is_connected = True
@@ -79,6 +88,20 @@ def test_twist_message_emits_twist_received_signal(qtbot):
         topic.callback(sample_msg)
 
     assert blocker.args == [sample_msg]
+
+
+def test_mid_session_close_event_emits_connection_changed_false(qtbot):
+    client = make_client(qtbot)
+    client.connect()
+    ros = FakeRos.instances[-1]
+
+    with qtbot.waitSignal(client.signals.connection_changed, timeout=1000) as blocker:
+        # roslibpy's factory emits a "close" event (with the closed proto
+        # as the argument) when the underlying websocket connection drops
+        # mid-session — this is the real hook, distinct from on_ready.
+        ros.trigger_event("close", None)
+
+    assert blocker.args == [False]
 
 
 def test_poll_nodes_emits_nodes_received_signal(qtbot):

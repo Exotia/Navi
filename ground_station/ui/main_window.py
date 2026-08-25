@@ -9,8 +9,10 @@ from ground_station.ui.drive_detail_page import DriveDetailPage
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, ros_client: RosBridgeClient, node_poll_interval_ms: int = 2000):
+    def __init__(self, ros_client: RosBridgeClient, node_poll_interval_ms: int = 2000,
+                 staleness_check_interval_ms: int = 500, stale_after_seconds: float = 1.0):
         super().__init__()
+        self.stale_after_seconds = stale_after_seconds
         self.setWindowTitle("Asterope Ground Station")
         self.ros_client = ros_client
         self.drive_state = DriveState()
@@ -52,6 +54,10 @@ class MainWindow(QMainWindow):
         self._node_poll_timer.timeout.connect(self.ros_client.poll_nodes)
         self._node_poll_timer.start(node_poll_interval_ms)
 
+        self._staleness_timer = QTimer(self)
+        self._staleness_timer.timeout.connect(self._check_staleness)
+        self._staleness_timer.start(staleness_check_interval_ms)
+
     def _on_twist(self, msg: dict) -> None:
         linear = msg.get("linear", {})
         angular = msg.get("angular", {})
@@ -72,3 +78,9 @@ class MainWindow(QMainWindow):
         color = theme.OK if connected else theme.TEXT_DIM
         self.connection_label.setText(text)
         self.connection_label.setStyleSheet(f"color: {color};")
+
+    def _check_staleness(self) -> None:
+        elapsed = self.drive_state.seconds_since_last()
+        if elapsed is not None and elapsed > self.stale_after_seconds:
+            self.dashboard_page.drive_card.mark_stale()
+            self.drive_detail_page.mark_stale()
