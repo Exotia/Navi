@@ -1,0 +1,9 @@
+# large derived/regenerable mesh formats (source of truth is the .ply)
+*.obj
+*.fbx
+__pycache__/
+*.pyc
+.venv/
+build/
+install/
+log/
