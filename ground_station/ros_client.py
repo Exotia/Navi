@@ -14,9 +14,11 @@ class RosSignals(QObject):
 
 class RosBridgeClient:
     def __init__(self, host: str, port: int = 9090,
-                 ros_factory=roslibpy.Ros, topic_factory=roslibpy.Topic):
+                 ros_factory=roslibpy.Ros, topic_factory=roslibpy.Topic,
+                 message_factory=roslibpy.Message):
         self.signals = RosSignals()
         self._topic_factory = topic_factory
+        self._message_factory = message_factory
         self._ros = ros_factory(host=host, port=port)
         self._cmd_vel_topic = None
 
@@ -39,3 +41,17 @@ class RosBridgeClient:
 
     def poll_nodes(self) -> None:
         self._ros.get_nodes(lambda nodes: self.signals.nodes_received.emit(nodes))
+
+    def publish_cmd_vel(self, linear_x: float, linear_y: float, angular_z: float) -> None:
+        """Publishes a Twist on the same /cmd_vel topic subscribe_cmd_vel()
+        set up - requires subscribe_cmd_vel() to have been called first.
+        Because this app is also subscribed to that topic, a published
+        message loops back through twist_received, which is why the Drive
+        card shows gamepad-driven commands without any separate display
+        path."""
+        if self._cmd_vel_topic is None:
+            return
+        self._cmd_vel_topic.publish(self._message_factory({
+            "linear": {"x": linear_x, "y": linear_y, "z": 0.0},
+            "angular": {"x": 0.0, "y": 0.0, "z": angular_z},
+        }))

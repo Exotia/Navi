@@ -3,11 +3,18 @@ from ground_station.ui.main_window import MainWindow
 
 
 class FakeTopic:
+    instances = []
+
     def __init__(self, ros, name, msg_type):
         self.callback = None
+        self.published_messages = []
+        FakeTopic.instances.append(self)
 
     def subscribe(self, callback):
         self.callback = callback
+
+    def publish(self, message):
+        self.published_messages.append(message)
 
 
 class FakeRos:
@@ -41,15 +48,42 @@ class FakeRos:
         pass
 
 
+class FakeGamepadReader:
+    """Never reports a gamepad connected unless a test explicitly says so -
+    this is the default injected into every MainWindow test so none of them
+    trigger a real pygame.init() as a side effect of just building a window."""
+
+    def __init__(self, connected: bool = False, twist: tuple = (0.0, 0.0, 0.0)):
+        self._connected = connected
+        self._twist = twist
+
+    def poll(self) -> bool:
+        return self._connected
+
+    def read_twist(self) -> tuple:
+        return self._twist
+
+    def set_connected(self, connected: bool) -> None:
+        self._connected = connected
+
+    def set_twist(self, twist: tuple) -> None:
+        self._twist = twist
+
+
 def make_fake_client_factory():
     def factory(host, port=9090):
         return RosBridgeClient(host=host, port=port, ros_factory=FakeRos, topic_factory=FakeTopic)
     return factory
 
 
-def make_window(qtbot, initial_host="localhost"):
+def make_window(qtbot, initial_host="localhost", gamepad_reader=None):
     FakeRos.instances.clear()
-    window = MainWindow(ros_client_factory=make_fake_client_factory(), initial_host=initial_host)
+    FakeTopic.instances.clear()
+    window = MainWindow(
+        ros_client_factory=make_fake_client_factory(),
+        initial_host=initial_host,
+        gamepad_reader=gamepad_reader if gamepad_reader is not None else FakeGamepadReader(),
+    )
     qtbot.addWidget(window)
     if initial_host:
         # MainWindow itself never auto-connects from its constructor (see
@@ -185,7 +219,8 @@ def test_no_initial_host_leaves_ros_client_unset(qtbot):
 
 def test_initial_host_prefills_but_does_not_auto_connect(qtbot):
     FakeRos.instances.clear()
-    window = MainWindow(ros_client_factory=make_fake_client_factory(), initial_host="orin.local")
+    window = MainWindow(ros_client_factory=make_fake_client_factory(), initial_host="orin.local",
+                         gamepad_reader=FakeGamepadReader())
     qtbot.addWidget(window)
 
     # MainWindow's constructor only pre-fills the field - it never connects
@@ -228,3 +263,59 @@ def test_reconnecting_to_a_new_host_closes_the_previous_client(qtbot):
     assert window.ros_client is not first_client
     assert len(FakeRos.instances) == 2
     assert FakeRos.instances[-1].is_connected is True
+
+
+def test_gamepad_publishes_cmd_vel_when_gamepad_and_rosbridge_both_present(qtbot):
+    gamepad = FakeGamepadReader(connected=True, twist=(0.4, -0.05, 0.1))
+    window, _ = make_window(qtbot, initial_host="localhost", gamepad_reader=gamepad)
+
+    window._poll_gamepad()
+
+    topic = FakeTopic.instances[-1]
+    assert topic.published_messages == [{
+        "linear": {"x": 0.4, "y": -0.05, "z": 0.0},
+        "angular": {"x": 0.0, "y": 0.0, "z": 0.1},
+    }]
+
+
+def test_gamepad_disconnected_does_not_publish(qtbot):
+    gamepad = FakeGamepadReader(connected=False)
+    window, _ = make_window(qtbot, initial_host="localhost", gamepad_reader=gamepad)
+
+    window._poll_gamepad()
+
+    assert FakeTopic.instances[-1].published_messages == []
+
+
+def test_gamepad_connected_but_rosbridge_not_connected_does_not_publish(qtbot):
+    gamepad = FakeGamepadReader(connected=True, twist=(0.4, 0.0, 0.0))
+    window, client = make_window(qtbot, initial_host=None, gamepad_reader=gamepad)
+    assert client is None
+
+    # must not raise even though there's no ros_client at all yet
+    window._poll_gamepad()
+
+    assert FakeTopic.instances == []
+
+
+def test_gamepad_disconnect_sends_one_zero_velocity_stop_then_stays_quiet(qtbot):
+    gamepad = FakeGamepadReader(connected=True, twist=(0.4, 0.0, 0.0))
+    window, _ = make_window(qtbot, initial_host="localhost", gamepad_reader=gamepad)
+    topic = FakeTopic.instances[-1]
+
+    window._poll_gamepad()
+    assert len(topic.published_messages) == 1
+
+    gamepad.set_connected(False)
+    window._poll_gamepad()
+
+    assert len(topic.published_messages) == 2
+    assert topic.published_messages[-1] == {
+        "linear": {"x": 0.0, "y": 0.0, "z": 0.0},
+        "angular": {"x": 0.0, "y": 0.0, "z": 0.0},
+    }
+
+    # still disconnected on a later poll - must not publish again
+    window._poll_gamepad()
+
+    assert len(topic.published_messages) == 2

@@ -1,4 +1,5 @@
 import argparse
+import signal
 import sys
 
 from PySide6.QtCore import QTimer
@@ -27,6 +28,19 @@ def main() -> None:
     window = MainWindow(ros_client_factory=RosBridgeClient, initial_host=args.host, initial_port=args.port)
     window.resize(1440, 900)
     window.show()
+
+    # GamepadReader (constructed inside MainWindow above) already restores
+    # Python's default SIGINT handling, undoing pygame/SDL's hijack of it -
+    # but a plain KeyboardInterrupt raised inside a QTimer callback is just
+    # logged and ignored by Qt, not enough to actually stop app.exec(). This
+    # explicit handler is what makes Ctrl+C actually quit the app.
+    signal.signal(signal.SIGINT, lambda *args: app.quit())
+
+    if args.host:
+        # Deferred to after app.exec() starts the event loop (via
+        # singleShot(0, ...)) so the window has already painted before the
+        # connection attempt can block this thread for up to ~10s.
+        QTimer.singleShot(0, lambda: window._connect_to(args.host, args.port))
 
     if args.host:
         # Deferred to after app.exec() starts the event loop (via

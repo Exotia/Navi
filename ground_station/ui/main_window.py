@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, Q
                                 QStackedWidget, QLineEdit, QPushButton)
 
 from ground_station import theme
+from ground_station.gamepad_input import GamepadReader
 from ground_station.models import DriveState, NodeRegistry
 from ground_station.ros_client import RosBridgeClient
 from ground_station.ui.dashboard_page import DashboardPage
@@ -14,7 +15,8 @@ from ground_station.ui.drive_detail_page import DriveDetailPage
 class MainWindow(QMainWindow):
     def __init__(self, ros_client_factory=RosBridgeClient, initial_host: str | None = None,
                  initial_port: int = 9090, node_poll_interval_ms: int = 2000,
-                 staleness_check_interval_ms: int = 500, stale_after_seconds: float = 1.0):
+                 staleness_check_interval_ms: int = 500, stale_after_seconds: float = 1.0,
+                 gamepad_reader=None, gamepad_poll_interval_ms: int = 50):
         super().__init__()
         self.stale_after_seconds = stale_after_seconds
         self.setWindowTitle("Asterope Ground Station")
@@ -23,6 +25,8 @@ class MainWindow(QMainWindow):
         self.ros_client: RosBridgeClient | None = None
         self.drive_state = DriveState()
         self.node_registry = NodeRegistry()
+        self.gamepad_reader = gamepad_reader if gamepad_reader is not None else GamepadReader()
+        self._gamepad_was_connected = False
 
         input_style = (
             f"background-color: {theme.PANEL}; color: {theme.TEXT}; "
@@ -94,9 +98,32 @@ class MainWindow(QMainWindow):
         self._staleness_timer.timeout.connect(self._check_staleness)
         self._staleness_timer.start(staleness_check_interval_ms)
 
+        self._gamepad_timer = QTimer(self)
+        self._gamepad_timer.timeout.connect(self._poll_gamepad)
+        self._gamepad_timer.start(gamepad_poll_interval_ms)
+
     def _poll_nodes(self) -> None:
         if self.ros_client is not None:
             self.ros_client.poll_nodes()
+
+    def _poll_gamepad(self) -> None:
+        """Publishes gamepad stick position as /cmd_vel automatically once
+        both a gamepad and a rosbridge connection are present - no manual
+        "enable driving" step. On disconnect, publishes one zero-velocity
+        Twist as a fail-safe stop rather than leaving the rover at its last
+        command forever, then stops publishing until the gamepad returns."""
+        connected = self.gamepad_reader.poll()
+        rosbridge_ready = self.ros_client is not None and self.ros_client.is_connected
+
+        if connected:
+            self._gamepad_was_connected = True
+            if rosbridge_ready:
+                linear_x, linear_y, angular_z = self.gamepad_reader.read_twist()
+                self.ros_client.publish_cmd_vel(linear_x, linear_y, angular_z)
+        elif self._gamepad_was_connected:
+            self._gamepad_was_connected = False
+            if rosbridge_ready:
+                self.ros_client.publish_cmd_vel(0.0, 0.0, 0.0)
 
     def _on_connect_clicked(self) -> None:
         host = self.host_input.text().strip()

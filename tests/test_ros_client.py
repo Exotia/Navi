@@ -9,10 +9,18 @@ class FakeTopic:
         self.name = name
         self.msg_type = msg_type
         self.callback = None
+        self.published_messages = []
         FakeTopic.instances.append(self)
 
     def subscribe(self, callback):
         self.callback = callback
+
+    def publish(self, message):
+        self.published_messages.append(message)
+
+
+def fake_message_factory(data):
+    return data
 
 
 class FakeRos:
@@ -54,7 +62,8 @@ def make_client(qtbot):
     FakeRos.instances.clear()
     FakeTopic.instances.clear()
     return RosBridgeClient(host="localhost", port=9090,
-                            ros_factory=FakeRos, topic_factory=FakeTopic)
+                            ros_factory=FakeRos, topic_factory=FakeTopic,
+                            message_factory=fake_message_factory)
 
 
 def test_connect_starts_ros_and_emits_connection_changed(qtbot):
@@ -114,3 +123,28 @@ def test_poll_nodes_emits_nodes_received_signal(qtbot):
         ros.get_nodes_callback(["/cmd_vel_bridge", "/rosbridge_websocket"])
 
     assert blocker.args == [["/cmd_vel_bridge", "/rosbridge_websocket"]]
+
+
+def test_publish_cmd_vel_before_subscribe_does_nothing(qtbot):
+    client = make_client(qtbot)
+    client.connect()
+
+    # subscribe_cmd_vel() was never called, so there's no topic to publish
+    # on yet - this must not raise.
+    client.publish_cmd_vel(0.4, -0.05, 0.1)
+
+    assert FakeTopic.instances == []
+
+
+def test_publish_cmd_vel_publishes_twist_on_the_subscribed_topic(qtbot):
+    client = make_client(qtbot)
+    client.connect()
+    client.subscribe_cmd_vel()
+    topic = FakeTopic.instances[-1]
+
+    client.publish_cmd_vel(0.4, -0.05, 0.1)
+
+    assert topic.published_messages == [{
+        "linear": {"x": 0.4, "y": -0.05, "z": 0.0},
+        "angular": {"x": 0.0, "y": 0.0, "z": 0.1},
+    }]
