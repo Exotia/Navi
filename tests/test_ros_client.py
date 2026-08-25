@@ -119,8 +119,12 @@ def test_poll_nodes_emits_nodes_received_signal(qtbot):
     client.poll_nodes()
     ros = FakeRos.instances[-1]
 
+    # roslibpy's real get_nodes callback receives a ServiceResponse - a
+    # dict-like wrapper of the rosapi/Nodes response, i.e. {"nodes": [...]}
+    # - not a bare list. A plain dict here is enough to exercise the same
+    # __getitem__ access poll_nodes() actually does.
     with qtbot.waitSignal(client.signals.nodes_received, timeout=1000) as blocker:
-        ros.get_nodes_callback(["/cmd_vel_bridge", "/rosbridge_websocket"])
+        ros.get_nodes_callback({"nodes": ["/cmd_vel_bridge", "/rosbridge_websocket"]})
 
     assert blocker.args == [["/cmd_vel_bridge", "/rosbridge_websocket"]]
 

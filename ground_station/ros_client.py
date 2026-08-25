@@ -48,7 +48,12 @@ class RosBridgeClient:
         self._manual_twist_topic.subscribe(lambda msg: self.signals.twist_received.emit(msg))
 
     def poll_nodes(self) -> None:
-        self._ros.get_nodes(lambda nodes: self.signals.nodes_received.emit(nodes))
+        # roslibpy's get_nodes callback receives a ServiceResponse (a
+        # dict-like wrapper around the rosapi/Nodes service response, i.e.
+        # {"nodes": [...]}) - NOT the node list itself. Unwrap it here so
+        # nodes_received always carries a plain list, matching its Signal(list)
+        # declaration.
+        self._ros.get_nodes(lambda response: self.signals.nodes_received.emit(list(response["nodes"])))
 
     def publish_manual_twist(self, linear_x: float, linear_y: float, angular_z: float) -> None:
         """Publishes on /manual_twist - requires subscribe_manual_twist() to
