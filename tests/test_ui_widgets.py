@@ -2,6 +2,7 @@ from ground_station.models import DriveState, NodeStatus
 from ground_station.ui.drive_card import DriveCard
 from ground_station.ui.drive_detail_page import DriveDetailPage
 from ground_station.ui.node_list_widget import NodeListWidget
+from ground_station.ui.dashboard_page import DashboardPage
 
 
 def test_drive_card_shows_dash_before_any_data(qtbot):
@@ -77,3 +78,19 @@ def test_drive_detail_page_emits_back_requested(qtbot):
 
     with qtbot.waitSignal(page.back_requested, timeout=1000):
         page.back_link.mousePressEvent(None)
+
+
+def test_dashboard_page_exposes_drive_card_and_node_list(qtbot):
+    page = DashboardPage()
+    qtbot.addWidget(page)
+
+    assert isinstance(page.drive_card, DriveCard)
+    assert isinstance(page.node_list, NodeListWidget)
+
+
+def test_dashboard_page_reemits_drive_details_requested(qtbot):
+    page = DashboardPage()
+    qtbot.addWidget(page)
+
+    with qtbot.waitSignal(page.drive_details_requested, timeout=1000):
+        page.drive_card.details_requested.emit()
