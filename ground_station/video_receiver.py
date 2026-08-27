@@ -28,12 +28,15 @@ import subprocess
 
 
 def build_receive_pipeline(port: int, width: int, height: int) -> list[str]:
-    """width/height aren't baked into a caps filter here - the decoder
-    already negotiates to whatever resolution the sender encoded, and a
-    caps mismatch there would drop the stream entirely rather than
-    degrade gracefully. They're taken as parameters anyway so the
-    receiver's read side (frame_size) and the pipeline's build side share
-    one call site instead of two constants that can drift apart."""
+    """width/height are pinned into the caps filter, not left open. The
+    read side slices exactly width * height * 3 bytes per frame off the
+    pipe using the numbers passed to VideoReceiver's constructor, not
+    numbers observed from the stream - so a sender that emits a different
+    size needs to fail the negotiation loudly (pipeline dies, is_running
+    goes false, the panel reports a dead stream) rather than emit frames
+    at the wrong stride, which read_frame would silently slice into torn,
+    progressively desynchronized images. A refused pipeline is
+    diagnosable; a corrupted picture over a lossy field link is not."""
     return [
         "gst-launch-1.0", "-q",
         "udpsrc", f"port={port}",
@@ -42,7 +45,7 @@ def build_receive_pipeline(port: int, width: int, height: int) -> list[str]:
         "!", "rtph264depay",
         "!", "avdec_h264",
         "!", "videoconvert",
-        "!", "video/x-raw,format=RGB",
+        "!", f"video/x-raw,format=RGB,width={width},height={height}",
         "!", "fdsink", "fd=1",
     ]
 

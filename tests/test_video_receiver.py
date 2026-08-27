@@ -56,7 +56,10 @@ def test_pipeline_emits_raw_rgb_to_stdout():
     # sink must be raw RGB on fd 1 and nothing else.
     argv = build_receive_pipeline(5600, 672, 376)
 
-    assert "video/x-raw,format=RGB" in argv
+    caps_tokens = [part for part in argv if part.startswith("video/x-raw,format=RGB")]
+    assert len(caps_tokens) == 1
+    assert "width=672" in caps_tokens[0]
+    assert "height=376" in caps_tokens[0]
     assert "fdsink" in argv
     assert "fd=1" in argv
 
