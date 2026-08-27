@@ -42,12 +42,6 @@ def main() -> None:
         # connection attempt can block this thread for up to ~10s.
         QTimer.singleShot(0, lambda: window._connect_to(args.host, args.port))
 
-    if args.host:
-        # Deferred to after app.exec() starts the event loop (via
-        # singleShot(0, ...)) so the window has already painted before the
-        # connection attempt can block this thread for up to ~10s.
-        QTimer.singleShot(0, lambda: window._connect_to(args.host, args.port))
-
     sys.exit(app.exec())
 
 
