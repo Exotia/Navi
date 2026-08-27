@@ -2,6 +2,8 @@
 signals so roslibpy's background-thread callbacks are safely marshaled to
 the Qt GUI thread by Qt's own queued-connection mechanism."""
 
+import json
+
 import roslibpy
 from PySide6.QtCore import QObject, Signal
 
@@ -10,6 +12,7 @@ class RosSignals(QObject):
     twist_received = Signal(dict)
     nodes_received = Signal(list)
     connection_changed = Signal(bool)
+    video_status_received = Signal(dict)
 
 
 class RosBridgeClient:
@@ -21,6 +24,8 @@ class RosBridgeClient:
         self._message_factory = message_factory
         self._ros = ros_factory(host=host, port=port)
         self._manual_twist_topic = None
+        self._video_request_topic = None
+        self._video_status_topic = None
 
     def connect(self) -> None:
         self._ros.on_ready(lambda: self.signals.connection_changed.emit(True))
@@ -63,4 +68,41 @@ class RosBridgeClient:
         self._manual_twist_topic.publish(self._message_factory({
             "linear": {"x": linear_x, "y": linear_y, "z": 0.0},
             "angular": {"x": 0.0, "y": 0.0, "z": angular_z},
+        }))
+
+    def subscribe_video_status(self, topic_name: str = "/video_status") -> None:
+        """The rover's own account of the stream: stopped, starting,
+        streaming, or failed. Distinct from whether frames are actually
+        arriving, which only the receiver can tell - a rover reporting
+        'streaming' while no packets land is the signature of a blocked
+        UDP port."""
+        topic = self._topic_factory(self._ros, topic_name, "std_msgs/String")
+        topic.subscribe(lambda msg: self.signals.video_status_received.emit(
+            self._parse_status(msg.get("data", ""))))
+        self._video_status_topic = topic
+
+    @staticmethod
+    def _parse_status(payload: str) -> dict:
+        try:
+            status = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            return {"state": "failed", "detail": f"bad status JSON: {exc}"}
+        if not isinstance(status, dict):
+            return {"state": "failed", "detail": "status was not a JSON object"}
+        return {"state": status.get("state", "failed"),
+                "detail": status.get("detail", "")}
+
+    def publish_video_request(self, enable: bool, host: str, port: int, width: int,
+                              height: int, fps: int, bitrate_kbps: int) -> None:
+        """Asks the rover to start or stop streaming to host:port. The host
+        is ours, not the rover's: the rover is the server side of rosbridge
+        and has no other way to learn where we are."""
+        if self._video_request_topic is None:
+            self._video_request_topic = self._topic_factory(
+                self._ros, "/video_request", "std_msgs/String")
+        self._video_request_topic.publish(self._message_factory({
+            "data": json.dumps({
+                "enable": enable, "host": host, "port": port, "width": width,
+                "height": height, "fps": fps, "bitrate_kbps": bitrate_kbps,
+            }),
         }))
