@@ -85,7 +85,7 @@ class RosBridgeClient:
     def _parse_status(payload: str) -> dict:
         try:
             status = json.loads(payload)
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, TypeError) as exc:
             return {"state": "failed", "detail": f"bad status JSON: {exc}"}
         if not isinstance(status, dict):
             return {"state": "failed", "detail": "status was not a JSON object"}

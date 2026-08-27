@@ -184,6 +184,25 @@ def test_subscribe_video_status_reports_malformed_payloads_instead_of_raising():
     assert "JSON" in received[0]["detail"]
 
 
+def test_subscribe_video_status_reports_non_string_data_instead_of_raising():
+    # rosbridge delivers whatever the wire carries; a peer (or a bug) could
+    # send a std_msgs/String with a non-string "data" field. json.loads on a
+    # non-string raises TypeError, not JSONDecodeError - this must not
+    # propagate out of the roslibpy subscription callback.
+    FakeTopic.instances.clear()
+    client = RosBridgeClient("host", 9090, ros_factory=FakeRos,
+                             topic_factory=FakeTopic,
+                             message_factory=fake_message_factory)
+    received = []
+    client.signals.video_status_received.connect(received.append)
+
+    client.subscribe_video_status()
+    FakeTopic.instances[-1].callback({"data": 5})
+
+    assert received[0]["state"] == "failed"
+    assert received[0]["detail"]
+
+
 def test_publish_video_request_sends_json_on_the_request_topic():
     import json
 
