@@ -114,23 +114,34 @@ and `detail` (free text, carrying the GStreamer error when relevant).
 Owns the receive pipeline. This is a plain Python module, not a ROS node —
 the laptop has no ROS 2 installed, which is the reason rosbridge exists.
 
+The pipeline runs as a `gst-launch-1.0` subprocess that writes raw RGB frames
+to its stdout:
+
 ```
-udpsrc port=<port> caps=application/x-rtp,media=video,encoding-name=H264,payload=96
+gst-launch-1.0 -q
+  udpsrc port=<port> caps=application/x-rtp,media=video,encoding-name=H264,payload=96
   ! rtpjitterbuffer latency=100
   ! rtph264depay
   ! avdec_h264
   ! videoconvert
-  ! <Qt sink>
+  ! video/x-raw,format=RGB
+  ! fdsink fd=1
 ```
 
-It runs in the GUI process, owned by the panel. It also has a `__main__` so
-it can be run standalone against a test stream with no rover and no GUI:
-`python -m ground_station.video_receiver --port 5600`.
+Python reads exactly `width * height * 3` bytes per frame off the pipe and
+wraps each one in a `QImage` for the panel to paint.
 
-A separate process was considered and rejected: it would have to either
-render into the panel's window handle or ship frames over a socket, and both
-are more machinery than this feature justifies. Revisit only if decoder
-crashes turn out to take the GUI down in practice.
+The subprocess is not an implementation detail to be tidied away later; it is
+the reason this design needs no new Python dependency. PyGObject (`gi`) is
+absent from the project virtualenv, which is built with
+`include-system-site-packages = false`, so an in-process pipeline would mean
+either compiling PyGObject or opening the venv to system packages. Running
+`gst-launch-1.0` needs neither. It also isolates the decoder: a decoder crash
+on a corrupt stream kills the subprocess, not the ground station, and the
+panel restarts it.
+
+The module has a `__main__` so the receive path can be exercised with no
+rover and no GUI: `python -m ground_station.video_receiver --port 5600`.
 
 ### `VideoPanel` (`ground_station/ui/`)
 
