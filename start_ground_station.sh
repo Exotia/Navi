@@ -53,7 +53,14 @@ own_pids() {
     local pid=$$
     while [ -n "$pid" ] && [ "$pid" -gt 1 ]; do
         echo "$pid"
-        pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+        # || true is load-bearing: under `set -euo pipefail` a failing
+        # ps makes the whole pipeline return 1, a bare assignment
+        # inherits that status, and set -e kills the subshell - so
+        # `mine=$(own_pids)` in kill_stale below fails inside an if
+        # body where set -e is not suppressed, and the launcher exits
+        # instantly with no output at all (the 2>/dev/null means not
+        # even a stderr crumb). Reproduced; one token prevents it.
+        pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)
     done
 }
 
