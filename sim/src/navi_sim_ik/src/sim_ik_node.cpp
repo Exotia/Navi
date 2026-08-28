@@ -1,5 +1,4 @@
 #include <array>
-#include <chrono>
 #include <cmath>
 #include <memory>
 #include <sstream>
@@ -8,11 +7,10 @@
 #include "geometry_msgs/msg/twist.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "navi_sim_ik/sim_ik_stepper.hpp"
+#include "rclcpp/create_timer.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "trajectory_msgs/msg/joint_trajectory.hpp"
-
-using namespace std::chrono_literals;
 
 namespace
 {
@@ -37,6 +35,23 @@ constexpr double kTimestepSeconds = 0.06;
 // names the odometry message's child frame, since it is the frame whose
 // pose that odometry describes.
 constexpr char kBaseFootprintFrameId[] = "base_footprint";
+
+// How long /manual_twist may go quiet before the command is zeroed. Measured
+// against a steady (wall) clock - see the comment at the point of use.
+constexpr double kTwistStaleAfterRealSeconds = 1.0;
+
+// The pose on /sim_odom is dead reckoning: it is integrated from the twist
+// the IK was *commanded*, with no localisation, no wheel encoders and no
+// terrain. It drifts without bound, and the vendored controller's 0.48 deg
+// of steady-state toe alone yaws it about 0.0102 rad/s while driving
+// dead straight. An all-zero covariance is the REP-105 way of claiming
+// perfect certainty, which would invite a future consumer (an EKF, or
+// whatever localisation lands here) to fuse this as ground truth - exactly
+// the mistake the panel's "DEAD RECKONING, NO LOCALISATION" marker exists
+// to stop a human making. This is the same statement addressed to a machine
+// reader: large, deliberately uninformative variances. Not a calibrated
+// number - there is nothing to calibrate against until localisation exists.
+constexpr double kDeadReckoningVariance = 1.0e6;
 }  // namespace
 
 /// Drives the simulated rover from the same /manual_twist the real one gets.
@@ -57,7 +72,11 @@ public:
         vx_ = msg->linear.x;
         vy_ = msg->linear.y;
         yaw_rate_ = msg->angular.z;
-        last_twist_ = now();
+        // Deliberately the STEADY clock, not this node's ROS clock: the
+        // staleness guard below asks "is the link to the rover still
+        // there?", which is a wall-clock question. See tick().
+        last_twist_ = steady_clock_.now();
+        twist_ever_arrived_ = true;
       });
 
     joints_pub_ = create_publisher<trajectory_msgs::msg::JointTrajectory>(
@@ -72,9 +91,28 @@ public:
       navi_sim_ik::WHEEL_CORNERS[0], navi_sim_ik::WHEEL_CORNERS[1],
       navi_sim_ik::WHEEL_CORNERS[2], navi_sim_ik::WHEEL_CORNERS[3]);
 
-    const auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
-      std::chrono::duration<double>(kTimestepSeconds));
-    timer_ = create_wall_timer(period, [this] {tick();});
+    // Deliberately the node's OWN clock, not a wall timer. With
+    // use_sim_time this is the simulation clock, which is the clock every
+    // consumer of this node's output already runs on: planar_move
+    // integrates /sim_cmd_vel over sim time, joint_pose_trajectory applies
+    // positions against the sim clock, and the chase camera's update_rate
+    // is sim time too. create_wall_timer is the steady clock
+    // unconditionally and use_sim_time does not touch it, so under a
+    // real-time factor below 1 the node would tick 1/RTF times too often:
+    // /sim_odom would report several times the distance Gazebo actually
+    // moved the body, and the wheel roll angle - integrated here, applied
+    // as a sim-time position - would spin visibly faster than the rover
+    // travels. Ticking on this clock makes kTimestepSeconds mean the same
+    // thing to this node as it means to Gazebo. If the simulation runs
+    // slower than real time the operator sees slow motion, which is honest
+    // and internally consistent, rather than a picture that disagrees with
+    // its own odometry.
+    //
+    // Do NOT "tidy" this and the steady clock in tick() into one clock.
+    // They answer different questions and each choice is a fixed bug.
+    timer_ = rclcpp::create_timer(
+      this, get_clock(), rclcpp::Duration::from_seconds(kTimestepSeconds),
+      [this] {tick();});
   }
 
 private:
@@ -84,16 +122,51 @@ private:
     // to a stop rather than continuing to drive on a stale command: a
     // simulation that keeps moving after the rover stopped talking is worse
     // than one that freezes, because it looks alive.
-    const bool stale = (now() - last_twist_) > rclcpp::Duration::from_seconds(1.0);
+    //
+    // The age is measured on a STEADY clock while everything this node
+    // integrates runs on the node clock above. That asymmetry is
+    // deliberate. This check is not part of the kinematics; it detects that
+    // a physical link to another machine has gone away, which happens in
+    // real seconds. At a real-time factor of ~0.25 a one-second *sim-time*
+    // window is over four real seconds of continued driving on a command
+    // the rover stopped sending, which is most of the guard's point gone.
+    // Do NOT collapse the two clocks: one clock here reintroduces either
+    // the odometry/physics mismatch (wall timer) or a guard that stretches
+    // with the real-time factor (sim-time age).
+    const bool stale =
+      !twist_ever_arrived_ ||
+      (steady_clock_.now() - last_twist_) >
+      rclcpp::Duration::from_seconds(kTwistStaleAfterRealSeconds);
     if (stale) {
-      if (!reported_stale_) {
-        RCLCPP_WARN(get_logger(), "/manual_twist is stale - is the rover reachable?");
-        reported_stale_ = true;
+      if (flow_ != TwistFlow::Stale) {
+        // "Never arrived" and "stopped arriving" are different facts and
+        // are not reported in the same words: at startup, before /clock
+        // even exists, the node used to announce that the topic was
+        // "flowing again" when not a single message had ever landed.
+        if (flow_ == TwistFlow::NeverArrived) {
+          RCLCPP_WARN(
+            get_logger(),
+            "no /manual_twist has arrived yet - is the rover reachable?");
+        } else {
+          RCLCPP_WARN(get_logger(), "/manual_twist is stale - is the rover reachable?");
+        }
+        flow_ = TwistFlow::Stale;
       }
       vx_ = vy_ = yaw_rate_ = 0.0;
-    } else if (reported_stale_) {
-      RCLCPP_INFO(get_logger(), "/manual_twist is flowing again");
-      reported_stale_ = false;
+    } else if (flow_ != TwistFlow::Flowing) {
+      // "again" only if it really has flowed before. flow_ alone cannot
+      // answer that: the very first tick almost always runs before the
+      // first twist arrives, so flow_ has already moved NeverArrived ->
+      // Stale by the time the first message lands, and keying the wording
+      // off it would report the rover's first ever command as a recovery.
+      // Observed in the launch log before this line existed.
+      if (ever_flowed_) {
+        RCLCPP_INFO(get_logger(), "/manual_twist is flowing again");
+      } else {
+        RCLCPP_INFO(get_logger(), "/manual_twist is flowing");
+      }
+      flow_ = TwistFlow::Flowing;
+      ever_flowed_ = true;
     }
 
     stepper_.step(vx_, vy_, yaw_rate_);
@@ -149,6 +222,15 @@ private:
     odom.pose.pose.position.y = stepper_.pose().y;
     odom.pose.pose.orientation.z = std::sin(stepper_.pose().yaw / 2.0);
     odom.pose.pose.orientation.w = std::cos(stepper_.pose().yaw / 2.0);
+    // See kDeadReckoningVariance: an all-zero covariance asserts certainty,
+    // and this pose has none to assert. The 6x6 row-major diagonal is
+    // (x, y, z, roll, pitch, yaw). The twist covariance is set the same
+    // way even though odom.twist is left at zero, so a consumer cannot
+    // read that unpopulated zero as a confidently measured standstill.
+    for (int i = 0; i < 6; ++i) {
+      odom.pose.covariance[i * 6 + i] = kDeadReckoningVariance;
+      odom.twist.covariance[i * 6 + i] = kDeadReckoningVariance;
+    }
     odom_pub_->publish(odom);
   }
 
@@ -169,8 +251,21 @@ private:
   navi_sim_ik::SimIkStepper stepper_;
   double vx_{0.0}, vy_{0.0}, yaw_rate_{0.0};
   std::array<double, 4> wheel_angle_{{0.0, 0.0, 0.0, 0.0}};
-  rclcpp::Time last_twist_{0, 0, RCL_ROS_TIME};
-  bool reported_stale_{true};
+  // Steady, so the staleness window is real seconds regardless of the
+  // simulation's real-time factor. last_twist_ carries the same clock type;
+  // rclcpp throws on subtracting times from different clocks, which is the
+  // compiler-adjacent guard against the two being mixed up later.
+  rclcpp::Clock steady_clock_{RCL_STEADY_TIME};
+  rclcpp::Time last_twist_{0, 0, RCL_STEADY_TIME};
+  bool twist_ever_arrived_{false};
+
+  // Three states, not a bool: "nothing has ever arrived" must not be
+  // reported in the words used for "it came back".
+  enum class TwistFlow { NeverArrived, Flowing, Stale };
+  TwistFlow flow_{TwistFlow::NeverArrived};
+  // Separate from flow_ because flow_ forgets: it passes through Stale on
+  // the first tick, before anything has ever arrived. See tick().
+  bool ever_flowed_{false};
 
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr twist_sub_;
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr joints_pub_;
