@@ -152,3 +152,87 @@ def test_publish_manual_twist_publishes_twist_on_the_subscribed_topic(qtbot):
         "linear": {"x": 0.4, "y": -0.05, "z": 0.0},
         "angular": {"x": 0.0, "y": 0.0, "z": 0.1},
     }]
+
+
+def test_subscribe_video_status_emits_parsed_json():
+    FakeTopic.instances.clear()
+    client = RosBridgeClient("host", 9090, ros_factory=FakeRos,
+                             topic_factory=FakeTopic,
+                             message_factory=fake_message_factory)
+    received = []
+    client.signals.video_status_received.connect(received.append)
+
+    client.subscribe_video_status()
+    topic = FakeTopic.instances[-1]
+    topic.callback({"data": '{"state": "streaming", "detail": "10.0.0.5:5600"}'})
+
+    assert received == [{"state": "streaming", "detail": "10.0.0.5:5600"}]
+
+
+def test_subscribe_video_status_reports_malformed_payloads_instead_of_raising():
+    FakeTopic.instances.clear()
+    client = RosBridgeClient("host", 9090, ros_factory=FakeRos,
+                             topic_factory=FakeTopic,
+                             message_factory=fake_message_factory)
+    received = []
+    client.signals.video_status_received.connect(received.append)
+
+    client.subscribe_video_status()
+    FakeTopic.instances[-1].callback({"data": "{not json"})
+
+    assert received[0]["state"] == "failed"
+    assert "JSON" in received[0]["detail"]
+
+
+def test_subscribe_video_status_reports_non_string_data_instead_of_raising():
+    # rosbridge delivers whatever the wire carries; a peer (or a bug) could
+    # send a std_msgs/String with a non-string "data" field. json.loads on a
+    # non-string raises TypeError, not JSONDecodeError - this must not
+    # propagate out of the roslibpy subscription callback.
+    FakeTopic.instances.clear()
+    client = RosBridgeClient("host", 9090, ros_factory=FakeRos,
+                             topic_factory=FakeTopic,
+                             message_factory=fake_message_factory)
+    received = []
+    client.signals.video_status_received.connect(received.append)
+
+    client.subscribe_video_status()
+    FakeTopic.instances[-1].callback({"data": 5})
+
+    assert received[0]["state"] == "failed"
+    assert received[0]["detail"]
+
+
+def test_publish_video_request_sends_json_on_the_request_topic():
+    import json
+
+    FakeTopic.instances.clear()
+    client = RosBridgeClient("host", 9090, ros_factory=FakeRos,
+                             topic_factory=FakeTopic,
+                             message_factory=fake_message_factory)
+
+    client.publish_video_request(enable=True, host="192.168.178.101", port=5600,
+                                 width=1344, height=376, fps=30, bitrate_kbps=800)
+
+    topic = FakeTopic.instances[-1]
+    assert topic.name == "/video_request"
+    assert topic.msg_type == "std_msgs/String"
+    payload = json.loads(topic.published_messages[-1]["data"])
+    assert payload == {"enable": True, "host": "192.168.178.101", "port": 5600,
+                       "width": 1344, "height": 376, "fps": 30, "bitrate_kbps": 800}
+
+
+def test_publish_video_request_reuses_one_topic_across_calls():
+    FakeTopic.instances.clear()
+    client = RosBridgeClient("host", 9090, ros_factory=FakeRos,
+                             topic_factory=FakeTopic,
+                             message_factory=fake_message_factory)
+
+    client.publish_video_request(enable=True, host="10.0.0.5", port=5600,
+                                 width=1344, height=376, fps=30, bitrate_kbps=800)
+    client.publish_video_request(enable=False, host="10.0.0.5", port=5600,
+                                 width=1344, height=376, fps=30, bitrate_kbps=800)
+
+    request_topics = [t for t in FakeTopic.instances if t.name == "/video_request"]
+    assert len(request_topics) == 1
+    assert len(request_topics[0].published_messages) == 2
