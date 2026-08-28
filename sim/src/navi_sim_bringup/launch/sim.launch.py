@@ -62,6 +62,7 @@ def _world_with_mesh(context, *args, **kwargs):
         Node(package="navi_sim_ik", executable="sim_ik_node", output="screen",
              parameters=[{"use_sim_time": True}],
              remappings=[("/manual_twist", twist_topic)]),
+        Node(package="navi_sim_video", executable="sim_video_sender", output="screen"),
     ]
 
 
