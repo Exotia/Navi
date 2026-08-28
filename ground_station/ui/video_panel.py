@@ -125,14 +125,34 @@ class VideoPanel(QWidget):
                 f"color: {theme.TEXT_DIM}; font-family: {theme.MONO_FONT_FAMILY}; border: none;")
             return
 
+        # A rover failure is worth surfacing immediately, even before this
+        # panel starts polling locally - there is nothing to corroborate
+        # and nothing to wait for.
+        if self._rover_state == "failed":
+            self.status_label.setText(f"FAILED - {self._rover_detail}")
+            self.status_label.setStyleSheet(
+                f"color: {theme.ACCENT}; font-family: {theme.MONO_FONT_FAMILY}; border: none;")
+            return
+
+        if not self._streaming:
+            # The rover reports "streaming" or "starting" but this panel
+            # has not (yet) been told to poll for frames - _poll_frame
+            # never runs, so _last_frame_at can never advance and the
+            # starving check below would never fire. Rendering the rover's
+            # word alone here would be exactly the conflation this panel
+            # exists to avoid: a claim with no local corroboration must
+            # never read as plain success.
+            self.status_label.setText(
+                f"rover: {self._rover_state} (not receiving locally)")
+            self.status_label.setStyleSheet(
+                f"color: {theme.TEXT_DIM}; font-family: {theme.MONO_FONT_FAMILY}; border: none;")
+            return
+
         now = monotonic() if now is None else now
         starving = (self._last_frame_at is not None
                     and now - self._last_frame_at > self.no_frame_after_seconds)
         if starving and self._rover_state == "streaming":
             text = "NO FRAMES - rover streaming, nothing arriving (UDP blocked?)"
-            color = theme.ACCENT
-        elif self._rover_state == "failed":
-            text = f"FAILED - {self._rover_detail}"
             color = theme.ACCENT
         elif self._rover_state == "streaming":
             text = f"STREAMING {self._rover_detail}"

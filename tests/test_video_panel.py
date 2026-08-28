@@ -86,3 +86,17 @@ def test_panel_clears_no_frames_once_a_frame_arrives(qtbot):
 
     assert "NO FRAMES" not in panel.status_label.text().upper()
     assert panel.image_label.pixmap() is not None
+
+
+def test_apply_status_streaming_before_local_start_is_not_plain_success(qtbot):
+    # The rover's word alone is not enough: until this panel is actually
+    # polling for frames, "streaming" must not render as healthy success,
+    # since there is no local evidence yet to corroborate it.
+    panel = VideoPanel(receiver=FakeReceiver())
+    qtbot.addWidget(panel)
+
+    panel.apply_status({"state": "streaming", "detail": "10.0.0.5:5600"})
+
+    text = panel.status_label.text().upper()
+    assert "NOT RECEIVING" in text
+    assert not text.startswith("STREAMING ")
