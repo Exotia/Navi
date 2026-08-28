@@ -127,6 +127,14 @@ class VideoPanel(QWidget):
     def apply_status(self, status: dict) -> None:
         self._rover_state = status.get("state", "failed")
         self._rover_detail = status.get("detail", "")
+        if self._rover_state == "failed" and not self._streaming:
+            # A rejection (e.g. "not connected to rosbridge", "no route to
+            # the rover") happens before set_streaming is ever called, so
+            # without this _toggle_requested would stay stuck at whatever
+            # the triggering click just emitted. The operator's next click
+            # is a retry, not a reversal - it must emit the same intent
+            # again, not its opposite.
+            self._toggle_requested = False
         self._refresh_status()
 
     def _poll_frame(self, now: float | None = None) -> None:

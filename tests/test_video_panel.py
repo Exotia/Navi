@@ -51,6 +51,24 @@ def test_set_streaming_starts_and_stops_the_receiver(qtbot):
     assert receiver.stopped
 
 
+def test_two_clicks_after_a_rejected_enable_both_emit_true(qtbot):
+    # Important 2: click 1 emits True; a rejection (e.g. "not connected to
+    # rosbridge") arrives via apply_status before set_streaming is ever
+    # called, so _toggle_requested must not stay stuck at True - otherwise
+    # click 2 (the operator's retry) would emit False, silently publishing
+    # a stop on a flaky link.
+    panel = VideoPanel(receiver=FakeReceiver())
+    qtbot.addWidget(panel)
+    requests = []
+    panel.stream_requested.connect(requests.append)
+
+    panel.toggle_button.click()
+    panel.apply_status({"state": "failed", "detail": "not connected to rosbridge"})
+    panel.toggle_button.click()
+
+    assert requests == [True, True]
+
+
 def test_apply_status_shows_the_rover_reported_state(qtbot):
     panel = VideoPanel(receiver=FakeReceiver())
     qtbot.addWidget(panel)
