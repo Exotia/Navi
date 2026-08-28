@@ -10,6 +10,7 @@
 #   ./start_navi.sh --no-bridge  no rosbridge (one is already running)
 #   ./start_navi.sh --no-video   no video_sender
 #   ./start_navi.sh --port 9091  serve rosbridge on a different port
+#   ./start_navi.sh --keep-stale don't clean up a previous run first
 #
 # Ctrl+C stops everything. The laptop counterpart is start_ground_station.sh
 # in the Navi repo.
@@ -22,15 +23,119 @@ WS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PORT=9090
 START_BRIDGE=1
 START_VIDEO=1
+CLEAN_STALE=1
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-bridge) START_BRIDGE=0; shift ;;
         --no-video) START_VIDEO=0; shift ;;
+        --keep-stale) CLEAN_STALE=0; shift ;;
         --port) PORT="$2"; shift 2 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
+
+# ---------------------------------------------------------------------------
+# Clean up whatever a previous run left behind.
+#
+# A run that is killed rather than stopped (a closed terminal, a dropped ssh
+# session, SIGKILL) leaves its nodes orphaned. The one that actually bites is
+# rosbridge: it keeps port 9090, the next run's bridge logs "Address already
+# in use" and retries forever, and because "ros2 launch" stays alive while it
+# retries, the old health check saw a live process and reported success. The
+# ground station then connected to the *previous* run's bridge without
+# anything saying so. A leftover gst-launch holding /dev/video0 fails the
+# next video request the same silent way.
+# ---------------------------------------------------------------------------
+
+# Every pid from here up to init. pgrep -f matches on the whole command line,
+# so an ssh wrapper like `bash -c '.../start_navi.sh ...'` matches the
+# patterns below - killing those would kill the shell running this script.
+own_pids() {
+    local pid=$$
+    while [ -n "$pid" ] && [ "$pid" -gt 1 ]; do
+        echo "$pid"
+        pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    done
+}
+
+kill_stale() {
+    local description="$1" pattern="$2"
+    local mine victims=()
+    mine=$(own_pids)
+    for pid in $(pgrep -f "$pattern" 2>/dev/null || true); do
+        grep -qx "$pid" <<< "$mine" && continue
+        victims+=("$pid")
+    done
+    [ ${#victims[@]} -eq 0 ] && return 0
+    echo "cleaning up stale $description: ${victims[*]}"
+    kill "${victims[@]}" 2>/dev/null || true
+    sleep 1
+    for pid in "${victims[@]}"; do
+        kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+    done
+}
+
+# Empty when nothing holds the port. The `|| true` matters: under
+# `set -o pipefail` the grep in this pipeline returns 1 when the port is
+# free, which would abort the whole script with no message at all.
+port_holder() {
+    ss -ltnpH "sport = :$PORT" 2>/dev/null \
+        | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2 || true
+}
+
+# Whatever is sitting on the rosbridge port. Only killed when it really is a
+# rosbridge - anything else on that port is something this script does not
+# understand, and guessing would be worse than stopping.
+#
+# This loops because a rosbridge that failed to bind retries every 5s: kill
+# the holder and a retrying one takes the port a moment later. Killing the
+# "ros2 launch" wrappers first (above) stops the retries at the source, and
+# the loop covers whatever slips through in between.
+clear_bridge_port() {
+    local holder
+    for _ in 1 2 3 4 5; do
+        holder=$(port_holder)
+        [ -z "$holder" ] && return 0
+        if ! ps -o args= -p "$holder" 2>/dev/null | grep -q rosbridge; then
+            echo "error: port $PORT is held by pid $holder, which is not a rosbridge:" >&2
+            ps -o pid,args= -p "$holder" >&2
+            echo "       stop it yourself, or run with --port to use another port" >&2
+            exit 1
+        fi
+        echo "cleaning up stale rosbridge on port $PORT: $holder"
+        kill "$holder" 2>/dev/null || true
+        for _ in 1 2 3; do
+            kill -0 "$holder" 2>/dev/null || break
+            sleep 1
+        done
+        kill -0 "$holder" 2>/dev/null && kill -9 "$holder" 2>/dev/null || true
+        sleep 1
+    done
+    if [ -n "$(port_holder)" ]; then
+        echo "error: port $PORT keeps being retaken - check: ss -ltnp | grep $PORT" >&2
+        exit 1
+    fi
+}
+
+if [ "$CLEAN_STALE" -eq 1 ]; then
+    kill_stale "navi_teleop nodes" "navi_teleop/(manual_twist_listener|video_sender)"
+    kill_stale "ros2 run wrappers" "ros2 run navi_teleop"
+    # The pipeline video_sender spawns. Matched on the elements it always
+    # contains, so an unrelated gst-launch on this machine is left alone.
+    kill_stale "video pipelines" "gst-launch-1\.0.*v4l2src.*udpsink"
+    # Deliberately no pattern for start_navi.sh itself. It would match this
+    # very process (and any ssh wrapper whose command line contains the
+    # script's path), and there is nothing to gain: a leftover instance
+    # whose nodes have just been killed runs its own exit trap and stops.
+    if [ "$START_BRIDGE" -eq 1 ]; then
+        # Before the port itself: these are the launches this script starts,
+        # and a stale one retries the bind every 5s, so it would simply
+        # retake the port the moment the current holder is killed.
+        kill_stale "rosbridge launches" "ros2 launch rosbridge_server"
+        clear_bridge_port
+    fi
+fi
 
 source /opt/ros/humble/setup.bash
 
@@ -62,11 +167,29 @@ if [ "$START_BRIDGE" -eq 1 ]; then
     ros2 launch rosbridge_server rosbridge_websocket_launch.xml port:="$PORT" &
     BRIDGE_PID=$!
     BACKGROUND_PIDS+=("$BRIDGE_PID")
-    sleep 2
-    if ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
-        echo "error: rosbridge_server exited immediately - is port $PORT already in use?" >&2
+
+    # Wait for the port to actually accept a connection, not just for the
+    # launch process to still exist. rosbridge retries a failed bind every
+    # 5s forever, and "ros2 launch" stays alive throughout - so a liveness
+    # check alone reports success while nothing is being served.
+    BRIDGE_UP=0
+    for _ in $(seq 1 15); do
+        if ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
+            echo "error: rosbridge_server exited during startup" >&2
+            exit 1
+        fi
+        if timeout 1 bash -c "</dev/tcp/127.0.0.1/$PORT" 2>/dev/null; then
+            BRIDGE_UP=1
+            break
+        fi
+        sleep 1
+    done
+    if [ "$BRIDGE_UP" -ne 1 ]; then
+        echo "error: rosbridge_server never started serving port $PORT" >&2
+        echo "       something else is holding it - check: ss -ltnp | grep $PORT" >&2
         exit 1
     fi
+    echo "rosbridge_server is serving port $PORT"
 fi
 
 if [ "$START_VIDEO" -eq 1 ]; then
