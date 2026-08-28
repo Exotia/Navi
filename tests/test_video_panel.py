@@ -8,7 +8,13 @@ class FakeReceiver:
         self.started = False
         self.stopped = False
         self.is_running = True
-        self._frame = frame
+        # A constructor-supplied frame is delivered once, like a real
+        # VideoReceiver's read_frame() only returns a *new* frame once one
+        # has actually accumulated - it never keeps re-returning the same
+        # frame forever. That matters once _poll_frame drains in a loop
+        # until read_frame() returns None (Important 3): an infinite supply
+        # here would make that loop spin forever.
+        self._queue = [frame] if frame is not None else []
 
     def start(self):
         self.started = True
@@ -16,8 +22,16 @@ class FakeReceiver:
     def stop(self):
         self.stopped = True
 
+    def queue_frames(self, *frames):
+        """Lets a test hand back several frames across successive
+        read_frame() calls within the same tick, in order - simulating
+        several RTP frames having arrived since the last poll."""
+        self._queue.extend(frames)
+
     def read_frame(self):
-        return self._frame
+        if self._queue:
+            return self._queue.pop(0)
+        return None
 
 
 def test_panel_starts_idle(qtbot):
@@ -91,6 +105,26 @@ def test_panel_reports_no_frames_while_rover_claims_streaming(qtbot):
     panel._poll_frame(now=101.0)
 
     assert "NO FRAMES" in panel.status_label.text().upper()
+
+
+def test_poll_paints_only_the_newest_of_several_buffered_frames(qtbot):
+    # Important 3: one read_frame() per 33 ms tick against a 30 fps sender
+    # has ~0.3 frames/s of slack - any GUI pause backs up frames behind the
+    # pipe. A single tick must drain to the newest and paint only that one,
+    # not the oldest, so added latency drains instead of persisting.
+    receiver = FakeReceiver()
+    old_frame = bytes([10]) * (4 * 2 * 3)
+    new_frame = bytes([200]) * (4 * 2 * 3)
+    receiver.queue_frames(old_frame, new_frame)
+    panel = VideoPanel(receiver=receiver)
+    qtbot.addWidget(panel)
+    panel.set_streaming(True)
+
+    panel._poll_frame(now=100.0)
+
+    assert receiver._queue == []
+    painted = panel.image_label.pixmap().toImage().pixelColor(0, 0)
+    assert painted.red() == 200
 
 
 def test_panel_reports_a_dead_local_receiver_distinctly_from_udp_blocked(qtbot):

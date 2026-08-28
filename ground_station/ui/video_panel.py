@@ -141,10 +141,19 @@ class VideoPanel(QWidget):
         now = monotonic() if now is None else now
         if not self._streaming:
             return
-        frame = self.receiver.read_frame()
-        if frame is not None:
+        # Drain to the newest frame this tick, not just the next one: one
+        # read_frame() per 33 ms tick against a 30 fps sender has ~0.3
+        # frames/s of slack, so any GUI pause backs frames up behind the
+        # pipe and udpsrc's socket buffer. Painting only the oldest queued
+        # frame would let that backlog - and its added latency - persist
+        # instead of draining, which defeats the point of a feature whose
+        # hard constraint is latency.
+        latest = None
+        while (frame := self.receiver.read_frame()) is not None:
+            latest = frame
+        if latest is not None:
             self._last_frame_at = now
-            image = QImage(frame, self.receiver.width, self.receiver.height,
+            image = QImage(latest, self.receiver.width, self.receiver.height,
                            self.receiver.width * 3, QImage.Format_RGB888)
             self.image_label.setPixmap(QPixmap.fromImage(image))
         elif self._last_frame_at is None:
