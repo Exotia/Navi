@@ -177,10 +177,23 @@ class VideoPanel(QWidget):
                 f"color: {theme.TEXT_DIM}; font-family: {theme.MONO_FONT_FAMILY}; border: none;")
             return
 
+        if not self.receiver.is_running:
+            # video_receiver.py's own module docstring names this exact
+            # case: a caps mismatch, a missing decoder, a udpsrc bind
+            # failure, or a decoder crash makes the pipeline die - and
+            # without this check that read as "UDP blocked?", sending the
+            # operator to the network firewall when the fault is on their
+            # own laptop.
+            text = "NO FRAMES - local receiver is not running (pipeline died - check gst-launch-1.0)"
+            self.status_label.setText(text)
+            self.status_label.setStyleSheet(
+                f"color: {theme.ACCENT}; font-family: {theme.MONO_FONT_FAMILY}; border: none;")
+            return
+
         now = monotonic() if now is None else now
         starving = (self._last_frame_at is not None
                     and now - self._last_frame_at > self.no_frame_after_seconds)
-        if starving and self._rover_state == "streaming":
+        if starving and self._rover_state in ("streaming", "starting"):
             text = "NO FRAMES - rover streaming, nothing arriving (UDP blocked?)"
             color = theme.ACCENT
         elif self._rover_state == "streaming":

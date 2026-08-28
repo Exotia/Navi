@@ -75,6 +75,40 @@ def test_panel_reports_no_frames_while_rover_claims_streaming(qtbot):
     assert "NO FRAMES" in panel.status_label.text().upper()
 
 
+def test_panel_reports_a_dead_local_receiver_distinctly_from_udp_blocked(qtbot):
+    # Important 1: a dead local pipeline (caps mismatch, missing decoder,
+    # udpsrc bind failure, decoder crash) must not read as "UDP blocked?" -
+    # that sends the operator to the firewall when the fault is local.
+    receiver = FakeReceiver(frame=None)
+    receiver.is_running = False
+    panel = VideoPanel(receiver=receiver, no_frame_after_seconds=0.0)
+    qtbot.addWidget(panel)
+    panel.apply_status({"state": "streaming", "detail": "10.0.0.5:5600"})
+    panel.set_streaming(True)
+
+    panel._poll_frame(now=100.0)
+
+    text = panel.status_label.text().upper()
+    assert "UDP BLOCKED" not in text
+    assert "NO FRAMES" in text
+    assert "RECEIVER" in text
+
+
+def test_starvation_warning_also_fires_while_rover_is_still_starting(qtbot):
+    # Cheap item: previously this only fired for rover_state == "streaming",
+    # so a rover stuck at "starting" showed STARTING forever with no local
+    # corroboration.
+    panel = VideoPanel(receiver=FakeReceiver(frame=None), no_frame_after_seconds=0.0)
+    qtbot.addWidget(panel)
+    panel.apply_status({"state": "starting", "detail": ""})
+    panel.set_streaming(True)
+
+    panel._poll_frame(now=100.0)
+    panel._poll_frame(now=101.0)
+
+    assert "NO FRAMES" in panel.status_label.text().upper()
+
+
 def test_panel_clears_no_frames_once_a_frame_arrives(qtbot):
     receiver = FakeReceiver(frame=bytes(4 * 2 * 3))
     panel = VideoPanel(receiver=receiver, no_frame_after_seconds=0.0)
