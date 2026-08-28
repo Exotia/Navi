@@ -103,6 +103,14 @@ class VideoPanel(QWidget):
     def dead_reckoning(self) -> bool:
         return self._dead_reckoning
 
+    @property
+    def streaming(self) -> bool:
+        """Whether the local receiver is running - which is also the answer
+        to "is anything on this laptop listening for a stream". MainWindow
+        needs it to decide whether asking the rover to (re)start streaming
+        would send frames to a port with no listener."""
+        return self._streaming
+
     def set_source(self, name: str, port: int, *, dead_reckoning: bool = False,
                    reports_remote_status: bool = True) -> None:
         """Points the panel at a different sender.
