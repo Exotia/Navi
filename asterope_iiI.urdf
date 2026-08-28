@@ -518,6 +518,25 @@
          the ground at -0.409. One link each: a wheel baked into
          base_link could neither be steered nor coloured separately. -->
 
+    <link name="steer_front_left">
+        <visual>
+            <origin xyz="0 0 0.08" rpy="0 0 0"/>
+            <geometry>
+                <cylinder radius="0.06" length="0.16"/>
+            </geometry>
+            <material name="silver"/>
+        </visual>
+    </link>
+
+    <joint name="steer_front_left_joint" type="revolute">
+        <parent link="base_link"/>
+        <child link="steer_front_left"/>
+        <origin xyz="0.455 0.455 -0.284" rpy="0 0 0"/>
+        <axis xyz="0 0 1"/>
+        <!-- One turn either way: the steer module is cabled, not a slip ring. -->
+        <limit lower="-3.14159265" upper="3.14159265" effort="100" velocity="6.0"/>
+    </joint>
+
     <link name="wheel_front_left">
         <visual>
             <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
@@ -534,10 +553,30 @@
         </collision>
     </link>
 
-    <joint name="wheel_front_left_joint" type="fixed">
-        <parent link="base_link"/>
+    <joint name="wheel_front_left_joint" type="continuous">
+        <parent link="steer_front_left"/>
         <child link="wheel_front_left"/>
-        <origin xyz="0.455 0.455 -0.284" rpy="0 0 0"/>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <axis xyz="0 1 0"/>
+    </joint>
+
+    <link name="steer_front_right">
+        <visual>
+            <origin xyz="0 0 0.08" rpy="0 0 0"/>
+            <geometry>
+                <cylinder radius="0.06" length="0.16"/>
+            </geometry>
+            <material name="silver"/>
+        </visual>
+    </link>
+
+    <joint name="steer_front_right_joint" type="revolute">
+        <parent link="base_link"/>
+        <child link="steer_front_right"/>
+        <origin xyz="0.455 -0.455 -0.284" rpy="0 0 0"/>
+        <axis xyz="0 0 1"/>
+        <!-- One turn either way: the steer module is cabled, not a slip ring. -->
+        <limit lower="-3.14159265" upper="3.14159265" effort="100" velocity="6.0"/>
     </joint>
 
     <link name="wheel_front_right">
@@ -556,10 +595,30 @@
         </collision>
     </link>
 
-    <joint name="wheel_front_right_joint" type="fixed">
-        <parent link="base_link"/>
+    <joint name="wheel_front_right_joint" type="continuous">
+        <parent link="steer_front_right"/>
         <child link="wheel_front_right"/>
-        <origin xyz="0.455 -0.455 -0.284" rpy="0 0 0"/>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <axis xyz="0 1 0"/>
+    </joint>
+
+    <link name="steer_rear_left">
+        <visual>
+            <origin xyz="0 0 0.08" rpy="0 0 0"/>
+            <geometry>
+                <cylinder radius="0.06" length="0.16"/>
+            </geometry>
+            <material name="silver"/>
+        </visual>
+    </link>
+
+    <joint name="steer_rear_left_joint" type="revolute">
+        <parent link="base_link"/>
+        <child link="steer_rear_left"/>
+        <origin xyz="-0.455 0.455 -0.284" rpy="0 0 0"/>
+        <axis xyz="0 0 1"/>
+        <!-- One turn either way: the steer module is cabled, not a slip ring. -->
+        <limit lower="-3.14159265" upper="3.14159265" effort="100" velocity="6.0"/>
     </joint>
 
     <link name="wheel_rear_left">
@@ -578,10 +637,30 @@
         </collision>
     </link>
 
-    <joint name="wheel_rear_left_joint" type="fixed">
-        <parent link="base_link"/>
+    <joint name="wheel_rear_left_joint" type="continuous">
+        <parent link="steer_rear_left"/>
         <child link="wheel_rear_left"/>
-        <origin xyz="-0.455 0.455 -0.284" rpy="0 0 0"/>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <axis xyz="0 1 0"/>
+    </joint>
+
+    <link name="steer_rear_right">
+        <visual>
+            <origin xyz="0 0 0.08" rpy="0 0 0"/>
+            <geometry>
+                <cylinder radius="0.06" length="0.16"/>
+            </geometry>
+            <material name="silver"/>
+        </visual>
+    </link>
+
+    <joint name="steer_rear_right_joint" type="revolute">
+        <parent link="base_link"/>
+        <child link="steer_rear_right"/>
+        <origin xyz="-0.455 -0.455 -0.284" rpy="0 0 0"/>
+        <axis xyz="0 0 1"/>
+        <!-- One turn either way: the steer module is cabled, not a slip ring. -->
+        <limit lower="-3.14159265" upper="3.14159265" effort="100" velocity="6.0"/>
     </joint>
 
     <link name="wheel_rear_right">
@@ -600,10 +679,11 @@
         </collision>
     </link>
 
-    <joint name="wheel_rear_right_joint" type="fixed">
-        <parent link="base_link"/>
+    <joint name="wheel_rear_right_joint" type="continuous">
+        <parent link="steer_rear_right"/>
         <child link="wheel_rear_right"/>
-        <origin xyz="-0.455 -0.455 -0.284" rpy="0 0 0"/>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <axis xyz="0 1 0"/>
     </joint>
 
 </robot>
