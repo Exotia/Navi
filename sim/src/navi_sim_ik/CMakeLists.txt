@@ -8,7 +8,6 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
-find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(trajectory_msgs REQUIRED)
@@ -31,7 +30,7 @@ target_include_directories(navi_sim_ik_stepper PUBLIC
 add_executable(sim_ik_node src/sim_ik_node.cpp)
 target_link_libraries(sim_ik_node navi_sim_ik_stepper)
 ament_target_dependencies(sim_ik_node
-  rclcpp geometry_msgs sensor_msgs nav_msgs std_msgs trajectory_msgs)
+  rclcpp geometry_msgs nav_msgs std_msgs trajectory_msgs)
 install(TARGETS sim_ik_node DESTINATION lib/${PROJECT_NAME})
 
 if(BUILD_TESTING)

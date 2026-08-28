@@ -507,6 +507,18 @@
         <origin xyz="0 0 0" rpy="-1.570796327 0 -1.570796327"/>
     </joint>
 
+    <!-- Pre-existing block, kept as found. Do not copy it as an example:
+         <static> is a *model* property and has no meaning inside a
+         link-reference block, so this line does nothing. Proof rather than
+         theory: gazebo_ros_planar_move moves this model in the simulation
+         regardless, which a genuinely static model would not do. <gravity>
+         and <kinematic> are link properties and do apply; they are left
+         exactly where they are because relocating them would need a Gazebo
+         run to confirm nothing depends on them here.
+         The simulation-only counterparts for the eight steer/wheel links
+         live in sim/src/navi_sim_bringup/urdf/asterope_sim.urdf.xacro,
+         which is where new sim-only configuration belongs - this file
+         describes the real rover. -->
     <gazebo reference="base_link">
         <static>true</static>
         <gravity>false</gravity>
