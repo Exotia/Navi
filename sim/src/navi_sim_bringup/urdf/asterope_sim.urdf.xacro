@@ -54,4 +54,5 @@
       <update_rate>30</update_rate>
     </plugin>
   </gazebo>
+
 </robot>

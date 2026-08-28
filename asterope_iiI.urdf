@@ -519,6 +519,16 @@
          base_link could neither be steered nor coloured separately. -->
 
     <link name="steer_front_left">
+        <!-- Nominal inertial, not measured: a steering housing needs some
+             plausible mass/inertia here only because Gazebo's URDF->SDF
+             conversion silently drops any link on a non-fixed joint that
+             has none. Not hardware data. -->
+        <inertial>
+            <origin xyz="0 0 0.08" rpy="0 0 0"/>
+            <mass value="1.0"/>
+            <inertia ixx="0.0030" ixy="0.0" ixz="0.0"
+                     iyy="0.0030" iyz="0.0" izz="0.0018"/>
+        </inertial>
         <visual>
             <origin xyz="0 0 0.08" rpy="0 0 0"/>
             <geometry>
@@ -538,6 +548,16 @@
     </joint>
 
     <link name="wheel_front_left">
+        <!-- Nominal inertial, not measured: a wheel needs some plausible
+             mass/inertia here only because Gazebo's URDF->SDF conversion
+             silently drops any link on a non-fixed joint that has none.
+             Not hardware data. -->
+        <inertial>
+            <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
+            <mass value="4.0"/>
+            <inertia ixx="0.0290" ixy="0.0" ixz="0.0"
+                     iyy="0.0290" iyz="0.0" izz="0.0313"/>
+        </inertial>
         <visual>
             <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
             <geometry>
@@ -561,6 +581,16 @@
     </joint>
 
     <link name="steer_front_right">
+        <!-- Nominal inertial, not measured: a steering housing needs some
+             plausible mass/inertia here only because Gazebo's URDF->SDF
+             conversion silently drops any link on a non-fixed joint that
+             has none. Not hardware data. -->
+        <inertial>
+            <origin xyz="0 0 0.08" rpy="0 0 0"/>
+            <mass value="1.0"/>
+            <inertia ixx="0.0030" ixy="0.0" ixz="0.0"
+                     iyy="0.0030" iyz="0.0" izz="0.0018"/>
+        </inertial>
         <visual>
             <origin xyz="0 0 0.08" rpy="0 0 0"/>
             <geometry>
@@ -580,6 +610,16 @@
     </joint>
 
     <link name="wheel_front_right">
+        <!-- Nominal inertial, not measured: a wheel needs some plausible
+             mass/inertia here only because Gazebo's URDF->SDF conversion
+             silently drops any link on a non-fixed joint that has none.
+             Not hardware data. -->
+        <inertial>
+            <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
+            <mass value="4.0"/>
+            <inertia ixx="0.0290" ixy="0.0" ixz="0.0"
+                     iyy="0.0290" iyz="0.0" izz="0.0313"/>
+        </inertial>
         <visual>
             <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
             <geometry>
@@ -603,6 +643,16 @@
     </joint>
 
     <link name="steer_rear_left">
+        <!-- Nominal inertial, not measured: a steering housing needs some
+             plausible mass/inertia here only because Gazebo's URDF->SDF
+             conversion silently drops any link on a non-fixed joint that
+             has none. Not hardware data. -->
+        <inertial>
+            <origin xyz="0 0 0.08" rpy="0 0 0"/>
+            <mass value="1.0"/>
+            <inertia ixx="0.0030" ixy="0.0" ixz="0.0"
+                     iyy="0.0030" iyz="0.0" izz="0.0018"/>
+        </inertial>
         <visual>
             <origin xyz="0 0 0.08" rpy="0 0 0"/>
             <geometry>
@@ -622,6 +672,16 @@
     </joint>
 
     <link name="wheel_rear_left">
+        <!-- Nominal inertial, not measured: a wheel needs some plausible
+             mass/inertia here only because Gazebo's URDF->SDF conversion
+             silently drops any link on a non-fixed joint that has none.
+             Not hardware data. -->
+        <inertial>
+            <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
+            <mass value="4.0"/>
+            <inertia ixx="0.0290" ixy="0.0" ixz="0.0"
+                     iyy="0.0290" iyz="0.0" izz="0.0313"/>
+        </inertial>
         <visual>
             <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
             <geometry>
@@ -645,6 +705,16 @@
     </joint>
 
     <link name="steer_rear_right">
+        <!-- Nominal inertial, not measured: a steering housing needs some
+             plausible mass/inertia here only because Gazebo's URDF->SDF
+             conversion silently drops any link on a non-fixed joint that
+             has none. Not hardware data. -->
+        <inertial>
+            <origin xyz="0 0 0.08" rpy="0 0 0"/>
+            <mass value="1.0"/>
+            <inertia ixx="0.0030" ixy="0.0" ixz="0.0"
+                     iyy="0.0030" iyz="0.0" izz="0.0018"/>
+        </inertial>
         <visual>
             <origin xyz="0 0 0.08" rpy="0 0 0"/>
             <geometry>
@@ -664,6 +734,16 @@
     </joint>
 
     <link name="wheel_rear_right">
+        <!-- Nominal inertial, not measured: a wheel needs some plausible
+             mass/inertia here only because Gazebo's URDF->SDF conversion
+             silently drops any link on a non-fixed joint that has none.
+             Not hardware data. -->
+        <inertial>
+            <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
+            <mass value="4.0"/>
+            <inertia ixx="0.0290" ixy="0.0" ixz="0.0"
+                     iyy="0.0290" iyz="0.0" izz="0.0313"/>
+        </inertial>
         <visual>
             <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
             <geometry>

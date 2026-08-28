@@ -70,6 +70,23 @@ def test_the_wheels_keep_their_measured_geometry(robot):
         assert float(cylinder.get("length")) == pytest.approx(0.200)
 
 
+@pytest.mark.parametrize("corner", CORNERS)
+@pytest.mark.parametrize("kind", ["steer", "wheel"])
+def test_steer_and_wheel_links_have_a_positive_mass_inertial(robot, kind, corner):
+    # Gazebo's URDF->SDF conversion silently drops any link on a non-fixed
+    # joint (steer is revolute, wheel is continuous) if it has no
+    # <inertial> - no error, no warning, the link just vanishes from the
+    # spawned model. That failure mode is invisible to anything except
+    # actually looking at Gazebo, so it needs this guard instead.
+    name = f"{kind}_{corner}"
+    link = [l for l in robot.findall("link") if l.get("name") == name][0]
+    inertial = link.find("inertial")
+    assert inertial is not None, f"{name} has no <inertial> - Gazebo will drop it"
+    mass = inertial.find("mass")
+    assert mass is not None
+    assert float(mass.get("value")) > 0
+
+
 def test_the_wheels_sit_at_the_910mm_square(robot):
     seen = set()
     for corner in CORNERS:
