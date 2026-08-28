@@ -23,10 +23,18 @@ target_include_directories(navi_sim_ik_model PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 target_compile_options(navi_sim_ik_model PRIVATE -w)
 
+add_library(navi_sim_ik_stepper STATIC src/sim_ik_stepper.cpp)
+target_link_libraries(navi_sim_ik_stepper navi_sim_ik_model)
+target_include_directories(navi_sim_ik_stepper PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_vendored_model test/test_vendored_model.cpp)
   target_link_libraries(test_vendored_model navi_sim_ik_model)
+
+  ament_add_gtest(test_sim_ik_stepper test/test_sim_ik_stepper.cpp)
+  target_link_libraries(test_sim_ik_stepper navi_sim_ik_stepper)
 endif()
 
 ament_package()
