@@ -23,6 +23,28 @@ namespace
 // the wheel mapping is logged to guard against.
 constexpr double kTimestepSeconds = 0.06;
 
+// CRITICAL, and invisible from this file alone: the tick runs on the
+// simulation clock, and a ROS-time timer can only notice time passing when
+// /clock arrives. So the /clock *period must divide kTimestepSeconds*, or
+// the timer quantises to something slower than this constant says and every
+// integration below - the pose on /sim_odom and the wheel roll angle - falls
+// behind the body Gazebo is actually moving, with no error and no log line.
+// The same silent-when-wrong failure mode this constant exists to prevent.
+//
+// The /clock period is not set here. It is libgazebo_ros_init's publish_rate
+// parameter, passed on the gazebo command line in
+// navi_sim_bringup/launch/sim.launch.py, and it DEFAULTS TO 10 Hz - one edit
+// away from reintroducing the bug. Measured at that default: 0.06 does not
+// divide 0.1, the tick ran at 13.13 Hz instead of 16.67 (0.79x), and
+// /sim_odom reported 7.204 m of travel where `gz model -m asterope -p` had
+// the model 8.954 m further along. The launch file now asks for 100 Hz, so
+// the granularity is 0.01 s and divides 0.06 exactly.
+//
+// The symptom to recognise, if this is ever wrong again: /sim_odom and
+// /sim_cmd_vel publish slower than 1/kTimestepSeconds while `gz stats`
+// reports a real-time factor near 1. check_tick_rate() below warns about
+// exactly this, so it should not be silent a second time.
+
 // gazebo_ros_joint_pose_trajectory resolves this as the reference link
 // before it will apply any position; left empty, it rejects every message
 // ("needs a reference link [] as frame_id, aborting") and no joint ever
@@ -169,10 +191,70 @@ private:
       ever_flowed_ = true;
     }
 
+    check_tick_rate();
+
     stepper_.step(vx_, vy_, yaw_rate_);
     publish_joints();
     publish_motion();
     publish_debug(stale);
+  }
+
+  /// Warns once if the tick is not actually running at kTimestepSeconds.
+  ///
+  /// Cheap, because it needs nothing this node does not already have: the
+  /// node clock is what the timer fires against, so the mean interval
+  /// between ticks IS the quantisation the timer suffered. Individual
+  /// intervals are useless for this - a ROS-time timer catches up after a
+  /// coarse /clock jump, so they alternate between ~0 and one clock period
+  /// - which is why this measures the mean over a window instead of any
+  /// single gap. The mean is also the quantity that matters: it is exactly
+  /// the factor by which the integrated pose and wheel roll fall behind.
+  void check_tick_rate()
+  {
+    if (tick_rate_reported_) {
+      return;
+    }
+    const rclcpp::Time current = now();
+    // Before /clock arrives now() is 0. A ROS-time timer should not have
+    // fired at all in that case, but a zero reading would put the window's
+    // start at the epoch, so wait for a real one.
+    if (current.nanoseconds() == 0) {
+      return;
+    }
+    if (first_tick_.nanoseconds() == 0) {
+      first_tick_ = current;
+      return;
+    }
+    ++tick_samples_;
+    // Ticks counted over one elapsed ROS-time span, NOT the mean of
+    // per-tick deltas. The two differ and only this one is right: after a
+    // coarse /clock jump the timer catches up by firing several times
+    // against the same clock value, so those deltas are zero. Averaging
+    // deltas silently discards the catch-up ticks and returns the /clock
+    // period instead of the tick rate - it reported 10.00 Hz where the
+    // node was really ticking 13.13 times a second. Counting every tick
+    // over the whole span cannot make that mistake.
+    if (tick_samples_ >= kTickRateSamples) {
+      const double mean =
+        (current - first_tick_).seconds() / static_cast<double>(tick_samples_);
+      const double error = std::abs(mean - kTimestepSeconds) / kTimestepSeconds;
+      if (error > kTickRateTolerance) {
+        RCLCPP_WARN(
+          get_logger(),
+          "tick is running at %.2f Hz, not the configured %.2f Hz "
+          "(mean interval %.4f s vs %.4f s). /sim_odom and the wheel roll "
+          "will under-report travel by about this factor, silently. Most "
+          "likely /clock is too coarse to divide the timestep: check "
+          "libgazebo_ros_init's publish_rate on the gazebo command line in "
+          "sim.launch.py (it defaults to 10 Hz, which does not divide 0.06).",
+          1.0 / mean, 1.0 / kTimestepSeconds, mean, kTimestepSeconds);
+      } else {
+        RCLCPP_INFO(
+          get_logger(), "tick rate confirmed: %.2f Hz (configured %.2f Hz)",
+          1.0 / mean, 1.0 / kTimestepSeconds);
+      }
+      tick_rate_reported_ = true;
+    }
   }
 
   void publish_joints()
@@ -266,6 +348,16 @@ private:
   // Separate from flow_ because flow_ forgets: it passes through Stale on
   // the first tick, before anything has ever arrived. See tick().
   bool ever_flowed_{false};
+
+  // check_tick_rate() state. The window is a few seconds of ticks: long
+  // enough that the catch-up jitter after each /clock jump averages out,
+  // short enough that the answer arrives while someone is still watching
+  // the launch output.
+  static constexpr int kTickRateSamples = 100;
+  static constexpr double kTickRateTolerance = 0.05;
+  rclcpp::Time first_tick_{0, 0, RCL_ROS_TIME};
+  int tick_samples_{0};
+  bool tick_rate_reported_{false};
 
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr twist_sub_;
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr joints_pub_;

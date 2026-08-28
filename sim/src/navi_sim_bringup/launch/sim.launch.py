@@ -81,9 +81,33 @@ def _world_with_mesh(context, *args, **kwargs):
 
     return [
         ExecuteProcess(
+            # publish_rate is libgazebo_ros_init's /clock rate, and it
+            # defaults to 10 Hz. That default is not survivable here:
+            # sim_ik_node ticks on the simulation clock with a 0.06 s
+            # timestep, a ROS-time timer can only notice time passing when
+            # /clock arrives, and 0.06 does not divide 0.1 - so the tick
+            # quantised to a measured 13.13 Hz instead of 16.67 and
+            # /sim_odom reported 7.204 m where Gazebo had moved the model
+            # 8.954 m. 100 Hz makes the granularity 0.01 s, which divides
+            # 0.06 exactly. Anything set here must keep dividing
+            # kTimestepSeconds; see the comment on that constant.
+            #
+            # It has to be the long --param. Gazebo's own -p is --play, so
+            # `-p publish_rate:=100.0` is swallowed as a log file to replay
+            # and gzserver dies with "Invalid logfile [publish_rate:=100.0]".
+            # Confirmed both ways.
+            #
+            # Accepted cost, not an oversight: this simulation publishes
+            # /clock onto the rover's shared DDS domain, and this makes that
+            # ten times chattier. Harmless today because no node on the
+            # rover sets use_sim_time, so nothing out there reads /clock at
+            # all - but if one ever does, its clock would be driven by a
+            # laptop's Gazebo, which is a trade someone took deliberately
+            # rather than a thing to discover in the field.
             cmd=["gazebo", "--verbose", generated,
                  "-s", "libgazebo_ros_init.so",
-                 "-s", "libgazebo_ros_factory.so"],
+                 "-s", "libgazebo_ros_factory.so",
+                 "--ros-args", "--param", "publish_rate:=100.0"],
             output="screen"),
         Node(package="robot_state_publisher", executable="robot_state_publisher",
              parameters=[{"robot_description": description, "use_sim_time": True}],
