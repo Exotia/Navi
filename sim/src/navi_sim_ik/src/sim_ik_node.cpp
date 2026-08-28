@@ -24,6 +24,19 @@ namespace
 // with no error and no log line - the same silent-when-wrong failure mode
 // the wheel mapping is logged to guard against.
 constexpr double kTimestepSeconds = 0.06;
+
+// gazebo_ros_joint_pose_trajectory resolves this as the reference link
+// before it will apply any position; left empty, it rejects every message
+// ("needs a reference link [] as frame_id, aborting") and no joint ever
+// moves. base_link would be the natural reference, but it does not survive
+// as its own SDF link: base_footprint_joint is fixed, so Gazebo's URDF->SDF
+// conversion lumps base_link's geometry into base_footprint and only
+// base_footprint remains as a named link. Confirmed empirically: frame_id
+// "base_link" still aborts with "needs a reference link [base_link]"
+// because no such link exists in the spawned model. The same link also
+// names the odometry message's child frame, since it is the frame whose
+// pose that odometry describes.
+constexpr char kBaseFootprintFrameId[] = "base_footprint";
 }  // namespace
 
 /// Drives the simulated rover from the same /manual_twist the real one gets.
@@ -93,17 +106,7 @@ private:
   {
     trajectory_msgs::msg::JointTrajectory msg;
     msg.header.stamp = now();
-    // gazebo_ros_joint_pose_trajectory resolves this as the reference link
-    // before it will apply any position; left empty, it rejects every
-    // message ("needs a reference link [] as frame_id, aborting") and no
-    // joint ever moves. base_link would be the natural reference, but it
-    // does not survive as its own SDF link: base_footprint_joint is fixed,
-    // so Gazebo's URDF->SDF conversion lumps base_link's geometry into
-    // base_footprint and only base_footprint remains as a named link.
-    // Confirmed empirically: frame_id "base_link" still aborts with
-    // "needs a reference link [base_link]" because no such link exists in
-    // the spawned model.
-    msg.header.frame_id = "base_footprint";
+    msg.header.frame_id = kBaseFootprintFrameId;
     trajectory_msgs::msg::JointTrajectoryPoint point;
     for (int i = 0; i < 4; ++i) {
       const std::string corner = navi_sim_ik::WHEEL_CORNERS[i];
@@ -141,7 +144,7 @@ private:
     nav_msgs::msg::Odometry odom;
     odom.header.stamp = now();
     odom.header.frame_id = "odom";
-    odom.child_frame_id = "base_footprint";
+    odom.child_frame_id = kBaseFootprintFrameId;
     odom.pose.pose.position.x = stepper_.pose().x;
     odom.pose.pose.position.y = stepper_.pose().y;
     odom.pose.pose.orientation.z = std::sin(stepper_.pose().yaw / 2.0);

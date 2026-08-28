@@ -55,4 +55,22 @@
     </plugin>
   </gazebo>
 
+  <!-- The four steer and four wheel links carry mass, inertia and (for the
+       wheels) collision cylinders only so they survive Gazebo's URDF->SDF
+       conversion (see asterope_iiI.urdf) - not because this simulation wants
+       contact physics, friction or inertia tuning. Gravity off keeps that
+       mass/collision inert: motion here comes from planar_move and
+       joint_pose_trajectory, never from the physics engine solving
+       wheel-versus-ground contact. This lives in the sim-only xacro rather
+       than the real URDF because it is a statement about the simulation,
+       not a fact about the rover. -->
+  <gazebo reference="steer_front_left"><gravity>false</gravity></gazebo>
+  <gazebo reference="wheel_front_left"><gravity>false</gravity></gazebo>
+  <gazebo reference="steer_front_right"><gravity>false</gravity></gazebo>
+  <gazebo reference="wheel_front_right"><gravity>false</gravity></gazebo>
+  <gazebo reference="steer_rear_left"><gravity>false</gravity></gazebo>
+  <gazebo reference="wheel_rear_left"><gravity>false</gravity></gazebo>
+  <gazebo reference="steer_rear_right"><gravity>false</gravity></gazebo>
+  <gazebo reference="wheel_rear_right"><gravity>false</gravity></gazebo>
+
 </robot>

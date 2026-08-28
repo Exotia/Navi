@@ -7,7 +7,6 @@ assumed to sit anywhere in particular.
 """
 
 import os
-import shutil
 import tempfile
 
 from ament_index_python.packages import get_package_share_directory
