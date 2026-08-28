@@ -202,6 +202,21 @@ class MainWindow(QMainWindow):
             f"border: 1px solid {theme.BORDER}; border-radius: 4px; padding: 6px 12px; "
             f"font-family: {theme.MONO_FONT_FAMILY};"
         )
+        if not connected:
+            # A dropped rosbridge connection must not leave gst-launch-1.0
+            # running: Python doesn't kill Popen children at exit, and
+            # udpsrc's default reuse=true means an orphaned process keeps
+            # udp/video_port bound and can swallow the *next* session's RTP
+            # stream. keep_failed_reason=True: this is a disconnect, not an
+            # operator stop, so a previously reported failure must survive.
+            self.dashboard_page.video_panel.stop_receiver(keep_failed_reason=True)
+
+    def closeEvent(self, event) -> None:
+        """Stops the local video receiver on window close for the same
+        reason as the rosbridge-disconnect path above - nothing else tears
+        down the gst-launch-1.0 subprocess on quit."""
+        self.dashboard_page.video_panel.stop_receiver(keep_failed_reason=True)
+        super().closeEvent(event)
 
     def _check_staleness(self) -> None:
         elapsed = self.drive_state.seconds_since_last()

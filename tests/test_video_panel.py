@@ -88,6 +88,51 @@ def test_panel_clears_no_frames_once_a_frame_arrives(qtbot):
     assert panel.image_label.pixmap() is not None
 
 
+def test_stop_receiver_resets_to_stopped_like_an_operator_stop(qtbot):
+    panel = VideoPanel(receiver=FakeReceiver())
+    qtbot.addWidget(panel)
+    panel.apply_status({"state": "failed", "detail": "camera busy"})
+
+    panel.stop_receiver()
+
+    assert panel.receiver.stopped
+    assert "camera busy" not in panel.status_label.text()
+    assert "OFF" in panel.status_label.text().upper()
+
+
+def test_stop_receiver_keep_failed_reason_preserves_a_reported_failure(qtbot):
+    # Critical 2's caveat: on disconnect/shutdown, a previously reported
+    # 'failed' reason must survive - it explains what just happened and
+    # set_streaming(False)'s ordinary reset-to-'stopped' would erase it.
+    panel = VideoPanel(receiver=FakeReceiver())
+    qtbot.addWidget(panel)
+    panel.apply_status({"state": "failed", "detail": "camera busy"})
+
+    panel.stop_receiver(keep_failed_reason=True)
+
+    assert panel.receiver.stopped
+    text = panel.status_label.text()
+    assert "camera busy" in text
+    assert "FAILED" in text.upper()
+
+
+class RaisingReceiver(FakeReceiver):
+    def start(self):
+        raise RuntimeError("gst-launch-1.0: command not found")
+
+
+def test_set_streaming_true_reports_failure_when_receiver_start_raises(qtbot):
+    panel = VideoPanel(receiver=RaisingReceiver())
+    qtbot.addWidget(panel)
+
+    panel.set_streaming(True)
+
+    assert panel._streaming is False
+    assert panel.toggle_button.text() == "Start video"
+    text = panel.status_label.text().upper()
+    assert "FAILED" in text
+
+
 def test_apply_status_streaming_before_local_start_is_not_plain_success(qtbot):
     # The rover's word alone is not enough: until this panel is actually
     # polling for frames, "streaming" must not render as healthy success,

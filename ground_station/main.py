@@ -29,6 +29,17 @@ def main() -> None:
     window.resize(1440, 900)
     window.show()
 
+    # app.quit() (used by the SIGINT handler below) exits the event loop
+    # directly and does not send closeEvent to open windows, so MainWindow's
+    # own closeEvent alone would miss the Ctrl+C path. aboutToQuit fires on
+    # every quit path (window close included, redundantly and harmlessly),
+    # so it's the one place that reliably stops gst-launch-1.0 before this
+    # process exits - otherwise it would be orphaned with udp/video_port
+    # still bound (udpsrc's default reuse=true), ready to swallow the next
+    # session's stream.
+    app.aboutToQuit.connect(
+        lambda: window.dashboard_page.video_panel.stop_receiver(keep_failed_reason=True))
+
     # GamepadReader (constructed inside MainWindow above) already restores
     # Python's default SIGINT handling, undoing pygame/SDL's hijack of it -
     # but a plain KeyboardInterrupt raised inside a QTimer callback is just

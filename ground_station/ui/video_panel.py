@@ -80,17 +80,46 @@ class VideoPanel(QWidget):
 
     def set_streaming(self, enabled: bool) -> None:
         """Drives the local receiver. Called by the window after it has sent
-        the request, and on disconnect - the receiver is stopped whether or
-        not the rover ever answers."""
-        self._streaming = enabled
-        self._toggle_requested = enabled
-        self.toggle_button.setText("Stop video" if enabled else "Start video")
-        if enabled:
-            self._last_frame_at = None
+        the request - the receiver is stopped whether or not the rover ever
+        answers. Disconnect/shutdown goes through stop_receiver() instead,
+        so a previously reported failure reason can survive."""
+        if not enabled:
+            self.stop_receiver()
+            return
+        self._last_frame_at = None
+        try:
             self.receiver.start()
-        else:
-            self.receiver.stop()
-            self.image_label.clear()
+        except Exception as exc:
+            # A missing gst-launch-1.0 (or any other launch failure) must
+            # not leave the panel half-updated: streaming=True, button
+            # reading "Stop video", and _refresh_status never reached -
+            # that would show the same misleading "UDP blocked?" verdict
+            # 2s later instead of the real cause.
+            self._streaming = False
+            self._toggle_requested = False
+            self.toggle_button.setText("Start video")
+            self._rover_state = "failed"
+            self._rover_detail = f"local receiver failed to start: {exc}"
+            self._refresh_status()
+            return
+        self._streaming = True
+        self._toggle_requested = True
+        self.toggle_button.setText("Stop video")
+        self._refresh_status()
+
+    def stop_receiver(self, *, keep_failed_reason: bool = False) -> None:
+        """Stops the local receiver. Used both for an operator-initiated
+        stop (set_streaming(False)) and for rosbridge disconnect/window
+        close (MainWindow), where keep_failed_reason=True preserves a
+        previously reported 'failed' state instead of overwriting it with
+        'stopped' - a shutdown didn't just happen because of a fresh
+        failure, and erasing the reason would hide what did happen."""
+        self._streaming = False
+        self._toggle_requested = False
+        self.toggle_button.setText("Start video")
+        self.receiver.stop()
+        self.image_label.clear()
+        if not (keep_failed_reason and self._rover_state == "failed"):
             self._rover_state = "stopped"
             self._rover_detail = ""
         self._refresh_status()

@@ -343,6 +343,39 @@ def test_gamepad_disconnect_sends_one_zero_velocity_stop_then_stays_quiet(qtbot)
     assert len(topic.published_messages) == 2
 
 
+def test_disconnect_stops_the_local_video_receiver(qtbot):
+    window, _ = make_window(qtbot, initial_host="192.168.178.33")
+    window._on_stream_requested(True)
+    assert window.dashboard_page.video_panel.receiver.started
+
+    ros = FakeRos.instances[-1]
+    ros.trigger_event("close", None)
+
+    assert window.dashboard_page.video_panel.receiver.stopped
+
+
+def test_disconnect_preserves_a_previously_reported_failure_reason(qtbot):
+    window, _ = make_window(qtbot, initial_host="192.168.178.33")
+    window.dashboard_page.video_panel.apply_status({"state": "failed", "detail": "camera busy"})
+
+    ros = FakeRos.instances[-1]
+    ros.trigger_event("close", None)
+
+    text = window.dashboard_page.video_panel.status_label.text()
+    assert "camera busy" in text
+    assert "FAILED" in text.upper()
+
+
+def test_closing_the_window_stops_the_local_video_receiver(qtbot):
+    window, _ = make_window(qtbot, initial_host="192.168.178.33")
+    window._on_stream_requested(True)
+    assert window.dashboard_page.video_panel.receiver.started
+
+    window.close()
+
+    assert window.dashboard_page.video_panel.receiver.stopped
+
+
 def _last_video_request():
     """Finds the /video_request topic's most recent published payload,
     decoded from the JSON string the real RosBridgeClient sends - there is
