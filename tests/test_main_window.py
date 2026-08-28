@@ -501,6 +501,24 @@ def test_leaving_semi_auto_returns_to_the_rover_camera(qtbot):
     assert window.dashboard_page.video_panel.dead_reckoning is False
 
 
+def test_entering_semi_auto_shows_receiving_not_a_stale_rover_word(qtbot):
+    # Regression for the bug the reviewer found: set_source's
+    # stop_receiver() resets _rover_state to "stopped" on the way in, and
+    # the sim has no /video_status of its own to overwrite it afterwards -
+    # so the panel must show the local fact (frames are arriving) rather
+    # than that leftover rover word.
+    receiver = FakeReceiver(frame=bytes(4 * 2 * 3))
+    window, _ = make_window(qtbot, video_receiver=receiver)
+    window._on_stream_requested(True)
+
+    window.dashboard_page.mode_changed.emit("semi_auto")
+    window.dashboard_page.video_panel._poll_frame(now=100.0)
+
+    text = window.dashboard_page.video_panel.status_label.text().upper()
+    assert "STOPPED" not in text
+    assert "RECEIVING" in text
+
+
 def test_the_twist_still_reaches_the_rover_in_semi_auto(qtbot):
     # The rover is driven in both modes. Anything else would make the mode
     # switch a control change disguised as a view change.

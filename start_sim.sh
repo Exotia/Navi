@@ -86,10 +86,19 @@ kill_stale() {
 }
 
 if [ "$CLEAN_STALE" -eq 1 ]; then
+    # pgrep -x matches against the kernel's comm field, which truncates at
+    # 15 characters - gzserver (8), gzclient (8) and sim_ik_node (11) are
+    # all short enough to match exactly, checked, not assumed.
+    # sim_video_sender is 16, so comm reports "sim_video_sende" and -x
+    # against the full name never matches, even when a stale sender is
+    # genuinely holding UDP 5601 - confirmed live: a process named
+    # sim_video_sender is invisible to `pgrep -x sim_video_sender` but
+    # found by `pgrep -f sim_video_sender`, which matches on the full
+    # command line rather than the truncated comm field.
     kill_stale "Gazebo servers" exact "gzserver"
     kill_stale "Gazebo clients" exact "gzclient"
     kill_stale "simulation IK nodes" exact "sim_ik_node"
-    kill_stale "simulation video senders" exact "sim_video_sender"
+    kill_stale "simulation video senders" pattern "sim_video_sender"
     # Matched on the elements this project's send pipeline always has, so
     # an unrelated gst-launch on this machine is left alone.
     kill_stale "simulation send pipelines" pattern "gst-launch-1\.0.*fdsrc.*udpsink"

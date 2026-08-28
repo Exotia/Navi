@@ -295,6 +295,7 @@ class MainWindow(QMainWindow):
                 self.ros_client.publish_video_request(
                     enable=False, host="", port=self.video_port,
                     width=1344, height=376, fps=30, bitrate_kbps=800)
-            panel.set_source("simulation", SIM_VIDEO_PORT, dead_reckoning=True)
+            panel.set_source("simulation", SIM_VIDEO_PORT, dead_reckoning=True,
+                              reports_remote_status=False)
         else:
             panel.set_source("zed front left", self.video_port)

@@ -1,10 +1,16 @@
 """Live camera view with its own on/off control.
 
-Two independent facts are shown, never conflated: what the rover says
-about the stream (/video_status) and whether frames are actually
-arriving here. A rover reporting 'streaming' while nothing lands is the
-signature of a blocked UDP port, and collapsing the two would hide
-exactly that case.
+Two independent facts are shown, never conflated, for a source that
+makes a remote claim about itself: what it says over rosbridge
+(/video_status) and whether frames are actually arriving here. A rover
+reporting 'streaming' while nothing lands is the signature of a blocked
+UDP port, and collapsing the two would hide exactly that case.
+
+A source with no remote claim to corroborate - the simulation, which has
+no /video_status of its own - only ever has the one fact: whether frames
+are arriving locally. set_source's reports_remote_status flag says which
+kind of source this is, and the status label shows only what is actually
+known rather than a claim borrowed from a different source's protocol.
 """
 
 from time import monotonic
@@ -36,6 +42,11 @@ class VideoPanel(QWidget):
         self._rover_detail = ""
         self._source_name = "zed front left"
         self._dead_reckoning = False
+        # The rover has a remote self-report (/video_status); the
+        # simulation does not. When False, _refresh_status shows only the
+        # local fact instead of a rover claim that has nothing to do with
+        # this source.
+        self._reports_remote_status = True
         # Tracks the state the button has *requested*, separate from
         # self._streaming (which only moves once set_streaming confirms
         # it). Without this, two quick clicks before a round trip to the
@@ -92,18 +103,25 @@ class VideoPanel(QWidget):
     def dead_reckoning(self) -> bool:
         return self._dead_reckoning
 
-    def set_source(self, name: str, port: int, *, dead_reckoning: bool = False) -> None:
+    def set_source(self, name: str, port: int, *, dead_reckoning: bool = False,
+                   reports_remote_status: bool = True) -> None:
         """Points the panel at a different sender.
 
         The receiver is stopped and re-pointed rather than a second one
         being created: two receivers would both be bound, and whichever
         the panel was not reading would silently fill its socket buffer.
+
+        reports_remote_status says whether this source makes its own
+        claim about the stream over rosbridge (the rover does; the
+        simulation does not) - it decides whether _refresh_status has a
+        remote claim to corroborate against, or only the local fact.
         """
         was_streaming = self._streaming
         self.stop_receiver()
         self.receiver.port = port
         self._source_name = name
         self._dead_reckoning = dead_reckoning
+        self._reports_remote_status = reports_remote_status
         self._refresh_title()
         if was_streaming:
             self.set_streaming(True)
@@ -115,6 +133,14 @@ class VideoPanel(QWidget):
             # drifts from the real rover and the picture cannot show it.
             title += "  -  DEAD RECKONING, NO LOCALISATION"
         self.title_label.setText(title)
+        # This marker is the only defence an operator has against trusting
+        # a synthetic view of the real machine they are driving - sitting
+        # in the same muted colour as ordinary chrome ("CAMERA / ZED FRONT
+        # LEFT") above a moving picture would never win the operator's
+        # attention. theme.ACCENT is the same colour FAILED and the
+        # blocked-port warning use, for the same reason: this is a warning.
+        color = theme.ACCENT if self._dead_reckoning else theme.TEXT_DIM
+        self.title_label.setStyleSheet(f"color: {color}; font-weight: 600; border: none;")
 
     def _on_toggle_clicked(self) -> None:
         self._toggle_requested = not self._toggle_requested
@@ -229,6 +255,10 @@ class VideoPanel(QWidget):
         self._render_frame()
 
     def _refresh_status(self, now: float | None = None) -> None:
+        if not self._reports_remote_status:
+            self._refresh_local_only_status(now)
+            return
+
         # The rover's reported state is shown even when this panel is not
         # locally streaming (e.g. right after apply_status arrives, before
         # set_streaming has been called) - only the "idle, nothing to
@@ -287,6 +317,38 @@ class VideoPanel(QWidget):
         else:
             text = self._rover_state.upper()
             color = theme.TEXT_DIM
+        self.status_label.setText(text)
+        self.status_label.setStyleSheet(
+            f"color: {color}; font-family: {theme.MONO_FONT_FAMILY}; border: none;")
+
+    def _refresh_local_only_status(self, now: float | None = None) -> None:
+        """The status line for a source with no remote self-report (the
+        simulation). There is only one fact available - whether frames are
+        actually arriving here - so this shows that alone, rather than
+        borrowing the rover's /video_status vocabulary ("STREAMING",
+        "rover: ...") for a source that never made any such claim."""
+        if not self._streaming:
+            self.status_label.setText("VIDEO OFF")
+            self.status_label.setStyleSheet(
+                f"color: {theme.TEXT_DIM}; font-family: {theme.MONO_FONT_FAMILY}; border: none;")
+            return
+
+        if not self.receiver.is_running:
+            text = "NO FRAMES - local receiver is not running (pipeline died - check gst-launch-1.0)"
+            self.status_label.setText(text)
+            self.status_label.setStyleSheet(
+                f"color: {theme.ACCENT}; font-family: {theme.MONO_FONT_FAMILY}; border: none;")
+            return
+
+        now = monotonic() if now is None else now
+        starving = (self._last_frame_at is not None
+                    and now - self._last_frame_at > self.no_frame_after_seconds)
+        if starving:
+            text = "NO FRAMES - nothing arriving"
+            color = theme.ACCENT
+        else:
+            text = "RECEIVING"
+            color = theme.OK
         self.status_label.setText(text)
         self.status_label.setStyleSheet(
             f"color: {color}; font-family: {theme.MONO_FONT_FAMILY}; border: none;")
