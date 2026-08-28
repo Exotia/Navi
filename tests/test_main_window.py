@@ -2,6 +2,7 @@ import json
 
 from ground_station.ros_client import RosBridgeClient
 from ground_station.ui.main_window import MainWindow
+from ground_station.video_receiver import VideoReceiver
 from tests.test_video_panel import FakeReceiver
 
 
@@ -392,15 +393,39 @@ def test_dashboard_has_a_video_panel(qtbot):
     assert window.dashboard_page.video_panel is not None
 
 
-def test_enabling_video_publishes_a_request_with_our_own_address(qtbot):
+def test_enabling_video_publishes_a_request_with_our_own_address(qtbot, monkeypatch):
+    # local_address_for makes a real UDP connect() to discover our route to
+    # the rover - on a host with no route to 192.168.178.33 (CI, a
+    # container, any other network) that legitimately returns "", which
+    # would silently take the "no route" branch below and publish nothing,
+    # making _last_video_request() below fail with a bare StopIteration.
+    # Stub it so this test doesn't depend on the machine's route table.
     window, _ = make_window(qtbot, initial_host="192.168.178.33")
+    monkeypatch.setattr(window, "local_address_for", lambda host, port: "10.20.30.40")
 
     window._on_stream_requested(True)
 
     request = _last_video_request()
     assert request["enable"] is True
     assert request["port"] == 5600
-    assert request["host"]
+    assert request["host"] == "10.20.30.40"
+
+
+def test_video_request_width_matches_double_the_receiver_default_width(qtbot):
+    # Important 5: MainWindow hardcodes the requested capture width/height
+    # (1344x376) here while VideoReceiver independently defaults to
+    # 672x376 (post-crop, since the rover crops the capture width in half) -
+    # two literals in different modules, tied only by convention and
+    # documented nowhere. Pin the invariant so they can't silently drift
+    # apart (the symptom of drift is Important 1's misleading message).
+    window, _ = make_window(qtbot, initial_host="192.168.178.33")
+
+    window._on_stream_requested(True)
+    request = _last_video_request()
+
+    default_receiver = VideoReceiver()
+    assert default_receiver.width == request["width"] // 2
+    assert default_receiver.height == request["height"]
 
 
 def test_disabling_video_stops_the_receiver_even_if_the_rover_never_answers(qtbot):
@@ -413,11 +438,20 @@ def test_disabling_video_stops_the_receiver_even_if_the_rover_never_answers(qtbo
 
 
 def test_video_status_reaches_the_panel(qtbot):
+    # Tightened per the final review: "STREAMING" in text.upper() alone
+    # also passes on "rover: streaming (not receiving locally)" - the exact
+    # text commit 20c7c0f introduced for "reported before local polling
+    # starts" - so it would not catch a regression of that behavior. This
+    # window never calls _on_stream_requested/set_streaming, so the panel
+    # is not locally streaming and must show the qualified text, not plain
+    # success.
     window, _ = make_window(qtbot, initial_host="192.168.178.33")
 
     window._on_video_status({"state": "streaming", "detail": "10.0.0.5:5600"})
 
-    assert "STREAMING" in window.dashboard_page.video_panel.status_label.text().upper()
+    text = window.dashboard_page.video_panel.status_label.text()
+    assert "not receiving locally" in text.lower()
+    assert not text.upper().startswith("STREAMING ")
 
 
 def test_requesting_video_without_a_connection_is_ignored(qtbot):
@@ -434,4 +468,8 @@ def test_local_address_is_the_interface_that_reaches_the_rover(qtbot):
 
     address = window.local_address_for("192.168.178.33", 9090)
 
-    assert address.count(".") == 3
+    # A real, unmocked UDP connect() - tolerant of a host with no route to
+    # this address (CI, a container, any other network), where
+    # local_address_for legitimately returns "". Only assert the shape when
+    # a route actually exists.
+    assert address == "" or address.count(".") == 3

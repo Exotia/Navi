@@ -82,7 +82,7 @@ class RosBridgeClient:
         self._video_status_topic = topic
 
     @staticmethod
-    def _parse_status(payload: str) -> dict:
+    def _parse_status(payload: object) -> dict:
         try:
             status = json.loads(payload)
         except (json.JSONDecodeError, TypeError) as exc:

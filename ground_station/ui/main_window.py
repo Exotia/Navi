@@ -140,11 +140,13 @@ class MainWindow(QMainWindow):
         host = self.host_input.text().strip()
         if not host:
             return
+        self._connect_to(host, self._current_rosbridge_port())
+
+    def _current_rosbridge_port(self) -> int:
         try:
-            port = int(self.port_input.text().strip())
+            return int(self.port_input.text().strip())
         except ValueError:
-            port = 9090
-        self._connect_to(host, port)
+            return 9090
 
     def _connect_to(self, host: str, port: int) -> None:
         """(Re)connect to a rosbridge server at host:port, discarding any
@@ -247,8 +249,13 @@ class MainWindow(QMainWindow):
             return
 
         if enable:
+            # Probe toward the rosbridge port, not video_port: nothing is
+            # actually sent on a connect()'d UDP socket, and the route to
+            # the rover's rosbridge port is the same route as to its video
+            # port, so this is harmless either way - but probing video_port
+            # here reads as copy/paste from publish_video_request below it.
             address = self.local_address_for(self.host_input.text().strip() or "127.0.0.1",
-                                              self.video_port)
+                                              self._current_rosbridge_port())
             if not address:
                 panel.apply_status({"state": "failed", "detail": "no route to the rover"})
                 return
