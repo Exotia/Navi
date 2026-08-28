@@ -1,11 +1,16 @@
+import json
+
 from ground_station.ros_client import RosBridgeClient
 from ground_station.ui.main_window import MainWindow
+from tests.test_video_panel import FakeReceiver
 
 
 class FakeTopic:
     instances = []
 
     def __init__(self, ros, name, msg_type):
+        self.name = name
+        self.msg_type = msg_type
         self.callback = None
         self.published_messages = []
         FakeTopic.instances.append(self)
@@ -76,13 +81,17 @@ def make_fake_client_factory():
     return factory
 
 
-def make_window(qtbot, initial_host="localhost", gamepad_reader=None):
+def make_window(qtbot, initial_host="localhost", gamepad_reader=None, video_receiver=None):
     FakeRos.instances.clear()
     FakeTopic.instances.clear()
     window = MainWindow(
         ros_client_factory=make_fake_client_factory(),
         initial_host=initial_host,
         gamepad_reader=gamepad_reader if gamepad_reader is not None else FakeGamepadReader(),
+        # A fake receiver by default, same reasoning as the fake gamepad
+        # above: no test should spawn a real gst-launch-1.0 subprocess just
+        # from constructing a window.
+        video_receiver=video_receiver if video_receiver is not None else FakeReceiver(),
     )
     qtbot.addWidget(window)
     if initial_host:
@@ -271,7 +280,10 @@ def test_gamepad_publishes_manual_twist_when_gamepad_and_rosbridge_both_present(
 
     window._poll_gamepad()
 
-    topic = FakeTopic.instances[-1]
+    # subscribe_video_status() (added in _connect_to alongside
+    # subscribe_manual_twist()) creates its own topic, so instances[-1] is
+    # no longer reliably the manual_twist topic - select it by name instead.
+    topic = next(t for t in FakeTopic.instances if t.name == "/manual_twist")
     assert topic.published_messages == [{
         "linear": {"x": 0.4, "y": -0.05, "z": 0.0},
         "angular": {"x": 0.0, "y": 0.0, "z": 0.1},
@@ -287,7 +299,8 @@ def test_gamepad_disconnected_does_not_publish(qtbot):
 
     window._poll_gamepad()
 
-    assert FakeTopic.instances[-1].published_messages == []
+    manual_twist_topic = next(t for t in FakeTopic.instances if t.name == "/manual_twist")
+    assert manual_twist_topic.published_messages == []
 
 
 def test_gamepad_updates_local_display_even_without_a_rosbridge_connection(qtbot):
@@ -309,7 +322,7 @@ def test_gamepad_updates_local_display_even_without_a_rosbridge_connection(qtbot
 def test_gamepad_disconnect_sends_one_zero_velocity_stop_then_stays_quiet(qtbot):
     gamepad = FakeGamepadReader(connected=True, twist=(0.4, 0.0, 0.0))
     window, _ = make_window(qtbot, initial_host="localhost", gamepad_reader=gamepad)
-    topic = FakeTopic.instances[-1]
+    topic = next(t for t in FakeTopic.instances if t.name == "/manual_twist")
 
     window._poll_gamepad()
     assert len(topic.published_messages) == 1
@@ -328,3 +341,64 @@ def test_gamepad_disconnect_sends_one_zero_velocity_stop_then_stays_quiet(qtbot)
     window._poll_gamepad()
 
     assert len(topic.published_messages) == 2
+
+
+def _last_video_request():
+    """Finds the /video_request topic's most recent published payload,
+    decoded from the JSON string the real RosBridgeClient sends - there is
+    no fake client here (make_fake_client_factory builds a real
+    RosBridgeClient over FakeRos/FakeTopic), so requests are observed the
+    same way tests/test_ros_client.py observes them: through the topic."""
+    topic = next(t for t in FakeTopic.instances if t.name == "/video_request")
+    return json.loads(topic.published_messages[-1]["data"])
+
+
+def test_dashboard_has_a_video_panel(qtbot):
+    window, _ = make_window(qtbot)
+
+    assert window.dashboard_page.video_panel is not None
+
+
+def test_enabling_video_publishes_a_request_with_our_own_address(qtbot):
+    window, _ = make_window(qtbot, initial_host="192.168.178.33")
+
+    window._on_stream_requested(True)
+
+    request = _last_video_request()
+    assert request["enable"] is True
+    assert request["port"] == 5600
+    assert request["host"]
+
+
+def test_disabling_video_stops_the_receiver_even_if_the_rover_never_answers(qtbot):
+    window, _ = make_window(qtbot, initial_host="192.168.178.33")
+    window._on_stream_requested(True)
+
+    window._on_stream_requested(False)
+
+    assert window.dashboard_page.video_panel.receiver.stopped
+
+
+def test_video_status_reaches_the_panel(qtbot):
+    window, _ = make_window(qtbot, initial_host="192.168.178.33")
+
+    window._on_video_status({"state": "streaming", "detail": "10.0.0.5:5600"})
+
+    assert "STREAMING" in window.dashboard_page.video_panel.status_label.text().upper()
+
+
+def test_requesting_video_without_a_connection_is_ignored(qtbot):
+    window, client = make_window(qtbot, initial_host="")
+    assert client is None
+
+    window._on_stream_requested(True)
+
+    assert window.dashboard_page.video_panel._streaming is False
+
+
+def test_local_address_is_the_interface_that_reaches_the_rover(qtbot):
+    window, _ = make_window(qtbot)
+
+    address = window.local_address_for("192.168.178.33", 9090)
+
+    assert address.count(".") == 3

@@ -1,3 +1,4 @@
+import socket
 import sys
 
 from PySide6.QtCore import QTimer
@@ -16,9 +17,11 @@ class MainWindow(QMainWindow):
     def __init__(self, ros_client_factory=RosBridgeClient, initial_host: str | None = None,
                  initial_port: int = 9090, node_poll_interval_ms: int = 2000,
                  staleness_check_interval_ms: int = 500, stale_after_seconds: float = 1.0,
-                 gamepad_reader=None, gamepad_poll_interval_ms: int = 50):
+                 gamepad_reader=None, gamepad_poll_interval_ms: int = 50,
+                 video_receiver=None, video_port: int = 5600):
         super().__init__()
         self.stale_after_seconds = stale_after_seconds
+        self.video_port = video_port
         self.setWindowTitle("Asterope Ground Station")
         self.setStyleSheet(f"QMainWindow {{ background-color: {theme.BG}; }}")
         self.ros_client_factory = ros_client_factory
@@ -70,7 +73,7 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.connect_button)
         header_layout.addWidget(self.connection_label)
 
-        self.dashboard_page = DashboardPage()
+        self.dashboard_page = DashboardPage(video_receiver=video_receiver)
         self.drive_detail_page = DriveDetailPage()
         self.stacked_widget = QStackedWidget()
         self.stacked_widget.addWidget(self.dashboard_page)
@@ -89,6 +92,7 @@ class MainWindow(QMainWindow):
         self.drive_detail_page.back_requested.connect(
             lambda: self.stacked_widget.setCurrentWidget(self.dashboard_page)
         )
+        self.dashboard_page.video_panel.stream_requested.connect(self._on_stream_requested)
 
         self._node_poll_timer = QTimer(self)
         self._node_poll_timer.timeout.connect(self._poll_nodes)
@@ -159,10 +163,12 @@ class MainWindow(QMainWindow):
         self.ros_client.signals.twist_received.connect(self._on_twist)
         self.ros_client.signals.nodes_received.connect(self._on_nodes)
         self.ros_client.signals.connection_changed.connect(self._on_connection_changed)
+        self.ros_client.signals.video_status_received.connect(self._on_video_status)
 
         try:
             self.ros_client.connect()
             self.ros_client.subscribe_manual_twist()
+            self.ros_client.subscribe_video_status()
         except Exception as exc:
             print(f"ground_station: failed to connect to rosbridge: {exc}", file=sys.stderr)
 
@@ -202,3 +208,46 @@ class MainWindow(QMainWindow):
         if elapsed is not None and elapsed > self.stale_after_seconds:
             self.dashboard_page.drive_card.mark_stale()
             self.drive_detail_page.mark_stale()
+
+    def local_address_for(self, host: str, port: int) -> str:
+        """Our own address on the interface that reaches the rover. The
+        rover cannot discover this itself - it is the server side of
+        rosbridge - and a hardcoded laptop address breaks on every network
+        change, so it is read back from a UDP socket connected to the
+        rover (connect() on a UDP socket just assigns a local address/route
+        without sending anything)."""
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect((host, port))
+            return probe.getsockname()[0]
+        except OSError:
+            return ""
+        finally:
+            probe.close()
+
+    def _on_stream_requested(self, enable: bool) -> None:
+        panel = self.dashboard_page.video_panel
+        if self.ros_client is None or not self.ros_client.is_connected:
+            panel.apply_status({"state": "failed", "detail": "not connected to rosbridge"})
+            return
+
+        if enable:
+            address = self.local_address_for(self.host_input.text().strip() or "127.0.0.1",
+                                              self.video_port)
+            if not address:
+                panel.apply_status({"state": "failed", "detail": "no route to the rover"})
+                return
+            self.ros_client.publish_video_request(
+                enable=True, host=address, port=self.video_port,
+                width=1344, height=376, fps=30, bitrate_kbps=800)
+        else:
+            self.ros_client.publish_video_request(
+                enable=False, host="", port=self.video_port,
+                width=1344, height=376, fps=30, bitrate_kbps=800)
+        # The local receiver follows our own intent, not the rover's answer:
+        # on disable it must stop regardless of whether the rover ever
+        # replies, so a dead link cannot leave a stream pointed at us.
+        panel.set_streaming(enable)
+
+    def _on_video_status(self, status: dict) -> None:
+        self.dashboard_page.video_panel.apply_status(status)
