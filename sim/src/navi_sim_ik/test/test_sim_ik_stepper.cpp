@@ -17,36 +17,38 @@ TEST(SimIkStepper, StartsAtTheOrigin)
 TEST(SimIkStepper, DrivingForwardMovesAlongXAndNotAcross)
 {
   // The real IK's constrained output is not perfectly decoupled: driving from
-  // a standing start measurably shows up as ~0.076 m of cross-track drift and
-  // ~0.056 rad of yaw over these 100 steps (traced to a small non-zero
+  // a standing start measurably shows up as 0.0764 m of cross-track drift and
+  // 0.0562 rad of yaw over these 100 steps (traced to a small non-zero
   // eta_dot_constrained[2] the model itself settles to while VX_out is
   // nonzero and VY_out/U_p are zero - not an artifact of this wrapper, and
-  // reproducible by feeding the vendored model directly). The tolerance here
-  // is set above that measured coupling, not down to it, so a future
-  // regression that reintroduces a much larger, unrelated cross-track error
-  // still fails this test.
+  // reproducible by feeding the vendored model directly). These are measured
+  // baselines from the current, correct implementation, not analytically
+  // derived - the +/-0.03 band is a regression guard around them, wide
+  // enough for ordinary numerical noise but tight enough that a change which
+  // doubled or erased the real coupling would fail either bound.
   SimIkStepper stepper;
   for (int i = 0; i < 100; ++i) {   // 6 seconds
     stepper.step(0.5, 0.0, 0.0);
   }
   EXPECT_GT(stepper.pose().x, 1.0);
-  EXPECT_NEAR(stepper.pose().y, 0.0, 0.1);
-  EXPECT_NEAR(stepper.pose().yaw, 0.0, 0.1);
+  EXPECT_NEAR(stepper.pose().y, 0.0764, 0.03);
+  EXPECT_NEAR(stepper.pose().yaw, 0.0562, 0.03);
 }
 
 TEST(SimIkStepper, TurningInPlaceChangesYawWithoutTravelling)
 {
-  // As above: the vendored IK measurably produces ~0.079 m of transient x
+  // As above: the vendored IK measurably produces -0.0792 m of transient x
   // travel while spinning up from a standing start (the wheels take a moment
   // to swing into the turn-in-place configuration, and that transient is real
-  // motion the vehicle would actually make). The tolerance sits above the
-  // measured value rather than being loosened down to it.
+  // motion the vehicle would actually make). Measured baseline, not derived;
+  // the +/-0.03 band around it is a two-sided regression guard rather than a
+  // ceiling, so a change that doubled the real transient would also fail.
   SimIkStepper stepper;
   for (int i = 0; i < 100; ++i) {
     stepper.step(0.0, 0.0, 0.4);
   }
   EXPECT_GT(std::abs(stepper.pose().yaw), 0.5);
-  EXPECT_NEAR(stepper.pose().x, 0.0, 0.1);
+  EXPECT_NEAR(stepper.pose().x, -0.0792, 0.03);
   EXPECT_NEAR(stepper.pose().y, 0.0, 0.05);
 }
 
@@ -101,11 +103,43 @@ TEST(SimIkStepper, StandingStillDoesNotDrift)
   EXPECT_NEAR(stepper.pose().yaw, 0.0, 1e-9);
 }
 
-TEST(SimIkStepper, TheCornerNamesAreTheOnesTheUrdfUses)
+TEST(SimIkStepper, WheelCornersMatchesThePinnedMapping)
 {
+  // This does not check the URDF - it pins the wheel-index-to-corner mapping
+  // against silent edits. The mapping itself is unverified wiring knowledge
+  // (see the WHEEL_CORNERS comment); this test only guarantees that changing
+  // it is a visible, deliberate diff rather than a quiet one.
   const std::array<const char *, 4> expected{
     "front_left", "front_right", "rear_right", "rear_left"};
   for (int i = 0; i < 4; ++i) {
     EXPECT_STREQ(navi_sim_ik::WHEEL_CORNERS[i], expected[i]);
   }
+}
+
+TEST(SimIkStepper, YawIsIntegratedFromTheStartOfStepNotTheEnd)
+{
+  // Guards against applying the yaw update before the x/y update within a
+  // single step(), which would rotate each step's translation by the yaw it
+  // is *about* to reach rather than the yaw it held when the step began.
+  // Pure rotation alone can't expose this (there is no x/y to rotate), and
+  // pure translation alone can't either (yaw_rate is zero, so the two
+  // orderings agree). It needs translation and rotation together, at a
+  // yaw_rate large enough that one step's worth of yaw materially changes
+  // the rotation matrix - hence 0.6 rad/s while driving, tracing an arc.
+  //
+  // The expected endpoint below is measured from the current, correct
+  // implementation (integrate x/y using the yaw held at the start of the
+  // step, then advance yaw) - it is not analytically derived. Swapping the
+  // two update lines in step() shifts the endpoint by roughly one step's
+  // yaw increment applied to the whole path, which at these values is on
+  // the order of 0.1 m - an order of magnitude past the 0.02 m tolerance
+  // here, so that ordering bug fails this test while ordinary numerical
+  // noise does not.
+  SimIkStepper stepper;
+  for (int i = 0; i < 100; ++i) {
+    stepper.step(0.5, 0.0, 0.6);
+  }
+  EXPECT_NEAR(stepper.pose().x, -0.0841218, 0.02);
+  EXPECT_NEAR(stepper.pose().y, 1.6467001, 0.02);
+  EXPECT_NEAR(stepper.pose().yaw, 3.2995396, 0.02);
 }

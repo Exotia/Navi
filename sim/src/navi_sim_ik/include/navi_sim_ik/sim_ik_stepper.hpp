@@ -14,8 +14,9 @@ namespace navi_sim_ik
 /// Drive Module 1-4 on the I2C bus, but nothing in this project records which
 /// corner each module is bolted to - that is wiring knowledge. Getting it
 /// wrong steers the wrong corners while looking entirely plausible, which is
-/// why it is one named constant, logged at startup, rather than four
-/// scattered indices.
+/// why it is one named constant, meant to be surfaced (logged, reported -
+/// whatever the consuming node does) rather than four scattered indices, so
+/// whoever wires up the real robot has one place to check it against.
 extern const std::array<const char *, 4> WHEEL_CORNERS;
 
 struct Pose2D
