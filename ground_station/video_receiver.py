@@ -25,6 +25,8 @@ import argparse
 import io
 import os
 import subprocess
+import tempfile
+from pathlib import Path
 
 
 def build_receive_pipeline(port: int, width: int, height: int) -> list[str]:
@@ -62,6 +64,7 @@ class VideoReceiver:
         self._launcher = launcher
         self._process = None
         self._buffer = bytearray()
+        self._stderr_path: str | None = None
 
     @property
     def frame_size(self) -> int:
@@ -74,14 +77,38 @@ class VideoReceiver:
     def start(self) -> None:
         if self._process is not None:
             return
-        self._process = self._launcher(
-            build_receive_pipeline(self.port, self.width, self.height),
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
+        # Defensive: a previous run's stderr temp file should already have
+        # been removed by stop(), but if start() is ever called without a
+        # matching stop() first (e.g. after the process died on its own),
+        # don't leak a stale file on top of the new one.
+        self._remove_stderr_file()
+        # stderr goes to a temp file, not subprocess.PIPE: gst-launch-1.0 -q
+        # still prints bus WARNING/ERROR text (-q only suppresses progress),
+        # and rtph264depay/avdec_h264 warn on every loss burst - the normal
+        # steady state of the lossy link this feature exists for. Nothing
+        # ever read a PIPE here, so at ~64 KB the pipe would fill and the
+        # streaming thread would block in write(), stalling the pipeline
+        # permanently. A temp file needs no reader thread and keeps the text
+        # diagnosable on disk instead.
+        stderr_file = tempfile.NamedTemporaryFile(
+            mode="w", prefix="video_receiver_stderr_", delete=False)
+        self._stderr_path = stderr_file.name
+        try:
+            self._process = self._launcher(
+                build_receive_pipeline(self.port, self.width, self.height),
+                stdout=subprocess.PIPE, stderr=stderr_file,
+            )
+        finally:
+            stderr_file.close()
         try:
             os.set_blocking(self._process.stdout.fileno(), False)
         except (AttributeError, OSError, io.UnsupportedOperation):
             pass
+
+    def _remove_stderr_file(self) -> None:
+        if self._stderr_path is not None:
+            Path(self._stderr_path).unlink(missing_ok=True)
+            self._stderr_path = None
 
     def stop(self) -> None:
         if self._process is None:
@@ -93,6 +120,7 @@ class VideoReceiver:
             self._process.kill()
         self._process = None
         self._buffer.clear()
+        self._remove_stderr_file()
 
     def read_frame(self) -> bytes | None:
         """One complete frame, or None if a whole frame is not available

@@ -1,4 +1,5 @@
 import io
+import os
 import shutil
 import subprocess
 
@@ -103,6 +104,37 @@ def test_start_is_idempotent():
     receiver.start()
 
     assert receiver._process is first
+
+
+def test_stop_removes_the_stderr_temp_file():
+    # Critical 1: stderr is redirected to a temp file (not subprocess.PIPE,
+    # which nothing ever drains and which fills and stalls the pipeline).
+    # The node itself must remove that file when the stream ends - not a
+    # test fixture cleaning up after it.
+    receiver, _ = make_receiver()
+    receiver.start()
+    stderr_path = receiver._stderr_path
+    assert stderr_path is not None
+    assert os.path.exists(stderr_path)
+
+    receiver.stop()
+
+    assert not os.path.exists(stderr_path)
+    assert receiver._stderr_path is None
+
+
+def test_start_after_a_stop_does_not_reuse_or_leak_the_previous_stderr_file():
+    receiver, _ = make_receiver()
+    receiver.start()
+    first_path = receiver._stderr_path
+    receiver.stop()
+
+    receiver.start()
+
+    assert receiver._stderr_path is not None
+    assert receiver._stderr_path != first_path
+    assert os.path.exists(receiver._stderr_path)
+    receiver.stop()
 
 
 def test_is_running_is_false_after_the_process_dies():
