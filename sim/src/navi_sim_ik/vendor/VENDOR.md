@@ -16,3 +16,26 @@ exist.
 The reason for vendoring rather than reimplementing: the simulation must run
 the same arithmetic as the rover, so that a disagreement between them is a
 real disagreement and not a porting artifact.
+
+## Licence
+
+Eight of the fourteen files under `ert_rtw/` open with this banner (copied
+verbatim from the generated headers/sources):
+
+```
+// Academic License - for use in teaching, academic research, and meeting
+// course requirements at degree granting institutions only.  Not for
+// government, commercial, or other organizational use.
+```
+
+Files carrying it: `kinematics.h`, `kinematics.cpp`, `kinematics_capi.h`,
+`kinematics_capi.cpp`, `kinematics_data.cpp`, `builtin_typeid_types.h`,
+`rtwtypes.h`, `zero_crossing_types.h`.
+
+Files that do NOT carry it: `gpc.h`, `kinematics_capi_host.h`, `rtw_capi.h`,
+`rtw_modelmap.h`, `rtw_modelmap_logging.h`, `sysran_types.h`, and
+`IkController.h`/`IkController.cpp`.
+
+This was noted at the time of vendoring. It has not been assessed by anyone
+with the authority to rule on whether it affects this project's use of the
+code.
