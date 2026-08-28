@@ -231,3 +231,55 @@ def test_apply_status_streaming_before_local_start_is_not_plain_success(qtbot):
     text = panel.status_label.text().upper()
     assert "NOT RECEIVING" in text
     assert not text.startswith("STREAMING ")
+
+
+def test_the_frame_is_scaled_to_fit_the_label_keeping_its_aspect_ratio(qtbot):
+    # The panel has to be resizable: pinning the label to the stream's own
+    # 672x376 forced the whole window to at least that width, and a wider
+    # panel left the picture stranded at native size in the middle of it.
+    receiver = FakeReceiver(frame=bytes([120]) * (4 * 2 * 3))
+    panel = VideoPanel(receiver=receiver)
+    qtbot.addWidget(panel)
+    panel.set_streaming(True)
+    panel._poll_frame(now=100.0)
+
+    panel.image_label.resize(200, 200)
+    panel._render_frame()
+
+    painted = panel.image_label.pixmap()
+    assert painted.width() <= 200
+    assert painted.height() <= 200
+    # 4x2 source, so a 200-wide box gives 200x100 rather than a stretched square.
+    assert painted.width() == 200
+    assert painted.height() == 100
+
+
+def test_resizing_rescales_the_frame_already_on_screen(qtbot):
+    # Without this the picture keeps its old size until the next frame
+    # arrives - and on a stalled stream, forever.
+    receiver = FakeReceiver(frame=bytes([120]) * (4 * 2 * 3))
+    panel = VideoPanel(receiver=receiver)
+    qtbot.addWidget(panel)
+    panel.set_streaming(True)
+    panel._poll_frame(now=100.0)
+    panel.image_label.resize(400, 400)
+    panel._render_frame()
+    assert panel.image_label.pixmap().width() == 400
+
+    # Above the label's own minimum width, or Qt clamps the resize and the
+    # test would be measuring that instead of the rescale.
+    panel.image_label.resize(200, 200)
+    panel._render_frame()
+
+    assert panel.image_label.pixmap().width() == 200
+
+
+def test_the_label_does_not_impose_the_streams_own_size_as_a_minimum(qtbot):
+    # 672x376 as a minimum is what stopped the window being made smaller.
+    receiver = FakeReceiver()
+    receiver.width, receiver.height = 672, 376
+    panel = VideoPanel(receiver=receiver)
+    qtbot.addWidget(panel)
+
+    assert panel.image_label.minimumWidth() < 672
+    assert panel.image_label.minimumHeight() < 376

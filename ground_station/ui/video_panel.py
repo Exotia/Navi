@@ -11,7 +11,8 @@ from time import monotonic
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QImage, QPixmap
-from PySide6.QtWidgets import QLabel, QPushButton, QVBoxLayout, QHBoxLayout, QWidget
+from PySide6.QtWidgets import (QLabel, QPushButton, QSizePolicy, QVBoxLayout,
+                               QHBoxLayout, QWidget)
 
 from ground_station import theme
 from ground_station.video_receiver import VideoReceiver
@@ -27,6 +28,10 @@ class VideoPanel(QWidget):
         self.no_frame_after_seconds = no_frame_after_seconds
         self._streaming = False
         self._last_frame_at: float | None = None
+        # Kept as bytes rather than a QImage: QImage does not copy the
+        # buffer it is given, so holding one would mean holding the frame
+        # alive by hand anyway. Re-wrapping on each render costs nothing.
+        self._last_frame: bytes | None = None
         self._rover_state = "stopped"
         self._rover_detail = ""
         # Tracks the state the button has *requested*, separate from
@@ -45,7 +50,12 @@ class VideoPanel(QWidget):
 
         self.image_label = QLabel()
         self.image_label.setAlignment(Qt.AlignCenter)
-        self.image_label.setMinimumSize(self.receiver.width, self.receiver.height)
+        # A small fixed minimum, not the stream's own size. Pinning the
+        # label to 672x376 made that the floor for the whole window, and
+        # the operator could not shrink the ground station below it. The
+        # picture is scaled to whatever room the label ends up with.
+        self.image_label.setMinimumSize(160, 90)
+        self.image_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.image_label.setStyleSheet(f"background-color: {theme.BG}; border: none;")
 
         self.toggle_button = QPushButton("Start video")
@@ -118,6 +128,7 @@ class VideoPanel(QWidget):
         self._toggle_requested = False
         self.toggle_button.setText("Start video")
         self.receiver.stop()
+        self._last_frame = None
         self.image_label.clear()
         if not (keep_failed_reason and self._rover_state == "failed"):
             self._rover_state = "stopped"
@@ -156,12 +167,34 @@ class VideoPanel(QWidget):
             latest = frame
         if latest is not None:
             self._last_frame_at = now
-            image = QImage(latest, self.receiver.width, self.receiver.height,
-                           self.receiver.width * 3, QImage.Format_RGB888)
-            self.image_label.setPixmap(QPixmap.fromImage(image))
+            self._last_frame = latest
+            self._render_frame()
         elif self._last_frame_at is None:
             self._last_frame_at = now
         self._refresh_status(now)
+
+    def _render_frame(self) -> None:
+        """Draws the last frame received, scaled to the room the label has
+        now. Separate from _poll_frame so a resize redraws immediately
+        instead of waiting for the next frame - which on a stalled stream
+        would be never."""
+        if self._last_frame is None:
+            return
+        image = QImage(self._last_frame, self.receiver.width, self.receiver.height,
+                       self.receiver.width * 3, QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(image)
+        target = self.image_label.size()
+        if target.width() > 0 and target.height() > 0:
+            # KeepAspectRatio, so the widest dimension fits and the picture
+            # is letterboxed rather than stretched - a distorted camera view
+            # misleads about what is in front of the rover.
+            pixmap = pixmap.scaled(target, Qt.KeepAspectRatio,
+                                   Qt.SmoothTransformation)
+        self.image_label.setPixmap(pixmap)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._render_frame()
 
     def _refresh_status(self, now: float | None = None) -> None:
         # The rover's reported state is shown even when this panel is not
