@@ -23,9 +23,17 @@ def build_send_pipeline(host: str, port: int, width: int, height: int,
                         fps: int, bitrate_kbps: int) -> list[str]:
     return [
         "gst-launch-1.0", "-q",
-        "fdsrc", "fd=0",
-        "!", f"video/x-raw,format=RGB,width={width},height={height},"
-             f"framerate={fps}/1",
+        # fdsrc reads a pipe, not a camera: it emits fixed-size chunks with
+        # no notion of where a frame ends, and blocksize makes those chunks
+        # whole frames rather than 186 fragments of one.
+        "fdsrc", "fd=0", f"blocksize={width * height * 3}",
+        # rawvideoparse, not a capsfilter. A capsfilter chunks nothing - it
+        # only asserts that each buffer already is a frame of this size, and
+        # when that is false the encoder compresses malformed buffers and the
+        # decoder emits its zeroed output buffer, which renders as solid
+        # green. rawvideoparse is what actually cuts the stream into frames.
+        "!", "rawvideoparse", f"width={width}", f"height={height}",
+        "format=rgb", f"framerate={fps}/1",
         "!", "videoconvert",
         "!", "x264enc", "tune=zerolatency", "speed-preset=ultrafast",
         f"bitrate={bitrate_kbps}", "key-int-max=30",
