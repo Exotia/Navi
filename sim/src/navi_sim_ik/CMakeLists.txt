@@ -28,6 +28,12 @@ target_link_libraries(navi_sim_ik_stepper navi_sim_ik_model)
 target_include_directories(navi_sim_ik_stepper PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 
+add_executable(sim_ik_node src/sim_ik_node.cpp)
+target_link_libraries(sim_ik_node navi_sim_ik_stepper)
+ament_target_dependencies(sim_ik_node
+  rclcpp geometry_msgs sensor_msgs nav_msgs std_msgs trajectory_msgs)
+install(TARGETS sim_ik_node DESTINATION lib/${PROJECT_NAME})
+
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_vendored_model test/test_vendored_model.cpp)
