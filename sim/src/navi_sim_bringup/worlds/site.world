@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<!-- sim/src/navi_sim_bringup/worlds/site.world -->
+<sdf version="1.6">
+  <world name="site">
+    <include><uri>model://sun</uri></include>
+
+    <!-- The rover drives on this, not on the scan. The scan is scenery:
+         with no physics there is nothing to stand on, and its 1.68 M faces
+         would be a punishing collision mesh for no benefit. -->
+    <model name="ground">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>200 200</size></plane></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>200 200</size></plane></geometry>
+          <material><ambient>0.25 0.25 0.28 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- The scanned site. MAP_MESH_PATH is substituted by the launch file:
+         the .obj is gitignored and 161 MB, so it is not in this repository
+         and its location cannot be hardcoded. -->
+    <model name="site_scan">
+      <static>true</static>
+      <link name="link">
+        <visual name="visual">
+          <geometry><mesh><uri>file://MAP_MESH_PATH</uri></mesh></geometry>
+        </visual>
+      </link>
+    </model>
+  </world>
+</sdf>
