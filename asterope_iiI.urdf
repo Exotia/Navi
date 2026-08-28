@@ -507,6 +507,18 @@
         <origin xyz="0 0 0" rpy="-1.570796327 0 -1.570796327"/>
     </joint>
 
+    <!-- Pre-existing block, kept as found. Do not copy it as an example:
+         <static> is a *model* property and has no meaning inside a
+         link-reference block, so this line does nothing. Proof rather than
+         theory: gazebo_ros_planar_move moves this model in the simulation
+         regardless, which a genuinely static model would not do. <gravity>
+         and <kinematic> are link properties and do apply; they are left
+         exactly where they are because relocating them would need a Gazebo
+         run to confirm nothing depends on them here.
+         The simulation-only counterparts for the eight steer/wheel links
+         live in sim/src/navi_sim_bringup/urdf/asterope_sim.urdf.xacro,
+         which is where new sim-only configuration belongs - this file
+         describes the real rover. -->
     <gazebo reference="base_link">
         <static>true</static>
         <gravity>false</gravity>
@@ -518,7 +530,46 @@
          the ground at -0.409. One link each: a wheel baked into
          base_link could neither be steered nor coloured separately. -->
 
+    <link name="steer_front_left">
+        <!-- Nominal inertial, not measured: a steering housing needs some
+             plausible mass/inertia here only because Gazebo's URDF->SDF
+             conversion silently drops any link on a non-fixed joint that
+             has none. Not hardware data. -->
+        <inertial>
+            <origin xyz="0 0 0.08" rpy="0 0 0"/>
+            <mass value="1.0"/>
+            <inertia ixx="0.0030" ixy="0.0" ixz="0.0"
+                     iyy="0.0030" iyz="0.0" izz="0.0018"/>
+        </inertial>
+        <visual>
+            <origin xyz="0 0 0.08" rpy="0 0 0"/>
+            <geometry>
+                <cylinder radius="0.06" length="0.16"/>
+            </geometry>
+            <material name="silver"/>
+        </visual>
+    </link>
+
+    <joint name="steer_front_left_joint" type="revolute">
+        <parent link="base_link"/>
+        <child link="steer_front_left"/>
+        <origin xyz="0.455 0.455 -0.284" rpy="0 0 0"/>
+        <axis xyz="0 0 1"/>
+        <!-- One turn either way: the steer module is cabled, not a slip ring. -->
+        <limit lower="-3.14159265" upper="3.14159265" effort="100" velocity="6.0"/>
+    </joint>
+
     <link name="wheel_front_left">
+        <!-- Nominal inertial, not measured: a wheel needs some plausible
+             mass/inertia here only because Gazebo's URDF->SDF conversion
+             silently drops any link on a non-fixed joint that has none.
+             Not hardware data. -->
+        <inertial>
+            <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
+            <mass value="4.0"/>
+            <inertia ixx="0.0290" ixy="0.0" ixz="0.0"
+                     iyy="0.0290" iyz="0.0" izz="0.0313"/>
+        </inertial>
         <visual>
             <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
             <geometry>
@@ -534,13 +585,53 @@
         </collision>
     </link>
 
-    <joint name="wheel_front_left_joint" type="fixed">
-        <parent link="base_link"/>
+    <joint name="wheel_front_left_joint" type="continuous">
+        <parent link="steer_front_left"/>
         <child link="wheel_front_left"/>
-        <origin xyz="0.455 0.455 -0.284" rpy="0 0 0"/>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <axis xyz="0 1 0"/>
+    </joint>
+
+    <link name="steer_front_right">
+        <!-- Nominal inertial, not measured: a steering housing needs some
+             plausible mass/inertia here only because Gazebo's URDF->SDF
+             conversion silently drops any link on a non-fixed joint that
+             has none. Not hardware data. -->
+        <inertial>
+            <origin xyz="0 0 0.08" rpy="0 0 0"/>
+            <mass value="1.0"/>
+            <inertia ixx="0.0030" ixy="0.0" ixz="0.0"
+                     iyy="0.0030" iyz="0.0" izz="0.0018"/>
+        </inertial>
+        <visual>
+            <origin xyz="0 0 0.08" rpy="0 0 0"/>
+            <geometry>
+                <cylinder radius="0.06" length="0.16"/>
+            </geometry>
+            <material name="silver"/>
+        </visual>
+    </link>
+
+    <joint name="steer_front_right_joint" type="revolute">
+        <parent link="base_link"/>
+        <child link="steer_front_right"/>
+        <origin xyz="0.455 -0.455 -0.284" rpy="0 0 0"/>
+        <axis xyz="0 0 1"/>
+        <!-- One turn either way: the steer module is cabled, not a slip ring. -->
+        <limit lower="-3.14159265" upper="3.14159265" effort="100" velocity="6.0"/>
     </joint>
 
     <link name="wheel_front_right">
+        <!-- Nominal inertial, not measured: a wheel needs some plausible
+             mass/inertia here only because Gazebo's URDF->SDF conversion
+             silently drops any link on a non-fixed joint that has none.
+             Not hardware data. -->
+        <inertial>
+            <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
+            <mass value="4.0"/>
+            <inertia ixx="0.0290" ixy="0.0" ixz="0.0"
+                     iyy="0.0290" iyz="0.0" izz="0.0313"/>
+        </inertial>
         <visual>
             <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
             <geometry>
@@ -556,13 +647,53 @@
         </collision>
     </link>
 
-    <joint name="wheel_front_right_joint" type="fixed">
-        <parent link="base_link"/>
+    <joint name="wheel_front_right_joint" type="continuous">
+        <parent link="steer_front_right"/>
         <child link="wheel_front_right"/>
-        <origin xyz="0.455 -0.455 -0.284" rpy="0 0 0"/>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <axis xyz="0 1 0"/>
+    </joint>
+
+    <link name="steer_rear_left">
+        <!-- Nominal inertial, not measured: a steering housing needs some
+             plausible mass/inertia here only because Gazebo's URDF->SDF
+             conversion silently drops any link on a non-fixed joint that
+             has none. Not hardware data. -->
+        <inertial>
+            <origin xyz="0 0 0.08" rpy="0 0 0"/>
+            <mass value="1.0"/>
+            <inertia ixx="0.0030" ixy="0.0" ixz="0.0"
+                     iyy="0.0030" iyz="0.0" izz="0.0018"/>
+        </inertial>
+        <visual>
+            <origin xyz="0 0 0.08" rpy="0 0 0"/>
+            <geometry>
+                <cylinder radius="0.06" length="0.16"/>
+            </geometry>
+            <material name="silver"/>
+        </visual>
+    </link>
+
+    <joint name="steer_rear_left_joint" type="revolute">
+        <parent link="base_link"/>
+        <child link="steer_rear_left"/>
+        <origin xyz="-0.455 0.455 -0.284" rpy="0 0 0"/>
+        <axis xyz="0 0 1"/>
+        <!-- One turn either way: the steer module is cabled, not a slip ring. -->
+        <limit lower="-3.14159265" upper="3.14159265" effort="100" velocity="6.0"/>
     </joint>
 
     <link name="wheel_rear_left">
+        <!-- Nominal inertial, not measured: a wheel needs some plausible
+             mass/inertia here only because Gazebo's URDF->SDF conversion
+             silently drops any link on a non-fixed joint that has none.
+             Not hardware data. -->
+        <inertial>
+            <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
+            <mass value="4.0"/>
+            <inertia ixx="0.0290" ixy="0.0" ixz="0.0"
+                     iyy="0.0290" iyz="0.0" izz="0.0313"/>
+        </inertial>
         <visual>
             <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
             <geometry>
@@ -578,13 +709,53 @@
         </collision>
     </link>
 
-    <joint name="wheel_rear_left_joint" type="fixed">
-        <parent link="base_link"/>
+    <joint name="wheel_rear_left_joint" type="continuous">
+        <parent link="steer_rear_left"/>
         <child link="wheel_rear_left"/>
-        <origin xyz="-0.455 0.455 -0.284" rpy="0 0 0"/>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <axis xyz="0 1 0"/>
+    </joint>
+
+    <link name="steer_rear_right">
+        <!-- Nominal inertial, not measured: a steering housing needs some
+             plausible mass/inertia here only because Gazebo's URDF->SDF
+             conversion silently drops any link on a non-fixed joint that
+             has none. Not hardware data. -->
+        <inertial>
+            <origin xyz="0 0 0.08" rpy="0 0 0"/>
+            <mass value="1.0"/>
+            <inertia ixx="0.0030" ixy="0.0" ixz="0.0"
+                     iyy="0.0030" iyz="0.0" izz="0.0018"/>
+        </inertial>
+        <visual>
+            <origin xyz="0 0 0.08" rpy="0 0 0"/>
+            <geometry>
+                <cylinder radius="0.06" length="0.16"/>
+            </geometry>
+            <material name="silver"/>
+        </visual>
+    </link>
+
+    <joint name="steer_rear_right_joint" type="revolute">
+        <parent link="base_link"/>
+        <child link="steer_rear_right"/>
+        <origin xyz="-0.455 -0.455 -0.284" rpy="0 0 0"/>
+        <axis xyz="0 0 1"/>
+        <!-- One turn either way: the steer module is cabled, not a slip ring. -->
+        <limit lower="-3.14159265" upper="3.14159265" effort="100" velocity="6.0"/>
     </joint>
 
     <link name="wheel_rear_right">
+        <!-- Nominal inertial, not measured: a wheel needs some plausible
+             mass/inertia here only because Gazebo's URDF->SDF conversion
+             silently drops any link on a non-fixed joint that has none.
+             Not hardware data. -->
+        <inertial>
+            <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
+            <mass value="4.0"/>
+            <inertia ixx="0.0290" ixy="0.0" ixz="0.0"
+                     iyy="0.0290" iyz="0.0" izz="0.0313"/>
+        </inertial>
         <visual>
             <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
             <geometry>
@@ -600,10 +771,11 @@
         </collision>
     </link>
 
-    <joint name="wheel_rear_right_joint" type="fixed">
-        <parent link="base_link"/>
+    <joint name="wheel_rear_right_joint" type="continuous">
+        <parent link="steer_rear_right"/>
         <child link="wheel_rear_right"/>
-        <origin xyz="-0.455 -0.455 -0.284" rpy="0 0 0"/>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <axis xyz="0 1 0"/>
     </joint>
 
 </robot>

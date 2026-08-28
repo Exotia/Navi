@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>navi_sim_bringup</name>
+  <version>0.1.0</version>
+  <description>World, robot description and launch for the rover simulation.</description>
+  <maintainer email="ole.peters@star-dresden.de">Ole Peters</maintainer>
+  <license>Proprietary</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <exec_depend>gazebo_ros</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>xacro</exec_depend>
+  <exec_depend>navi_sim_ik</exec_depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

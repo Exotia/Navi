@@ -1,3 +1,4 @@
+from ground_station import theme
 from ground_station.ui.video_panel import VideoPanel
 
 
@@ -5,9 +6,16 @@ class FakeReceiver:
     def __init__(self, frame=None):
         self.width = 4
         self.height = 2
+        self.port = 5600
         self.started = False
         self.stopped = False
         self.is_running = True
+        # started/stopped alone are one-way flags a test can check "did
+        # this ever happen", but they cannot show a *restart* - stop()
+        # then start() again leaves both simply True, indistinguishable
+        # from a single start with no stop at all. start_count is the
+        # thing that actually counts a second start() call.
+        self.start_count = 0
         # A constructor-supplied frame is delivered once, like a real
         # VideoReceiver's read_frame() only returns a *new* frame once one
         # has actually accumulated - it never keeps re-returning the same
@@ -18,6 +26,7 @@ class FakeReceiver:
 
     def start(self):
         self.started = True
+        self.start_count += 1
 
     def stop(self):
         self.stopped = True
@@ -272,6 +281,125 @@ def test_resizing_rescales_the_frame_already_on_screen(qtbot):
     panel._render_frame()
 
     assert panel.image_label.pixmap().width() == 200
+
+
+def test_switching_source_restarts_the_receiver_on_the_new_port(qtbot):
+    # set_source stops and re-points the one receiver the panel already
+    # holds rather than creating a second one - two bound receivers would
+    # mean the unread one silently filling its socket buffer.
+    receiver = FakeReceiver()
+    panel = VideoPanel(receiver=receiver)
+    qtbot.addWidget(panel)
+    panel.set_streaming(True)
+
+    panel.set_source("simulation", 5601)
+
+    assert receiver.port == 5601
+    assert receiver.stopped is True
+    # started/stopped alone are one-way flags that would still read True
+    # even if the restart-on-the-new-port line were a no-op - only a
+    # second start() call (start_count == 2, one for set_streaming(True)
+    # above and one for the restart inside set_source) and the panel
+    # actually being marked streaming again prove a real restart happened.
+    assert receiver.start_count == 2
+    assert panel._streaming is True
+
+
+def test_switching_source_while_not_streaming_does_not_start_anything(qtbot):
+    # The panel must not turn a mode switch into an implicit "start
+    # streaming" - if the operator wasn't watching before, switching
+    # sources alone must not start the pipeline.
+    receiver = FakeReceiver()
+    panel = VideoPanel(receiver=receiver)
+    qtbot.addWidget(panel)
+
+    panel.set_source("simulation", 5601)
+
+    assert receiver.port == 5601
+    assert receiver.start_count == 0
+    assert panel._streaming is False
+
+
+def test_a_source_with_no_remote_status_shows_the_local_fact_while_receiving(qtbot):
+    # Entering semi-auto calls stop_receiver() first (which resets
+    # _rover_state to "stopped") before re-pointing at the simulation and
+    # restarting - the sim has no /video_status of its own to conflate
+    # with, so the label must show what is actually arriving, not a
+    # leftover rover state that has nothing to do with this source.
+    receiver = FakeReceiver(frame=bytes(4 * 2 * 3))
+    panel = VideoPanel(receiver=receiver, no_frame_after_seconds=0.0)
+    qtbot.addWidget(panel)
+    panel.set_streaming(True)  # as if the rover camera was already running
+
+    panel.set_source("simulation", 5601, reports_remote_status=False)
+    panel._poll_frame(now=100.0)
+
+    text = panel.status_label.text().upper()
+    assert "STOPPED" not in text
+    assert "RECEIVING" in text
+
+
+def test_a_source_with_no_remote_status_shows_not_receiving_rather_than_a_rover_word(qtbot):
+    receiver = FakeReceiver(frame=None)
+    panel = VideoPanel(receiver=receiver, no_frame_after_seconds=0.0)
+    qtbot.addWidget(panel)
+    panel.set_source("simulation", 5601, reports_remote_status=False)
+    panel.set_streaming(True)
+
+    panel._poll_frame(now=100.0)
+    panel._poll_frame(now=101.0)
+
+    text = panel.status_label.text().upper()
+    assert "NO FRAMES" in text
+    assert "ROVER" not in text
+
+
+def test_the_sim_source_is_marked_as_dead_reckoning(qtbot):
+    # The pose is integrated from commanded twist, so it drifts from the real
+    # rover and the picture cannot show that. Saying so is the only defence.
+    receiver = FakeReceiver()
+    panel = VideoPanel(receiver=receiver)
+    qtbot.addWidget(panel)
+
+    panel.set_source("simulation", 5601, dead_reckoning=True)
+
+    assert "DEAD RECKONING" in panel.title_label.text().upper()
+    assert panel.dead_reckoning is True
+
+
+def test_the_rover_source_is_not_marked_as_dead_reckoning(qtbot):
+    receiver = FakeReceiver()
+    panel = VideoPanel(receiver=receiver)
+    qtbot.addWidget(panel)
+
+    panel.set_source("rover", 5600, dead_reckoning=False)
+
+    assert "DEAD RECKONING" not in panel.title_label.text().upper()
+    assert panel.dead_reckoning is False
+
+
+def test_the_dead_reckoning_marker_reads_as_a_warning_not_ordinary_chrome(qtbot):
+    # The marker is the only defence an operator has against trusting a
+    # synthetic view of the real machine they are driving - text alone,
+    # in the same muted colour as ordinary chrome like "CAMERA / ZED FRONT
+    # LEFT", would not win against a moving picture holding their
+    # attention. Checking styling, not just the text, catches a
+    # regression where the words are right but the colour never changed.
+    receiver = FakeReceiver()
+    panel = VideoPanel(receiver=receiver)
+    qtbot.addWidget(panel)
+    normal_style = panel.title_label.styleSheet()
+    assert theme.ACCENT not in normal_style
+
+    panel.set_source("simulation", 5601, dead_reckoning=True)
+    warning_style = panel.title_label.styleSheet()
+
+    assert warning_style != normal_style
+    assert theme.ACCENT in warning_style
+
+    panel.set_source("rover", 5600, dead_reckoning=False)
+
+    assert panel.title_label.styleSheet() == normal_style
 
 
 def test_the_label_does_not_impose_the_streams_own_size_as_a_minimum(qtbot):

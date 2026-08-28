@@ -12,6 +12,11 @@ from ground_station.ros_client import RosBridgeClient
 from ground_station.ui.dashboard_page import DashboardPage
 from ground_station.ui.drive_detail_page import DriveDetailPage
 
+# The simulation streams to a different UDP port than the rover, on
+# purpose: two senders can never contend and decode each other's late
+# packets as garbage.
+SIM_VIDEO_PORT = 5601
+
 
 class MainWindow(QMainWindow):
     def __init__(self, ros_client_factory=RosBridgeClient, initial_host: str | None = None,
@@ -30,6 +35,12 @@ class MainWindow(QMainWindow):
         self.node_registry = NodeRegistry()
         self.gamepad_reader = gamepad_reader if gamepad_reader is not None else GamepadReader()
         self._gamepad_was_connected = False
+        # Which source the panel is showing. Several decisions depend on it:
+        # the video toggle must act on the source actually on screen, and a
+        # rosbridge drop must not tear down a view that does not come from
+        # rosbridge. Kept here rather than read back off the radio buttons
+        # so the window does not depend on the dashboard's widget layout.
+        self._mode = "manual"
 
         input_style = (
             f"background-color: {theme.PANEL}; color: {theme.TEXT}; "
@@ -93,6 +104,7 @@ class MainWindow(QMainWindow):
             lambda: self.stacked_widget.setCurrentWidget(self.dashboard_page)
         )
         self.dashboard_page.video_panel.stream_requested.connect(self._on_stream_requested)
+        self.dashboard_page.mode_changed.connect(self._on_mode_changed)
 
         self._node_poll_timer = QTimer(self)
         self._node_poll_timer.timeout.connect(self._poll_nodes)
@@ -211,7 +223,23 @@ class MainWindow(QMainWindow):
             # udp/video_port bound and can swallow the *next* session's RTP
             # stream. keep_failed_reason=True: this is a disconnect, not an
             # operator stop, so a previously reported failure must survive.
-            self.dashboard_page.video_panel.stop_receiver(keep_failed_reason=True)
+            #
+            # Only for the rover's stream. That reason is a rover-path
+            # reason - the rover stops being asked for video and its
+            # receiver has nothing left to receive - and it does not apply
+            # to the simulation, whose sender is a local process on this
+            # same laptop that has never heard of rosbridge. Tearing the
+            # sim view down here meant a two-second rosbridge blip over
+            # exactly the lossy field link this project exists for blacked
+            # out a still-running, still-streaming simulation permanently,
+            # under the label "VIDEO OFF" - the wording for the operator
+            # having switched it off. The spec's answer to an unreachable
+            # rover is that the simulation freezes *visibly*, and it does
+            # that on its own: /manual_twist stops arriving and the IK node
+            # zeroes the command, so the picture stops moving while frames
+            # keep coming.
+            if self._mode != "semi_auto":
+                self.dashboard_page.video_panel.stop_receiver(keep_failed_reason=True)
 
     def closeEvent(self, event) -> None:
         """Stops the local video receiver on window close for the same
@@ -242,12 +270,22 @@ class MainWindow(QMainWindow):
         finally:
             probe.close()
 
-    def _on_stream_requested(self, enable: bool) -> None:
+    def _request_rover_video(self, enable: bool) -> bool:
+        """Asks the rover to start or stop streaming to us.
+
+        The one place that request is built, so every caller (the panel's
+        toggle, and the mode switch in both directions) sends the same
+        seven arguments, discovers our own address the same way, and
+        handles an undiscoverable route the same way. Returns False - with
+        the reason already on the panel, never silently - if the request
+        could not be sent at all.
+        """
         panel = self.dashboard_page.video_panel
         if self.ros_client is None or not self.ros_client.is_connected:
             panel.apply_status({"state": "failed", "detail": "not connected to rosbridge"})
-            return
+            return False
 
+        address = ""
         if enable:
             # Probe toward the rosbridge port, not video_port: nothing is
             # actually sent on a connect()'d UDP socket, and the route to
@@ -255,17 +293,33 @@ class MainWindow(QMainWindow):
             # port, so this is harmless either way - but probing video_port
             # here reads as copy/paste from publish_video_request below it.
             address = self.local_address_for(self.host_input.text().strip() or "127.0.0.1",
-                                              self._current_rosbridge_port())
+                                             self._current_rosbridge_port())
             if not address:
                 panel.apply_status({"state": "failed", "detail": "no route to the rover"})
-                return
-            self.ros_client.publish_video_request(
-                enable=True, host=address, port=self.video_port,
-                width=1344, height=376, fps=30, bitrate_kbps=800)
-        else:
-            self.ros_client.publish_video_request(
-                enable=False, host="", port=self.video_port,
-                width=1344, height=376, fps=30, bitrate_kbps=800)
+                return False
+
+        self.ros_client.publish_video_request(
+            enable=enable, host=address, port=self.video_port,
+            width=1344, height=376, fps=30, bitrate_kbps=800)
+        return True
+
+    def _on_stream_requested(self, enable: bool) -> None:
+        panel = self.dashboard_page.video_panel
+        if self._mode == "semi_auto":
+            # The toggle acts on whichever source the panel is actually
+            # showing, and in semi-auto that is the simulation - a local
+            # process with no control plane at all, which streams whenever
+            # it runs (by design: it is on this same laptop, so there is
+            # nothing to ask). Commanding the rover's camera from here
+            # would push 800 kbps of H.264 across the field link to port
+            # 5600 where nothing is listening, for as long as semi-auto
+            # lasts, undoing the only reason this mode stops it - and say
+            # nothing about it.
+            panel.set_streaming(enable)
+            return
+
+        if not self._request_rover_video(enable):
+            return
         # The local receiver follows our own intent, not the rover's answer:
         # on disable it must stop regardless of whether the rover ever
         # replies, so a dead link cannot leave a stream pointed at us.
@@ -273,3 +327,39 @@ class MainWindow(QMainWindow):
 
     def _on_video_status(self, status: dict) -> None:
         self.dashboard_page.video_panel.apply_status(status)
+
+    def _on_mode_changed(self, mode: str) -> None:
+        """Switches the panel's view source only. The twist keeps reaching
+        the rover in both modes - driving stays on the gamepad/rosbridge
+        path (_poll_gamepad), untouched here - because a mode switch that
+        quietly changed what is being driven would be a control change
+        wearing a view change's clothes."""
+        panel = self.dashboard_page.video_panel
+        self._mode = mode
+        if mode == "semi_auto":
+            # Stop the rover's camera: nobody is looking at it, and the
+            # field link is the scarce resource. The rover keeps being
+            # driven.
+            self._request_rover_video(False)
+            panel.set_source("simulation", SIM_VIDEO_PORT, dead_reckoning=True,
+                              reports_remote_status=False)
+        else:
+            panel.set_source("zed front left", self.video_port)
+            # Entering semi-auto told the rover to stop streaming. Leaving
+            # must tell it to start again, or the mode is a one-way door for
+            # the live camera: set_source restarts the local receiver on
+            # 5600 so this laptop listens, but the rover was told to stop
+            # and never told otherwise, so no frames ever come. What the
+            # operator then sees is worse than nothing - stop_receiver has
+            # reset the rover state to "stopped", so the panel shows a dim,
+            # permanent STOPPED over a black picture, and the "rover says
+            # streaming but nothing arrives" branch cannot fire to explain
+            # it. Recovery was guessing to press Stop then Start.
+            #
+            # Only when the panel is actually receiving: asking the rover to
+            # start streaming to a port nothing is listening on is the same
+            # waste of the field link that _on_stream_requested guards
+            # against above. A failed request reports itself on the panel
+            # via _request_rover_video rather than doing nothing quietly.
+            if panel.streaming:
+                self._request_rover_video(True)
