@@ -12,6 +12,11 @@ from ground_station.ros_client import RosBridgeClient
 from ground_station.ui.dashboard_page import DashboardPage
 from ground_station.ui.drive_detail_page import DriveDetailPage
 
+# The simulation streams to a different UDP port than the rover, on
+# purpose: two senders can never contend and decode each other's late
+# packets as garbage.
+SIM_VIDEO_PORT = 5601
+
 
 class MainWindow(QMainWindow):
     def __init__(self, ros_client_factory=RosBridgeClient, initial_host: str | None = None,
@@ -93,6 +98,7 @@ class MainWindow(QMainWindow):
             lambda: self.stacked_widget.setCurrentWidget(self.dashboard_page)
         )
         self.dashboard_page.video_panel.stream_requested.connect(self._on_stream_requested)
+        self.dashboard_page.mode_changed.connect(self._on_mode_changed)
 
         self._node_poll_timer = QTimer(self)
         self._node_poll_timer.timeout.connect(self._poll_nodes)
@@ -273,3 +279,22 @@ class MainWindow(QMainWindow):
 
     def _on_video_status(self, status: dict) -> None:
         self.dashboard_page.video_panel.apply_status(status)
+
+    def _on_mode_changed(self, mode: str) -> None:
+        """Switches the panel's view source only. The twist keeps reaching
+        the rover in both modes - driving stays on the gamepad/rosbridge
+        path (_poll_gamepad), untouched here - because a mode switch that
+        quietly changed what is being driven would be a control change
+        wearing a view change's clothes."""
+        panel = self.dashboard_page.video_panel
+        if mode == "semi_auto":
+            # Stop the rover's camera: nobody is looking at it, and the
+            # field link is the scarce resource. The rover keeps being
+            # driven.
+            if self.ros_client is not None:
+                self.ros_client.publish_video_request(
+                    enable=False, host="", port=self.video_port,
+                    width=1344, height=376, fps=30, bitrate_kbps=800)
+            panel.set_source("simulation", SIM_VIDEO_PORT, dead_reckoning=True)
+        else:
+            panel.set_source("zed front left", self.video_port)

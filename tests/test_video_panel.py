@@ -5,6 +5,7 @@ class FakeReceiver:
     def __init__(self, frame=None):
         self.width = 4
         self.height = 2
+        self.port = 5600
         self.started = False
         self.stopped = False
         self.is_running = True
@@ -272,6 +273,45 @@ def test_resizing_rescales_the_frame_already_on_screen(qtbot):
     panel._render_frame()
 
     assert panel.image_label.pixmap().width() == 200
+
+
+def test_switching_source_restarts_the_receiver_on_the_new_port(qtbot):
+    # set_source stops and re-points the one receiver the panel already
+    # holds rather than creating a second one - two bound receivers would
+    # mean the unread one silently filling its socket buffer.
+    receiver = FakeReceiver()
+    panel = VideoPanel(receiver=receiver)
+    qtbot.addWidget(panel)
+    panel.set_streaming(True)
+
+    panel.set_source("simulation", 5601)
+
+    assert receiver.port == 5601
+    assert receiver.stopped is True
+
+
+def test_the_sim_source_is_marked_as_dead_reckoning(qtbot):
+    # The pose is integrated from commanded twist, so it drifts from the real
+    # rover and the picture cannot show that. Saying so is the only defence.
+    receiver = FakeReceiver()
+    panel = VideoPanel(receiver=receiver)
+    qtbot.addWidget(panel)
+
+    panel.set_source("simulation", 5601, dead_reckoning=True)
+
+    assert "DEAD RECKONING" in panel.title_label.text().upper()
+    assert panel.dead_reckoning is True
+
+
+def test_the_rover_source_is_not_marked_as_dead_reckoning(qtbot):
+    receiver = FakeReceiver()
+    panel = VideoPanel(receiver=receiver)
+    qtbot.addWidget(panel)
+
+    panel.set_source("rover", 5600, dead_reckoning=False)
+
+    assert "DEAD RECKONING" not in panel.title_label.text().upper()
+    assert panel.dead_reckoning is False
 
 
 def test_the_label_does_not_impose_the_streams_own_size_as_a_minimum(qtbot):

@@ -476,3 +476,42 @@ def test_local_address_is_the_interface_that_reaches_the_rover(qtbot):
     # local_address_for legitimately returns "". Only assert the shape when
     # a route actually exists.
     assert address == "" or address.count(".") == 3
+
+
+def test_entering_semi_auto_stops_rover_video_and_switches_port(qtbot):
+    window, _ = make_window(qtbot)
+
+    window.dashboard_page.mode_changed.emit("semi_auto")
+
+    assert window.dashboard_page.video_panel.receiver.port == 5601
+    assert window.dashboard_page.video_panel.dead_reckoning is True
+    # The rover keeps being driven - only its camera is turned off, to spare
+    # the link while nobody is looking at it.
+    request = _last_video_request()
+    assert request["enable"] is False
+
+
+def test_leaving_semi_auto_returns_to_the_rover_camera(qtbot):
+    window, _ = make_window(qtbot)
+    window.dashboard_page.mode_changed.emit("semi_auto")
+
+    window.dashboard_page.mode_changed.emit("manual")
+
+    assert window.dashboard_page.video_panel.receiver.port == 5600
+    assert window.dashboard_page.video_panel.dead_reckoning is False
+
+
+def test_the_twist_still_reaches_the_rover_in_semi_auto(qtbot):
+    # The rover is driven in both modes. Anything else would make the mode
+    # switch a control change disguised as a view change.
+    gamepad = FakeGamepadReader(connected=True, twist=(0.4, 0.0, 0.2))
+    window, _ = make_window(qtbot, initial_host="localhost", gamepad_reader=gamepad)
+
+    window.dashboard_page.mode_changed.emit("semi_auto")
+    window._poll_gamepad()
+
+    topic = next(t for t in FakeTopic.instances if t.name == "/manual_twist")
+    assert topic.published_messages[-1] == {
+        "linear": {"x": 0.4, "y": 0.0, "z": 0.0},
+        "angular": {"x": 0.0, "y": 0.0, "z": 0.2},
+    }

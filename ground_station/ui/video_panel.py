@@ -34,6 +34,8 @@ class VideoPanel(QWidget):
         self._last_frame: bytes | None = None
         self._rover_state = "stopped"
         self._rover_detail = ""
+        self._source_name = "zed front left"
+        self._dead_reckoning = False
         # Tracks the state the button has *requested*, separate from
         # self._streaming (which only moves once set_streaming confirms
         # it). Without this, two quick clicks before a round trip to the
@@ -45,8 +47,8 @@ class VideoPanel(QWidget):
             f"border-radius: 6px;"
         )
 
-        title = QLabel("CAMERA / ZED FRONT LEFT")
-        title.setStyleSheet(f"color: {theme.TEXT_DIM}; font-weight: 600; border: none;")
+        self.title_label = QLabel()
+        self.title_label.setStyleSheet(f"color: {theme.TEXT_DIM}; font-weight: 600; border: none;")
 
         self.image_label = QLabel()
         self.image_label.setAlignment(Qt.AlignCenter)
@@ -72,7 +74,7 @@ class VideoPanel(QWidget):
         )
 
         layout = QVBoxLayout(self)
-        layout.addWidget(title)
+        layout.addWidget(self.title_label)
         layout.addWidget(self.image_label, stretch=1)
         footer = QHBoxLayout()
         footer.addWidget(self.toggle_button)
@@ -83,6 +85,36 @@ class VideoPanel(QWidget):
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._poll_frame)
         self._poll_timer.start(poll_interval_ms)
+
+        self._refresh_title()
+
+    @property
+    def dead_reckoning(self) -> bool:
+        return self._dead_reckoning
+
+    def set_source(self, name: str, port: int, *, dead_reckoning: bool = False) -> None:
+        """Points the panel at a different sender.
+
+        The receiver is stopped and re-pointed rather than a second one
+        being created: two receivers would both be bound, and whichever
+        the panel was not reading would silently fill its socket buffer.
+        """
+        was_streaming = self._streaming
+        self.stop_receiver()
+        self.receiver.port = port
+        self._source_name = name
+        self._dead_reckoning = dead_reckoning
+        self._refresh_title()
+        if was_streaming:
+            self.set_streaming(True)
+
+    def _refresh_title(self) -> None:
+        title = f"CAMERA / {self._source_name.upper()}"
+        if self._dead_reckoning:
+            # The simulated pose is integrated from commanded twist, so it
+            # drifts from the real rover and the picture cannot show it.
+            title += "  -  DEAD RECKONING, NO LOCALISATION"
+        self.title_label.setText(title)
 
     def _on_toggle_clicked(self) -> None:
         self._toggle_requested = not self._toggle_requested
