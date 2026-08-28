@@ -8,11 +8,13 @@ follows.
 
 The rover (`a_navi`, `192.168.178.33`) is off the network as of 2026-08-28 — `ping` shows 100%
 loss and `ssh` gives `No route to host` — so no step in this document could be executed, and none
-was. Two installs are also still outstanding: `gstreamer1.0-libav` on this laptop and
-`ros-humble-rosbridge-suite` on the Orin. This document is the procedure to run once both are true
-again, written out fully so it can be followed without re-deriving anything. Every step below is
-marked pending. No latency number, no panel text, no pass/fail is reported here as observed,
-because none was.
+was. One install is still outstanding: `ros-humble-rosbridge-suite` on the Orin.
+`gstreamer1.0-libav` on this laptop is now installed (confirmed 2026-08-28: `dpkg -s
+gstreamer1.0-libav` reports installed, and `gst-inspect-1.0 avdec_h264` succeeds) - this document
+is the procedure to run once the Orin is reachable and rosbridge is installed there, written out
+fully so it can be followed without re-deriving anything. Every step below is marked pending. No
+latency number, no panel text, no pass/fail is reported here as observed, because none was: the
+decode leg being installable is not the same as the end-to-end path having been run.
 
 What *is* verified, from the six completed tasks that precede this one:
 
@@ -27,8 +29,9 @@ What *is* verified, from the six completed tasks that precede this one:
 What is **not** verified by anything that has run so far:
 
 - The H.264 decode leg on the laptop. `avdec_h264` has never been exercised here — the package
-  that provides it (`gstreamer1.0-libav`) is not installed, so `video_receiver.py`'s
-  `gst-launch-1.0` pipeline has not been started against a real RTP stream even once.
+  that provides it (`gstreamer1.0-libav`) is now installed (see Prerequisites below), but
+  `video_receiver.py`'s `gst-launch-1.0` pipeline has still not been started against a real RTP
+  stream even once; installing the decoder is not the same as running it against a stream.
 - The full path end to end: real camera → `x264enc` → UDP over the actual field link → laptop
   decode → panel. Nothing has connected the verified rover half to the verified laptop half.
 - Glass-to-glass latency. The design's target ("well under 300 ms") is a goal stated in the spec,
@@ -38,15 +41,16 @@ What is **not** verified by anything that has run so far:
 
 ## Prerequisites
 
-All four must be true before Step 1. None is met right now.
+All four must be true before Step 1. Three remain unmet right now.
 
-- [ ] **Laptop**: H.264 decode support installed.
+- [x] **Laptop**: H.264 decode support installed. Done as of 2026-08-28: `dpkg -s
+  gstreamer1.0-libav` reports installed, and `gst-inspect-1.0 avdec_h264` succeeds on this
+  machine. This only means `avdec_h264` is present to be started — it does not mean
+  `video_receiver.py`'s pipeline has been run against a real RTP stream (see "What is not verified"
+  above); that still requires the rover side below.
   ```
   sudo apt install gstreamer1.0-libav
   ```
-  Without this, `avdec_h264` is absent and `video_receiver.py`'s pipeline fails at that element the
-  moment a stream arrives — everything upstream of it (rover capture, encode, UDP send) can be
-  fine and this would still show nothing.
 
 - [ ] **Orin**: rosbridge installed.
   ```
