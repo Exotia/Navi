@@ -7,6 +7,7 @@ assumed to sit anywhere in particular.
 """
 
 import os
+import subprocess
 import tempfile
 
 from ament_index_python.packages import get_package_share_directory
@@ -14,6 +15,47 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+
+
+def _robot_description(xacro_path):
+    """Expands the xacro into a URDF string, or raises.
+
+    This used to be os.popen(f"xacro {robot}").read(), which throws the
+    exit status away. Every failure mode - xacro not installed, an XML
+    error in the file, an unresolvable $(find navi_sim_bringup) because the
+    workspace was not sourced - returned an empty string, which
+    robot_state_publisher then published as the robot description and
+    spawn_entity.py found nothing to spawn: Gazebo came up with a world and
+    no rover, with no error anywhere. Not hypothetical - it happened on
+    this branch. The map mesh a few lines below gets an existence check and
+    a three-line message; the robot description, which is the whole point
+    of the launch, got none.
+    """
+    command = ["xacro", xacro_path]
+    printable = " ".join(command)
+    try:
+        description = subprocess.check_output(
+            command, stderr=subprocess.PIPE, text=True)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"could not run `{printable}`: {exc}\n"
+            "xacro is not on PATH - source /opt/ros/humble/setup.bash "
+            "(and sim/install/setup.bash) first.") from exc
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"`{printable}` failed with exit status {exc.returncode}.\n"
+            f"stderr:\n{exc.stderr}") from exc
+
+    # A command can succeed and still produce nothing useful, and an empty
+    # description fails silently downstream rather than here.
+    if not description.strip():
+        raise RuntimeError(
+            f"`{printable}` succeeded but produced an empty robot "
+            "description. robot_state_publisher would publish nothing and "
+            "spawn_entity.py would spawn nothing, leaving a world with no "
+            "rover. Check that sim/install/setup.bash is sourced so "
+            "$(find navi_sim_bringup) resolves.")
+    return description
 
 
 def _world_with_mesh(context, *args, **kwargs):
@@ -35,7 +77,7 @@ def _world_with_mesh(context, *args, **kwargs):
         handle.write(world)
 
     robot = os.path.join(share, "urdf", "asterope_sim.urdf.xacro")
-    description = os.popen(f"xacro {robot}").read()
+    description = _robot_description(robot)
 
     return [
         ExecuteProcess(
