@@ -2,6 +2,8 @@ import io
 import os
 import shutil
 import subprocess
+import threading
+import time
 
 import pytest
 
@@ -206,20 +208,131 @@ def test_read_frame_against_a_real_gstreamer_subprocess():
                              launcher=real_launcher)
     receiver.start()
     try:
-        import time
         frames = []
-        deadline = 10.0
-        start_time = time.monotonic()
-        while len(frames) < num_buffers and time.monotonic() - start_time < deadline:
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
             frame = receiver.read_frame()
             if frame is not None:
                 frames.append(frame)
-            elif not receiver.is_running:
+            elif not receiver.is_running and frames:
                 break
             else:
                 time.sleep(0.01)
-        assert len(frames) == num_buffers
+        # Not num_buffers: videotestsrc writes all five faster than this loop
+        # polls, and the receiver keeps only the newest frame by design. What
+        # this proves is that real bytes crossed a real pipe and came back out
+        # correctly framed.
+        assert frames
+        assert len(frames) <= num_buffers
         for frame in frames:
             assert len(frame) == frame_size
     finally:
         receiver.stop()
+
+
+class PipeProcess:
+    """A fake process whose stdout is a real OS pipe, so the 64 KB pipe
+    capacity that the reader has to cope with is real rather than simulated
+    by a BytesIO that never fills."""
+
+    def __init__(self):
+        read_fd, self.write_fd = os.pipe()
+        self.stdout = os.fdopen(read_fd, "rb", buffering=0)
+        self._returncode = None
+
+    def poll(self):
+        return self._returncode
+
+    def terminate(self):
+        self._returncode = 0
+        try:
+            os.close(self.write_fd)
+        except OSError:
+            pass
+
+    def wait(self, timeout=None):
+        self._returncode = 0
+        return 0
+
+    def kill(self):
+        self._returncode = -9
+
+
+def wait_for_frame(receiver, timeout=5.0):
+    """Frames are produced by the receiver's own reader thread, so a test
+    that wants one has to wait for it rather than assume it has arrived."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        frame = receiver.read_frame()
+        if frame is not None:
+            return frame
+        time.sleep(0.005)
+    return None
+
+
+def test_the_pipe_is_drained_even_while_nobody_calls_read_frame():
+    """The regression test for the stall that made the stream lag.
+
+    A 672x376 RGB frame is 758,016 bytes - about twelve times a Linux
+    pipe's 64 KB capacity. When the pipe was only read from the GUI's
+    33 ms timer, one tick could consume at most one pipe-full, so the
+    decoder spent nearly all its time blocked in write() and the backlog
+    grew in the jitter buffer and the kernel's UDP socket buffer instead.
+    Measured against the rover, that capped the panel at 2.2 fps while a
+    greedy reader on the same pipeline got ~27 fps.
+
+    So: the receiver must keep the pipe empty on its own schedule, and a
+    writer must be able to push several frames through without a single
+    read_frame() call.
+    """
+    width, height = 672, 376
+    frame_size = width * height * 3
+    process = PipeProcess()
+    receiver = VideoReceiver(port=5600, width=width, height=height,
+                             launcher=lambda *a, **k: process)
+    receiver.start()
+    try:
+        payload = bytes(frame_size * 3)
+        finished = []
+
+        def writer():
+            os.write(process.write_fd, payload)
+            finished.append(True)
+
+        thread = threading.Thread(target=writer, daemon=True)
+        thread.start()
+        thread.join(timeout=5.0)
+
+        assert finished == [True], (
+            "the writer is still blocked in write(): nothing is draining the "
+            "pipe until the caller asks for a frame")
+    finally:
+        receiver.stop()
+
+
+def test_read_frame_returns_the_newest_frame_and_drops_the_backlog():
+    """Live video means the newest frame, not the oldest queued one. If the
+    GUI is late, the frames it missed are stale by definition - handing them
+    over would replay the backlog at 30 fps instead of catching up."""
+    width, height = 4, 2
+    frame_size = width * height * 3
+    oldest = b"\x01" * frame_size
+    middle = b"\x02" * frame_size
+    newest = b"\x03" * frame_size
+    receiver, _ = make_receiver(frames=oldest + middle + newest,
+                                width=width, height=height)
+    receiver.start()
+    try:
+        assert wait_for_frame(receiver) == newest
+        assert receiver.read_frame() is None
+    finally:
+        receiver.stop()
+
+
+def test_stop_joins_the_reader_thread():
+    receiver, _ = make_receiver(frames=b"")
+    receiver.start()
+
+    receiver.stop()
+
+    assert receiver._reader is None or not receiver._reader.is_alive()

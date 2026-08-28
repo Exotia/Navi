@@ -8,13 +8,24 @@ the venv to system packages. The subprocess needs neither, and it
 isolates the decoder: a corrupt stream that kills the pipeline kills a
 child process, not the ground station.
 
-read_frame() is non-blocking. A plain `stdout.read(frame_size)` blocks
-until the full frame arrives - on a stalled or slow stream that would
-freeze the GUI's event loop, which is exactly the "no frames arriving"
-case the UI exists to surface. The child's stdout is put in non-blocking
-mode instead, and partial reads accumulate in a buffer until a whole
-frame is available; a short read is never handed back, since that would
-tear the image and desynchronize every frame after it.
+A reader thread owns the pipe, and read_frame() only takes what that
+thread has already put down. The pipe is the reason: a 672x376 RGB frame
+is 758,016 bytes, roughly twelve times a Linux pipe's 64 KB capacity.
+Reading it from the GUI's 33 ms timer meant one tick could consume at
+most one pipe-full, so gst-launch spent nearly all its time blocked in
+write() and the backlog accumulated upstream in the jitter buffer and
+the kernel's UDP socket buffer. Measured against the rover that capped
+the panel at 2.2 fps, with latency that grew for as long as the stream
+ran, while a greedy reader on the same pipeline managed ~27 fps.
+
+The thread therefore reads as fast as the decoder produces, keeping the
+pipe empty, and keeps only the newest completed frame. Frames the GUI
+was too late to collect are dropped rather than queued: on a live view a
+stale frame has no value, and handing the backlog over would replay it
+at 30 fps instead of catching up. read_frame() stays non-blocking, so a
+stalled stream still shows up as "no frames arriving" rather than
+freezing the event loop, and a short read is never handed back, which
+would tear the image and desynchronize every frame after it.
 
 No ROS here. The laptop has no ROS 2 installed - the rover is asked to
 start and stop the stream over rosbridge, and this module only listens on
@@ -22,10 +33,10 @@ a UDP port.
 """
 
 import argparse
-import io
-import os
 import subprocess
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 
@@ -53,8 +64,9 @@ def build_receive_pipeline(port: int, width: int, height: int) -> list[str]:
 
 
 class VideoReceiver:
-    """Owns the decode subprocess. Frames are pulled, not pushed, so the
-    GUI reads on its own timer instead of being driven by the network."""
+    """Owns the decode subprocess and the thread that drains it. The GUI
+    reads on its own timer and always gets the newest frame available,
+    never a queue of old ones."""
 
     def __init__(self, port: int = 5600, width: int = 672, height: int = 376,
                  launcher=subprocess.Popen):
@@ -63,8 +75,11 @@ class VideoReceiver:
         self.height = height
         self._launcher = launcher
         self._process = None
-        self._buffer = bytearray()
         self._stderr_path: str | None = None
+        self._reader: threading.Thread | None = None
+        self._stop_reading = threading.Event()
+        self._lock = threading.Lock()
+        self._latest: bytes | None = None
 
     @property
     def frame_size(self) -> int:
@@ -104,10 +119,13 @@ class VideoReceiver:
             raise
         else:
             stderr_file.close()
-        try:
-            os.set_blocking(self._process.stdout.fileno(), False)
-        except (AttributeError, OSError, io.UnsupportedOperation):
-            pass
+        # Blocking reads on purpose: the thread exists to sit in read() and
+        # keep the pipe empty, which is what stops the decoder stalling.
+        self._stop_reading.clear()
+        self._latest = None
+        self._reader = threading.Thread(
+            target=self._read_loop, args=(self._process.stdout,), daemon=True)
+        self._reader.start()
 
     def _remove_stderr_file(self) -> None:
         if self._stderr_path is not None:
@@ -120,28 +138,50 @@ class VideoReceiver:
     def stop(self) -> None:
         if self._process is None:
             return
+        # Terminate first: that closes the write end, so a reader thread
+        # parked in read() gets EOF and returns instead of being joined
+        # while it still waits for bytes that will never come.
+        self._stop_reading.set()
         self._process.terminate()
         try:
             self._process.wait(timeout=3)
         except subprocess.TimeoutExpired:
             self._process.kill()
+        if self._reader is not None:
+            self._reader.join(timeout=3)
+            self._reader = None
         self._process = None
-        self._buffer.clear()
+        with self._lock:
+            self._latest = None
         self._remove_stderr_file()
 
+    def _read_loop(self, stdout) -> None:
+        """Runs on the reader thread. Assembles whole frames and keeps only
+        the newest, so the pipe never backs up behind a busy GUI."""
+        buffer = bytearray()
+        frame_size = self.frame_size
+        while not self._stop_reading.is_set():
+            try:
+                chunk = stdout.read(frame_size - len(buffer))
+            except (OSError, ValueError):
+                # The pipe was closed under us by stop().
+                break
+            if not chunk:
+                break
+            buffer.extend(chunk)
+            if len(buffer) < frame_size:
+                continue
+            with self._lock:
+                self._latest = bytes(buffer)
+            buffer.clear()
+
     def read_frame(self) -> bytes | None:
-        """One complete frame, or None if a whole frame is not available
-        yet. Never returns a partial frame - a short read would tear the
-        image and desynchronize every frame after it."""
-        if self._process is None or self._process.stdout is None:
-            return None
-        chunk = self._process.stdout.read(self.frame_size - len(self._buffer))
-        if chunk:
-            self._buffer.extend(chunk)
-        if len(self._buffer) < self.frame_size:
-            return None
-        frame = bytes(self._buffer[:self.frame_size])
-        del self._buffer[:self.frame_size]
+        """The newest complete frame, or None if none has arrived since the
+        last call. Never a partial frame - a short read would tear the image
+        and desynchronize every frame after it - and never an old one, since
+        a queued frame on a live view is only latency."""
+        with self._lock:
+            frame, self._latest = self._latest, None
         return frame
 
 
@@ -169,6 +209,11 @@ def main() -> None:
                 if not receiver.is_running:
                     print("pipeline exited")
                     break
+                # The reader thread owns the pipe now, so there is nothing
+                # to block on here - without this sleep the loop is a bare
+                # spin on one core, and it would steal time from the thread
+                # that actually matters.
+                time.sleep(0.005)
                 continue
             count += 1
             print(f"\rframes: {count}", end="", flush=True)

@@ -141,13 +141,16 @@ class VideoPanel(QWidget):
         now = monotonic() if now is None else now
         if not self._streaming:
             return
-        # Drain to the newest frame this tick, not just the next one: one
-        # read_frame() per 33 ms tick against a 30 fps sender has ~0.3
-        # frames/s of slack, so any GUI pause backs frames up behind the
-        # pipe and udpsrc's socket buffer. Painting only the oldest queued
-        # frame would let that backlog - and its added latency - persist
-        # instead of draining, which defeats the point of a feature whose
-        # hard constraint is latency.
+        # VideoReceiver hands back the newest frame it has and drops the
+        # rest, so this loop normally runs once. It stays a loop because
+        # painting the oldest of several available frames would hold a
+        # backlog - and its latency - on screen, and this panel must not
+        # depend on which receiver it was given to avoid that.
+        #
+        # This is not what keeps the stream live. The pipe is drained by
+        # the receiver's own thread; draining it from this timer capped
+        # the panel at 2.2 fps because a 758,016-byte frame is about
+        # twelve times a pipe's capacity. See video_receiver's docstring.
         latest = None
         while (frame := self.receiver.read_frame()) is not None:
             latest = frame
