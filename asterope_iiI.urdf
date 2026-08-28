@@ -60,7 +60,9 @@
     <joint name="base_footprint_joint" type="fixed">
         <parent link="base_footprint"/>
         <child link="base_link"/>
-        <origin xyz="0 0 0.0" rpy="0 0 0"/>
+        <!-- 0.409 m = wheel axle at -0.284 plus the 0.125 m wheel
+             radius, so base_footprint lies on the ground plane. -->
+        <origin xyz="0 0 0.409" rpy="0 0 0"/>
     </joint>
 
     <link name="base_link">
@@ -329,66 +331,7 @@
         </collision>
 
 
-        <!-- 4 black drive pods: 910 mm square (centre-to-centre), axis +Z,
-             r=155 mm, h=254 mm, lowest point -0.411 m = 284 mm below the blue box. -->
-        <visual>
-            <origin xyz="-0.455 -0.455 -0.284" rpy="0 0 0"/>
-            <geometry>
-                <cylinder radius="0.155" length="0.254"/>
-            </geometry>
-            <material name="black"/>
-        </visual>
-        <collision>
-            <origin xyz="-0.455 -0.455 -0.284" rpy="0 0 0"/>
-            <geometry>
-                <cylinder radius="0.155" length="0.254"/>
-            </geometry>
-        </collision>
-
-        <visual>
-            <origin xyz="-0.455 0.455 -0.284" rpy="0 0 0"/>
-            <geometry>
-                <cylinder radius="0.155" length="0.254"/>
-            </geometry>
-            <material name="black"/>
-        </visual>
-        <collision>
-            <origin xyz="-0.455 0.455 -0.284" rpy="0 0 0"/>
-            <geometry>
-                <cylinder radius="0.155" length="0.254"/>
-            </geometry>
-        </collision>
-
-        <visual>
-            <origin xyz="0.455 -0.455 -0.284" rpy="0 0 0"/>
-            <geometry>
-                <cylinder radius="0.155" length="0.254"/>
-            </geometry>
-            <material name="black"/>
-        </visual>
-        <collision>
-            <origin xyz="0.455 -0.455 -0.284" rpy="0 0 0"/>
-            <geometry>
-                <cylinder radius="0.155" length="0.254"/>
-            </geometry>
-        </collision>
-
-        <visual>
-            <origin xyz="0.455 0.455 -0.284" rpy="0 0 0"/>
-            <geometry>
-                <cylinder radius="0.155" length="0.254"/>
-            </geometry>
-            <material name="black"/>
-        </visual>
-        <collision>
-            <origin xyz="0.455 0.455 -0.284" rpy="0 0 0"/>
-            <geometry>
-                <cylinder radius="0.155" length="0.254"/>
-            </geometry>
-        </collision>
-
-
-        <!-- 2 black panels, front (+X) and rear (-X). Outer faces at x = +/-0.3405
+<!-- 2 black panels, front (+X) and rear (-X). Outer faces at x = +/-0.3405
              (681 mm apart), 12 mm above the blue box top face, 30 mm tall. -->
         <visual>
             <origin xyz="-0.322 0 0.154" rpy="0 0 0"/>
@@ -569,5 +512,98 @@
         <gravity>false</gravity>
         <kinematic>true</kinematic>
     </gazebo>
+
+    <!-- 4 wheels: 910 mm square (centre-to-centre), 250 mm diameter,
+         200 mm wide, axle across Y at z = -0.284 so the tread meets
+         the ground at -0.409. One link each: a wheel baked into
+         base_link could neither be steered nor coloured separately. -->
+
+    <link name="wheel_front_left">
+        <visual>
+            <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
+            <geometry>
+                <cylinder radius="0.125" length="0.200"/>
+            </geometry>
+            <material name="black"/>
+        </visual>
+        <collision>
+            <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
+            <geometry>
+                <cylinder radius="0.125" length="0.200"/>
+            </geometry>
+        </collision>
+    </link>
+
+    <joint name="wheel_front_left_joint" type="fixed">
+        <parent link="base_link"/>
+        <child link="wheel_front_left"/>
+        <origin xyz="0.455 0.455 -0.284" rpy="0 0 0"/>
+    </joint>
+
+    <link name="wheel_front_right">
+        <visual>
+            <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
+            <geometry>
+                <cylinder radius="0.125" length="0.200"/>
+            </geometry>
+            <material name="black"/>
+        </visual>
+        <collision>
+            <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
+            <geometry>
+                <cylinder radius="0.125" length="0.200"/>
+            </geometry>
+        </collision>
+    </link>
+
+    <joint name="wheel_front_right_joint" type="fixed">
+        <parent link="base_link"/>
+        <child link="wheel_front_right"/>
+        <origin xyz="0.455 -0.455 -0.284" rpy="0 0 0"/>
+    </joint>
+
+    <link name="wheel_rear_left">
+        <visual>
+            <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
+            <geometry>
+                <cylinder radius="0.125" length="0.200"/>
+            </geometry>
+            <material name="black"/>
+        </visual>
+        <collision>
+            <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
+            <geometry>
+                <cylinder radius="0.125" length="0.200"/>
+            </geometry>
+        </collision>
+    </link>
+
+    <joint name="wheel_rear_left_joint" type="fixed">
+        <parent link="base_link"/>
+        <child link="wheel_rear_left"/>
+        <origin xyz="-0.455 0.455 -0.284" rpy="0 0 0"/>
+    </joint>
+
+    <link name="wheel_rear_right">
+        <visual>
+            <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
+            <geometry>
+                <cylinder radius="0.125" length="0.200"/>
+            </geometry>
+            <material name="black"/>
+        </visual>
+        <collision>
+            <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
+            <geometry>
+                <cylinder radius="0.125" length="0.200"/>
+            </geometry>
+        </collision>
+    </link>
+
+    <joint name="wheel_rear_right_joint" type="fixed">
+        <parent link="base_link"/>
+        <child link="wheel_rear_right"/>
+        <origin xyz="-0.455 -0.455 -0.284" rpy="0 0 0"/>
+    </joint>
 
 </robot>
