@@ -344,8 +344,9 @@ def test_gamepad_disconnect_sends_one_zero_velocity_stop_then_stays_quiet(qtbot)
     assert len(topic.published_messages) == 2
 
 
-def test_disconnect_stops_the_local_video_receiver(qtbot):
+def test_disconnect_stops_the_local_video_receiver(qtbot, monkeypatch):
     window, _ = make_window(qtbot, initial_host="192.168.178.33")
+    monkeypatch.setattr(window, "local_address_for", lambda host, port: "10.20.30.40")
     window._on_stream_requested(True)
     assert window.dashboard_page.video_panel.receiver.started
 
@@ -367,8 +368,9 @@ def test_disconnect_preserves_a_previously_reported_failure_reason(qtbot):
     assert "FAILED" in text.upper()
 
 
-def test_closing_the_window_stops_the_local_video_receiver(qtbot):
+def test_closing_the_window_stops_the_local_video_receiver(qtbot, monkeypatch):
     window, _ = make_window(qtbot, initial_host="192.168.178.33")
+    monkeypatch.setattr(window, "local_address_for", lambda host, port: "10.20.30.40")
     window._on_stream_requested(True)
     assert window.dashboard_page.video_panel.receiver.started
 
@@ -411,7 +413,7 @@ def test_enabling_video_publishes_a_request_with_our_own_address(qtbot, monkeypa
     assert request["host"] == "10.20.30.40"
 
 
-def test_video_request_width_matches_double_the_receiver_default_width(qtbot):
+def test_video_request_width_matches_double_the_receiver_default_width(qtbot, monkeypatch):
     # Important 5: MainWindow hardcodes the requested capture width/height
     # (1344x376) here while VideoReceiver independently defaults to
     # 672x376 (post-crop, since the rover crops the capture width in half) -
@@ -419,6 +421,7 @@ def test_video_request_width_matches_double_the_receiver_default_width(qtbot):
     # documented nowhere. Pin the invariant so they can't silently drift
     # apart (the symptom of drift is Important 1's misleading message).
     window, _ = make_window(qtbot, initial_host="192.168.178.33")
+    monkeypatch.setattr(window, "local_address_for", lambda host, port: "10.20.30.40")
 
     window._on_stream_requested(True)
     request = _last_video_request()

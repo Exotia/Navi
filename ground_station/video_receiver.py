@@ -98,7 +98,11 @@ class VideoReceiver:
                 build_receive_pipeline(self.port, self.width, self.height),
                 stdout=subprocess.PIPE, stderr=stderr_file,
             )
-        finally:
+        except Exception:
+            stderr_file.close()
+            self._remove_stderr_file()
+            raise
+        else:
             stderr_file.close()
         try:
             os.set_blocking(self._process.stdout.fileno(), False)
@@ -107,7 +111,10 @@ class VideoReceiver:
 
     def _remove_stderr_file(self) -> None:
         if self._stderr_path is not None:
-            Path(self._stderr_path).unlink(missing_ok=True)
+            try:
+                Path(self._stderr_path).unlink(missing_ok=True)
+            except OSError:
+                pass
             self._stderr_path = None
 
     def stop(self) -> None:

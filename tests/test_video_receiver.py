@@ -5,6 +5,7 @@ import subprocess
 
 import pytest
 
+from ground_station import video_receiver
 from ground_station.video_receiver import VideoReceiver, build_receive_pipeline
 
 
@@ -135,6 +136,38 @@ def test_start_after_a_stop_does_not_reuse_or_leak_the_previous_stderr_file():
     assert receiver._stderr_path != first_path
     assert os.path.exists(receiver._stderr_path)
     receiver.stop()
+
+
+def test_start_removes_the_stderr_temp_file_when_the_launcher_raises(monkeypatch):
+    # If the launcher raises (e.g. FileNotFoundError for a missing
+    # gst-launch-1.0 - the exact scenario the panel's own guard comment
+    # names), _process never gets set, so stop()'s cleanup path is never
+    # reached. The temp file must not be left behind, and the exception
+    # must still propagate so the panel's guard can catch it.
+    created_paths = []
+    real_named_temp_file = video_receiver.tempfile.NamedTemporaryFile
+
+    def spying_named_temp_file(*args, **kwargs):
+        temp_file = real_named_temp_file(*args, **kwargs)
+        created_paths.append(temp_file.name)
+        return temp_file
+
+    monkeypatch.setattr(video_receiver.tempfile, "NamedTemporaryFile",
+                        spying_named_temp_file)
+
+    def raising_launcher(*_args, **_kwargs):
+        raise FileNotFoundError("gst-launch-1.0 not found")
+
+    receiver = VideoReceiver(port=5600, width=4, height=2,
+                             launcher=raising_launcher)
+
+    with pytest.raises(FileNotFoundError):
+        receiver.start()
+
+    assert receiver._stderr_path is None
+    assert receiver._process is None
+    assert len(created_paths) == 1
+    assert not os.path.exists(created_paths[0])
 
 
 def test_is_running_is_false_after_the_process_dies():
