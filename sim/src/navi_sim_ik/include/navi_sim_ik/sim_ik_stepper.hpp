@@ -32,6 +32,19 @@ struct WheelTargets
   std::array<double, 4> spin{{0.0, 0.0, 0.0, 0.0}};    ///< radians/second
 };
 
+/// The achieved body-frame velocity for this tick: eta_dot_constrained,
+/// straight from the model, before it gets rotated into the world frame to
+/// integrate the pose. This is what a consumer expecting a body-frame
+/// cmd_vel (e.g. gazebo_ros_planar_move, which applies its own heading)
+/// needs - differencing the world-frame pose instead would hand it a
+/// velocity already rotated once, then have it rotated a second time.
+struct Velocity2D
+{
+  double vx{0.0};        ///< m/s, body frame
+  double vy{0.0};        ///< m/s, body frame
+  double yaw_rate{0.0};  ///< rad/s
+};
+
 /// The rover's kinematics with no ROS attached.
 ///
 /// A kinematic simulation has no encoders, so the measured steering angle and
@@ -50,6 +63,7 @@ public:
   const Pose2D & pose() const {return pose_;}
   bool indirect_mode() const {return indirect_mode_;}
   std::array<double, 2> feasible_icr() const {return feasible_icr_;}
+  const Velocity2D & achieved_velocity() const {return achieved_velocity_;}
 
 private:
   double ts_;
@@ -59,6 +73,7 @@ private:
   Pose2D pose_{};
   bool indirect_mode_{false};
   std::array<double, 2> feasible_icr_{{0.0, 0.0}};
+  Velocity2D achieved_velocity_{};
 };
 
 }  // namespace navi_sim_ik

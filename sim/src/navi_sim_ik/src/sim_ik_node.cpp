@@ -1,4 +1,6 @@
+#include <array>
 #include <chrono>
+#include <cmath>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -12,6 +14,18 @@
 
 using namespace std::chrono_literals;
 
+namespace
+{
+// The one place the simulation's tick rate is written down. Every other use
+// (the stepper's own ts, the timer period, the wheel-roll integration, and
+// the trajectory point's time_from_start) derives from this rather than
+// repeating the literal, because a literal that drifted out of step with the
+// others would desync the visual wheel rotation from the commanded spin rate
+// with no error and no log line - the same silent-when-wrong failure mode
+// the wheel mapping is logged to guard against.
+constexpr double kTimestepSeconds = 0.06;
+}  // namespace
+
 /// Drives the simulated rover from the same /manual_twist the real one gets.
 ///
 /// The twist is read straight off the rover's ROS graph over DDS rather than
@@ -22,7 +36,7 @@ class SimIkNode : public rclcpp::Node
 {
 public:
   SimIkNode()
-  : Node("sim_ik"), stepper_(0.06)
+  : Node("sim_ik"), stepper_(kTimestepSeconds)
   {
     twist_sub_ = create_subscription<geometry_msgs::msg::Twist>(
       "/manual_twist", 10,
@@ -45,7 +59,9 @@ public:
       navi_sim_ik::WHEEL_CORNERS[0], navi_sim_ik::WHEEL_CORNERS[1],
       navi_sim_ik::WHEEL_CORNERS[2], navi_sim_ik::WHEEL_CORNERS[3]);
 
-    timer_ = create_wall_timer(60ms, [this] {tick();});
+    const auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::duration<double>(kTimestepSeconds));
+    timer_ = create_wall_timer(period, [this] {tick();});
   }
 
 private:
@@ -86,22 +102,29 @@ private:
       // The rolling angle is integrated here rather than commanded as a
       // velocity: joint_pose_trajectory sets positions, and a wheel that
       // never rotates makes a moving rover look like it is sliding.
-      wheel_angle_[i] += stepper_.targets().spin[i] * 0.06;
+      wheel_angle_[i] += stepper_.targets().spin[i] * kTimestepSeconds;
       msg.joint_names.push_back("wheel_" + corner + "_joint");
       point.positions.push_back(wheel_angle_[i]);
     }
-    point.time_from_start = rclcpp::Duration::from_seconds(0.06);
+    point.time_from_start = rclcpp::Duration::from_seconds(kTimestepSeconds);
     msg.points.push_back(point);
     joints_pub_->publish(msg);
   }
 
   void publish_motion()
   {
+    // Published straight from the model's own body-frame achieved velocity,
+    // not recovered by differencing the world-frame pose: the pose is built
+    // by rotating this same velocity into the world frame first, so
+    // differencing it back out would only recover the world-frame value.
+    // gazebo_ros_planar_move (the consumer) expects cmd_vel in the robot's
+    // own frame and applies its own heading - handing it a world-frame
+    // velocity would have it rotated a second time.
+    const auto & achieved = stepper_.achieved_velocity();
     geometry_msgs::msg::Twist cmd;
-    cmd.linear.x = (stepper_.pose().x - last_pose_.x) / 0.06;
-    cmd.linear.y = (stepper_.pose().y - last_pose_.y) / 0.06;
-    cmd.angular.z = (stepper_.pose().yaw - last_pose_.yaw) / 0.06;
-    last_pose_ = stepper_.pose();
+    cmd.linear.x = achieved.vx;
+    cmd.linear.y = achieved.vy;
+    cmd.angular.z = achieved.yaw_rate;
     cmd_vel_pub_->publish(cmd);
 
     nav_msgs::msg::Odometry odom;
@@ -132,7 +155,6 @@ private:
   navi_sim_ik::SimIkStepper stepper_;
   double vx_{0.0}, vy_{0.0}, yaw_rate_{0.0};
   std::array<double, 4> wheel_angle_{{0.0, 0.0, 0.0, 0.0}};
-  navi_sim_ik::Pose2D last_pose_{};
   rclcpp::Time last_twist_{0, 0, RCL_ROS_TIME};
   bool reported_stale_{true};
 

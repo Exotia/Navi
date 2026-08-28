@@ -37,19 +37,22 @@ void SimIkStepper::step(double vx, double vy, double yaw_rate)
   indirect_mode_ = out.indirect_mode;
   feasible_icr_ = {out.feasable_ICR[0], out.feasable_ICR[1]};
 
-  // Integrate what the controller could actually deliver, not what was asked
-  // for. eta_dot_constrained is the request after the ICR feasibility limits
-  // have been applied, so a command the geometry cannot satisfy moves the
-  // rover the way the rover would move rather than the way it was told to.
-  const double achieved_vx = out.eta_dot_constrained[0];
-  const double achieved_vy = out.eta_dot_constrained[1];
-  const double achieved_yaw_rate = out.eta_dot_constrained[2];
+  // What the controller could actually deliver, not what was asked for.
+  // eta_dot_constrained is the request after the ICR feasibility limits have
+  // been applied, so a command the geometry cannot satisfy moves the rover
+  // the way the rover would move rather than the way it was told to. This is
+  // the body-frame velocity: expose it as-is for consumers that want the
+  // body frame (e.g. a cmd_vel a planar-move plugin will rotate itself), and
+  // separately rotate it into the world frame below to integrate the pose.
+  achieved_velocity_.vx = out.eta_dot_constrained[0];
+  achieved_velocity_.vy = out.eta_dot_constrained[1];
+  achieved_velocity_.yaw_rate = out.eta_dot_constrained[2];
 
   const double cos_yaw = std::cos(pose_.yaw);
   const double sin_yaw = std::sin(pose_.yaw);
-  pose_.x += (achieved_vx * cos_yaw - achieved_vy * sin_yaw) * ts_;
-  pose_.y += (achieved_vx * sin_yaw + achieved_vy * cos_yaw) * ts_;
-  pose_.yaw += achieved_yaw_rate * ts_;
+  pose_.x += (achieved_velocity_.vx * cos_yaw - achieved_velocity_.vy * sin_yaw) * ts_;
+  pose_.y += (achieved_velocity_.vx * sin_yaw + achieved_velocity_.vy * cos_yaw) * ts_;
+  pose_.yaw += achieved_velocity_.yaw_rate * ts_;
 }
 
 }  // namespace navi_sim_ik

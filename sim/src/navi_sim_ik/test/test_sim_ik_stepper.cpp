@@ -143,3 +143,29 @@ TEST(SimIkStepper, YawIsIntegratedFromTheStartOfStepNotTheEnd)
   EXPECT_NEAR(stepper.pose().y, 1.6467001, 0.02);
   EXPECT_NEAR(stepper.pose().yaw, 3.2995396, 0.02);
 }
+
+TEST(SimIkStepper, AchievedVelocityIsBodyFrameNotWorldFrame)
+{
+  // Turn to face +Y in the world (yaw ~ pi/2), then command driving straight
+  // ahead in the body frame. achieved_velocity() reports eta_dot_constrained
+  // straight from the model, before it gets rotated into the world frame to
+  // integrate the pose - so it must stay close to the commanded body-frame
+  // speed no matter which way the rover is pointed in the world.
+  //
+  // The old, wrong approach recovered this quantity by differencing the
+  // world-frame pose instead. After this turn, the pose is moving almost
+  // entirely in world Y (see YawIsAppliedInTheBodyFrame above), so that
+  // differencing would have handed back a velocity dominated by world Y with
+  // almost nothing in X - failing the vx assertion below, which is the
+  // point of this test.
+  SimIkStepper stepper;
+  while (stepper.pose().yaw < M_PI / 2) {
+    stepper.step(0.0, 0.0, 0.6);
+  }
+  const double y_before = stepper.pose().y;
+  for (int i = 0; i < 100; ++i) {
+    stepper.step(0.5, 0.0, 0.0);
+  }
+  EXPECT_NEAR(stepper.achieved_velocity().vx, 0.5, 0.05);
+  EXPECT_GT(stepper.pose().y - y_before, 1.0);
+}
