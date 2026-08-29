@@ -24,6 +24,38 @@ from ground_station import theme
 from ground_station.video_receiver import VideoReceiver
 
 
+def localization_marker(status: dict | None) -> tuple[str, str]:
+    """The marker text and colour for a /localization/status payload.
+
+    Colours are the panel's existing two: theme.OK for the one state that
+    means the picture can be trusted, theme.ACCENT for every state that
+    should stop the operator - which is the same colour FAILED, NO FRAMES
+    and the DEAD RECKONING title marker already use, for the same reason.
+
+    None is not the same as OFF and is not shown as OFF: "the rover says
+    localisation is off" and "we have heard nothing from the rover" point at
+    different machines, and the second one is usually rosbridge.
+    """
+    if status is None:
+        return "NO LOCALISATION STATUS", theme.ACCENT
+
+    state = str(status.get("state", ""))
+    if state == "OK":
+        return "LOCALISED", theme.OK
+    if state == "SEARCHING":
+        seconds = status.get("seconds_since_ok")
+        if isinstance(seconds, (int, float)):
+            # The count is the content: "searching" alone does not say
+            # whether this is a blip over a rut or the rover being lost.
+            return f"SEARCHING … {seconds:.0f} s", theme.ACCENT
+        return "SEARCHING", theme.ACCENT
+    if state == "OFF":
+        return "LOCALISATION OFF", theme.ACCENT
+    # An unrecognised state is shown, not swallowed: a status this panel
+    # cannot interpret is itself worth seeing.
+    return f"LOCALISATION {state.upper()}", theme.ACCENT
+
+
 class VideoPanel(QWidget):
     stream_requested = Signal(bool)
 
@@ -157,19 +189,23 @@ class VideoPanel(QWidget):
 
     def _refresh_title(self) -> None:
         title = f"CAMERA / {self._source_name.upper()}"
+        colour = theme.TEXT_DIM
         if self._dead_reckoning:
             # The simulated pose is integrated from commanded twist, so it
             # drifts from the real rover and the picture cannot show it.
             title += "  -  DEAD RECKONING, NO LOCALISATION"
+            colour = theme.ACCENT
+        elif self._show_localization:
+            marker, colour = localization_marker(self._localization_status)
+            title += f"  -  {marker}"
         self.title_label.setText(title)
-        # This marker is the only defence an operator has against trusting
-        # a synthetic view of the real machine they are driving - sitting
-        # in the same muted colour as ordinary chrome ("CAMERA / ZED FRONT
+        # This marker is the only defence an operator has against trusting a
+        # synthetic view of the real machine they are driving - sitting in
+        # the same muted colour as ordinary chrome ("CAMERA / ZED FRONT
         # LEFT") above a moving picture would never win the operator's
-        # attention. theme.ACCENT is the same colour FAILED and the
-        # blocked-port warning use, for the same reason: this is a warning.
-        color = theme.ACCENT if self._dead_reckoning else theme.TEXT_DIM
-        self.title_label.setStyleSheet(f"color: {color}; font-weight: 600; border: none;")
+        # attention. The failure colours are the same ones FAILED and the
+        # blocked-port warning use, for the same reason: these are warnings.
+        self.title_label.setStyleSheet(f"color: {colour}; font-weight: 600; border: none;")
 
     def _on_toggle_clicked(self) -> None:
         self._toggle_requested = not self._toggle_requested

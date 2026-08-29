@@ -1,5 +1,5 @@
 from ground_station import theme
-from ground_station.ui.video_panel import VideoPanel
+from ground_station.ui.video_panel import VideoPanel, localization_marker
 
 
 class FakeReceiver:
@@ -474,3 +474,101 @@ def test_a_mode_change_clears_a_standing_refusal(qtbot):
     panel.set_source("zed front left", 5600)
 
     assert panel.status_label.text() == "VIDEO OFF"
+
+
+def test_the_marker_reads_localised_when_the_rover_knows_where_it_is():
+    text, colour = localization_marker(
+        {"state": "OK", "seconds_since_ok": 0.0, "source": "zed_vio",
+         "distance_travelled": 12.5, "mount_offset_verified": True, "detail": ""})
+
+    assert text == "LOCALISED"
+    assert colour == theme.OK
+
+
+def test_the_marker_counts_the_seconds_while_searching():
+    # The count is the whole content of this state: "searching" alone does
+    # not say whether it is a half-second blip over a rut or forty seconds
+    # of the rover being lost.
+    text, colour = localization_marker(
+        {"state": "SEARCHING", "seconds_since_ok": 4.2, "source": "zed_vio",
+         "distance_travelled": 12.5, "mount_offset_verified": True, "detail": ""})
+
+    assert text == "SEARCHING … 4 s"
+    assert colour == theme.ACCENT
+
+
+def test_searching_without_a_count_still_says_searching():
+    text, _ = localization_marker(
+        {"state": "SEARCHING", "seconds_since_ok": None, "source": "zed_vio",
+         "distance_travelled": 0.0, "mount_offset_verified": True, "detail": ""})
+
+    assert text == "SEARCHING"
+
+
+def test_the_marker_says_localisation_is_off():
+    text, colour = localization_marker(
+        {"state": "OFF", "seconds_since_ok": None, "source": "zed_vio",
+         "distance_travelled": 0.0, "mount_offset_verified": True, "detail": ""})
+
+    assert text == "LOCALISATION OFF"
+    assert colour == theme.ACCENT
+
+
+def test_no_status_at_all_is_not_reported_as_localisation_being_off():
+    # "The rover told us it is off" and "the rover has told us nothing" are
+    # different facts. The second one usually means rosbridge, not the ZED,
+    # and sending the operator to the wrong machine costs a rover day.
+    text, colour = localization_marker(None)
+
+    assert text == "NO LOCALISATION STATUS"
+    assert colour == theme.ACCENT
+
+
+def test_an_unknown_state_is_shown_rather_than_swallowed():
+    text, colour = localization_marker(
+        {"state": "wedged", "seconds_since_ok": None, "source": "zed_vio",
+         "distance_travelled": 0.0, "mount_offset_verified": False, "detail": ""})
+
+    assert text == "LOCALISATION WEDGED"
+    assert colour == theme.ACCENT
+
+
+def test_the_marker_is_on_the_title_in_semi_auto(qtbot):
+    panel = VideoPanel(receiver=FakeReceiver())
+    qtbot.addWidget(panel)
+    panel.set_source("simulation", 5601, reports_remote_status=False,
+                     show_localization=True)
+
+    panel.set_localization_status(
+        {"state": "OK", "seconds_since_ok": 0.0, "source": "zed_vio",
+         "distance_travelled": 1.0, "mount_offset_verified": True, "detail": ""})
+
+    assert panel.title_label.text() == "CAMERA / SIMULATION  -  LOCALISED"
+    assert theme.OK in panel.title_label.styleSheet()
+
+
+def test_the_marker_is_not_shown_for_a_source_that_is_not_localised(qtbot):
+    # The dead-reckoned Simulation mode and the rover's own camera have no
+    # localisation to report; a marker there would be a claim about a topic
+    # that has nothing to do with what is on screen.
+    panel = VideoPanel(receiver=FakeReceiver())
+    qtbot.addWidget(panel)
+    panel.set_source("simulation", 5601, dead_reckoning=True,
+                     reports_remote_status=False)
+
+    panel.set_localization_status(
+        {"state": "OK", "seconds_since_ok": 0.0, "source": "zed_vio",
+         "distance_travelled": 1.0, "mount_offset_verified": True, "detail": ""})
+
+    assert panel.title_label.text() == (
+        "CAMERA / SIMULATION  -  DEAD RECKONING, NO LOCALISATION")
+
+
+def test_entering_semi_auto_before_any_status_says_so_rather_than_nothing(qtbot):
+    panel = VideoPanel(receiver=FakeReceiver())
+    qtbot.addWidget(panel)
+
+    panel.set_source("simulation", 5601, reports_remote_status=False,
+                     show_localization=True)
+
+    assert panel.title_label.text() == "CAMERA / SIMULATION  -  NO LOCALISATION STATUS"
