@@ -24,6 +24,7 @@ Measured numbers: see launch/localization.launch.py.
 """
 
 import json
+from collections import deque
 from datetime import datetime, timezone
 
 import numpy as np
@@ -43,6 +44,20 @@ MAP_TILE_TOPIC = '/localization/map_tile'
 MAP_COMMAND_TOPIC = '/localization/map_command'
 MAP_STATUS_TOPIC = '/localization/map_status'
 LAYER = 'elevation'
+
+# Depth of the tile writer, and how many blanking tiles a tick may send.
+#
+# A tick emits at most nine tiles (eight dirty plus one keepalive), but a
+# clear or a load has to tell the sim about every tile that is no longer
+# there, and that is one message per previously published tile - about 196
+# over the yard and 576 at the 60 m cap. Bursting those into a depth-8
+# RELIABLE KEEP_LAST writer (and through sim_bridge, whose queues are the
+# same size) overruns it, and the tiles that fall out are exactly the ones
+# that would have removed stale terrain, so the sim keeps ground the rover
+# no longer believes in. Two changes together: a deeper writer, and the
+# burst paced over ticks rather than sent in one go from the callback.
+TILE_QUEUE_DEPTH = 64
+NAN_TILES_PER_TICK = 16
 
 
 def points_from_cloud(message: PointCloud2) -> np.ndarray:
@@ -124,11 +139,19 @@ class ElevationMapper(Node):
         self._last_command = None
         self._warned_about_cap = False
         self._tile_count = 0
+        # Tiles a clear or a load has orphaned, waiting to go out as
+        # all-NaN, `NAN_TILES_PER_TICK` a tick. The set is the queue's
+        # membership: a key is dropped from it (not from the deque) when
+        # the tile comes back to life before its blank was sent, so a
+        # freshly mapped tile is never blanked behind the sim's back.
+        self._pending_nan = deque()
+        self._pending_nan_keys = set()
 
         # Default QoS: reliable, volatile, depth 1 - sim_bridge relays this
         # topic with a generic subscription and a durability mismatch there
         # would mean no data at all. Late joiners get the keepalive.
-        self._tile_publisher = self.create_publisher(GridMap, MAP_TILE_TOPIC, 8)
+        self._tile_publisher = self.create_publisher(
+            GridMap, MAP_TILE_TOPIC, TILE_QUEUE_DEPTH)
         self._status_publisher = self.create_publisher(String, MAP_STATUS_TOPIC, 1)
         self.create_subscription(
             PointCloud2, str(self.get_parameter('cloud_topic').value), self._on_cloud, 1)
@@ -171,11 +194,31 @@ class ElevationMapper(Node):
         # Jetson, and the status timer runs once a second whether or not
         # anything changed. Here it is computed anyway.
         self._tile_count = len(keys)
+        for key in keys:
+            # Live again before its blank went out: sending the blank now
+            # would erase terrain the map does believe in.
+            self._pending_nan_keys.discard(key)
         self._scheduler.offer(keys, now)
+
+    def _queue_nan(self, keys) -> None:
+        for key in keys:
+            if key not in self._pending_nan_keys:
+                self._pending_nan_keys.add(key)
+                self._pending_nan.append(key)
 
     def _tick(self, now: float = None) -> None:
         now = self._now() if now is None else now
         stamp = self.get_clock().now().to_msg()
+        empty = np.full((TILE_SAMPLES, TILE_SAMPLES), np.nan, dtype=np.float32)
+        sent = 0
+        while self._pending_nan and sent < NAN_TILES_PER_TICK:
+            key = self._pending_nan.popleft()
+            if key not in self._pending_nan_keys:
+                continue                # came back to life; costs no budget
+            self._pending_nan_keys.discard(key)
+            self._tile_publisher.publish(
+                build_tile_message(key, empty, self._frame_id, stamp))
+            sent += 1
         for key, tile in self._scheduler.due(now):
             self._tile_publisher.publish(build_tile_message(key, tile, self._frame_id, stamp))
             self._scheduler.published(key, tile, now)
@@ -240,13 +283,9 @@ class ElevationMapper(Node):
         # Any tile that was on screen before the load but has no seen cell
         # in the loaded map would otherwise never be mentioned again, and
         # the sim would keep its stale terrain forever - so every such tile
-        # goes out once more as all-NaN, exactly as _clear does.
-        stamp = self.get_clock().now().to_msg()
-        empty = np.full((TILE_SAMPLES, TILE_SAMPLES), np.nan, dtype=np.float32)
-        for key in old_keys:
-            if key not in new_keys:
-                self._tile_publisher.publish(
-                    build_tile_message(key, empty, self._frame_id, stamp))
+        # goes out once more as all-NaN, exactly as _clear does, paced by
+        # _tick rather than burst out of this callback.
+        self._queue_nan(key for key in old_keys if key not in new_keys)
         self._scheduler.mark_all_dirty()
         self.get_logger().info(f"map {name!r} loaded; republishing every tile")
 
@@ -254,10 +293,7 @@ class ElevationMapper(Node):
         self._grid.clear()
         self._loaded = None
         self._tile_count = 0
-        stamp = self.get_clock().now().to_msg()
-        empty = np.full((TILE_SAMPLES, TILE_SAMPLES), np.nan, dtype=np.float32)
-        for key in self._scheduler.forget_all():
-            self._tile_publisher.publish(build_tile_message(key, empty, self._frame_id, stamp))
+        self._queue_nan(self._scheduler.forget_all())
         self.get_logger().info("map cleared")
 
     # -- status -----------------------------------------------------------

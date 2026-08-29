@@ -244,6 +244,7 @@ def test_clear_empties_the_grid_and_sends_every_published_tile_once_more_as_nan(
     node._tick(now=0.0)
     node._tile_publisher.messages.clear()
     node._on_command(String(data='{"action":"clear"}'))
+    node._tick(now=1.0)                                # the blanks are paced by _tick
     messages = node._tile_publisher.messages
     assert len(messages) == 2
     assert all(np.isnan(np.asarray(m.data[0].data)).all() for m in messages)
@@ -325,3 +326,69 @@ def test_the_status_tile_count_follows_the_map(node):
     node._on_cloud(cloud(points_at(0.1, 0.1)))     # tiles (0, 0) and (1, 0)
     node._publish_status()
     assert json.loads(node._status_publisher.messages[-1].data)['tiles'] == 2
+
+
+def points_over_tiles(n_x, n_y, z=1.0):
+    """A cloud covering n_x by n_y whole 2.5 m tiles from the origin."""
+    xs = np.arange(0.05, 2.5 * n_x, 0.25)
+    ys = np.arange(0.05, 2.5 * n_y, 0.25)
+    grid = np.stack(np.meshgrid(xs, ys), axis=-1).reshape(-1, 2)
+    return [[x, y, z] for x, y in grid]
+
+
+def _published_keys(node):
+    return {tile_index_of(m.info.pose.position.x, m.info.pose.position.y)
+            for m in node._tile_publisher.messages}
+
+
+def test_the_tile_publisher_is_deep_enough_for_a_blanking_burst(ros, tmp_path):
+    node = ElevationMapper(map_directory=str(tmp_path))
+    try:
+        assert node._tile_publisher.qos_profile.depth >= 64
+    finally:
+        node.destroy_node()
+
+
+def test_a_clear_paces_the_blanking_tiles_instead_of_bursting_them(node):
+    node._on_cloud(cloud(points_over_tiles(7, 6)))
+    for tick in range(12):
+        node._tick(now=float(tick))
+    was_published = _published_keys(node)
+    assert len(was_published) >= 40
+    node._tile_publisher.messages.clear()
+
+    node._on_command(String(data='{"action":"clear"}'))
+    # Nothing at all out of the command callback: 40-plus messages into a
+    # depth-64 writer and a bridge queue of the same size is exactly the
+    # burst that used to drop tiles on the floor.
+    assert node._tile_publisher.messages == []
+
+    node._tick(now=20.0)
+    assert len(node._tile_publisher.messages) == 16
+    assert all(np.isnan(np.asarray(m.data[0].data)).all()
+               for m in node._tile_publisher.messages)
+
+    ticks = 1
+    while node._pending_nan:
+        ticks += 1
+        node._tick(now=20.0 + ticks)
+    assert ticks == -(-len(was_published) // 16)          # ceil, 16 a tick
+    assert _published_keys(node) == was_published
+    assert all(np.isnan(np.asarray(m.data[0].data)).all()
+               for m in node._tile_publisher.messages)
+
+
+def test_a_tile_that_comes_back_before_its_blank_went_out_is_not_blanked(node):
+    node._on_cloud(cloud(points_over_tiles(7, 6)))
+    for tick in range(12):
+        node._tick(now=float(tick))
+    node._tile_publisher.messages.clear()
+
+    node._on_command(String(data='{"action":"clear"}'))
+    node._on_cloud(cloud(points_at(0.1, 0.1)))            # tiles (0, 0), (1, 0) are live again
+    while node._pending_nan:
+        node._tick(now=30.0)
+    blanked = {tile_index_of(m.info.pose.position.x, m.info.pose.position.y)
+               for m in node._tile_publisher.messages
+               if np.isnan(np.asarray(m.data[0].data)).all()}
+    assert (0, 0) not in blanked and (1, 0) not in blanked

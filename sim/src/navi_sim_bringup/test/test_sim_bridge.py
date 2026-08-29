@@ -165,3 +165,15 @@ def test_the_sim_side_node_has_no_subscriptions_at_all():
 def test_the_map_tiles_are_among_the_topics_the_bridge_carries_by_default():
     assert "/localization/map_tile:grid_map_msgs/msg/GridMap" in sim_bridge.DEFAULT_TOPICS
     assert not any(spec.startswith("/localization/map:") for spec in sim_bridge.DEFAULT_TOPICS)
+
+
+def test_the_queues_are_deep_enough_for_a_map_blanking_burst():
+    """A clear or a load blanks every tile that was on screen.
+
+    The mapper paces that at 16 tiles a tick into a depth-64 writer
+    (elevation_mapper.NAN_TILES_PER_TICK / TILE_QUEUE_DEPTH); a bridge
+    queue of 10 in between would drop most of them, and the tiles it drops
+    are precisely the ones that remove terrain the rover no longer
+    believes in - so the sim would keep showing ground that is gone.
+    """
+    assert sim_bridge.QUEUE_DEPTH >= 64

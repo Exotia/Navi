@@ -48,7 +48,14 @@ DEFAULT_TOPICS = [
     "/localization/map_tile:grid_map_msgs/msg/GridMap",
 ]
 
-QUEUE_DEPTH = 10
+# Deep enough for the map's blanking bursts. A clear or a load on the rover
+# sends one all-NaN tile for every tile that was on screen - the mapper
+# paces that at 16 a tick into a depth-64 writer, and a queue of 10 here
+# would throw most of them away. The tiles dropped would be exactly the
+# ones that take stale terrain out of the Gazebo view, so the sim would go
+# on showing ground the rover no longer believes in. The other three
+# topics are far below this either way.
+QUEUE_DEPTH = 64
 
 
 def parse_topic_spec(spec: str) -> tuple[str, str]:
