@@ -17,8 +17,15 @@ from ground_station.ui.drive_detail_page import DriveDetailPage
 # packets as garbage.
 SIM_VIDEO_PORT = 5601
 
+# The exact words the panel shows when the operator asks for the rover's
+# camera in semi-autonomous mode. One constant, because the test asserts on
+# it and the spec fixes the wording.
+SEMI_AUTO_REFUSAL = "no camera stream in semi-autonomous mode"
+
 
 class MainWindow(QMainWindow):
+    SEMI_AUTO_REFUSAL = SEMI_AUTO_REFUSAL
+
     def __init__(self, ros_client_factory=RosBridgeClient, initial_host: str | None = None,
                  initial_port: int = 9090, node_poll_interval_ms: int = 2000,
                  staleness_check_interval_ms: int = 500, stale_after_seconds: float = 1.0,
@@ -310,16 +317,25 @@ class MainWindow(QMainWindow):
 
     def _on_stream_requested(self, enable: bool) -> None:
         panel = self.dashboard_page.video_panel
-        if self._mode in ("simulation", "semi_auto"):
+
+        if self._mode == "semi_auto":
+            # The whole point of this mode is that the field link carries no
+            # video: the operator drives on the Gazebo view, placed by
+            # localisation. Commanding the rover's camera would undo that;
+            # toggling the local simulation receiver would blank the only
+            # picture the operator has. So: nothing moves, and the panel
+            # says why rather than swallowing the press.
+            panel.refuse_stream(SEMI_AUTO_REFUSAL)
+            return
+
+        if self._mode == "simulation":
             # The toggle acts on whichever source the panel is actually
-            # showing, and in both simulation modes that is the simulation -
-            # a local process with no control plane at all, which streams
-            # whenever it runs (by design: it is on this same laptop, so
-            # there is nothing to ask). Commanding the rover's camera from
-            # here would push 800 kbps of H.264 across the field link to
-            # port 5600 where nothing is listening, for as long as the mode
-            # lasts, undoing the only reason this mode stops it - and say
-            # nothing about it.
+            # showing, and here that is the simulation - a local process
+            # with no control plane at all, which streams whenever it runs
+            # (by design: it is on this same laptop, so there is nothing to
+            # ask). Commanding the rover's camera from here would push
+            # 800 kbps of H.264 across the field link to port 5600 where
+            # nothing is listening, for as long as the mode lasts.
             panel.set_streaming(enable)
             return
 

@@ -411,3 +411,66 @@ def test_the_label_does_not_impose_the_streams_own_size_as_a_minimum(qtbot):
 
     assert panel.image_label.minimumWidth() < 672
     assert panel.image_label.minimumHeight() < 376
+
+
+def test_refuse_stream_says_why_on_the_status_line(qtbot):
+    panel = VideoPanel(receiver=FakeReceiver())
+    qtbot.addWidget(panel)
+    panel.set_source("simulation", 5601, reports_remote_status=False,
+                     show_localization=True)
+
+    panel.refuse_stream("no camera stream in semi-autonomous mode", now=100.0)
+
+    assert panel.status_label.text() == "no camera stream in semi-autonomous mode"
+    assert theme.ACCENT in panel.status_label.styleSheet()
+
+
+def test_a_refusal_leaves_the_view_exactly_as_it_was(qtbot):
+    # "Does nothing but say so": the simulation stream on screen is not the
+    # rover's camera and has nothing to do with the request being refused.
+    # Stopping it here would punish the operator for asking a question.
+    receiver = FakeReceiver(frame=bytes(4 * 2 * 3))
+    panel = VideoPanel(receiver=receiver)
+    qtbot.addWidget(panel)
+    panel.set_streaming(True)
+
+    panel.refuse_stream("no camera stream in semi-autonomous mode", now=100.0)
+
+    assert panel.streaming is True
+    assert receiver.stopped is False
+    # The click flipped the button to "Stop video" on the way in; a refused
+    # request must put it back where reality is, or the next click sends the
+    # opposite of what the operator means.
+    assert panel.toggle_button.text() == "Stop video"
+
+
+def test_a_refusal_is_shown_for_a_while_and_then_gets_out_of_the_way(qtbot):
+    # Sticky forever would bury the one fact this mode's operator needs -
+    # whether frames are still arriving. Cleared on the next 33 ms poll it
+    # would never be read. Time-boxed is the only honest option.
+    receiver = FakeReceiver(frame=bytes(4 * 2 * 3))
+    panel = VideoPanel(receiver=receiver, refusal_seconds=5.0)
+    qtbot.addWidget(panel)
+    panel.set_source("simulation", 5601, reports_remote_status=False)
+    panel.set_streaming(True)
+    panel.refuse_stream("no camera stream in semi-autonomous mode", now=100.0)
+
+    panel._poll_frame(now=104.9)
+    assert panel.status_label.text() == "no camera stream in semi-autonomous mode"
+
+    panel._poll_frame(now=105.1)
+    assert panel.status_label.text() == "RECEIVING"
+
+
+def test_a_mode_change_clears_a_standing_refusal(qtbot):
+    # The refusal belongs to the mode that issued it. Carrying it into the
+    # manual view, where the rover's camera is exactly what is on screen,
+    # would be a lie with a five-second fuse.
+    panel = VideoPanel(receiver=FakeReceiver())
+    qtbot.addWidget(panel)
+    panel.set_source("simulation", 5601, reports_remote_status=False)
+    panel.refuse_stream("no camera stream in semi-autonomous mode", now=100.0)
+
+    panel.set_source("zed front left", 5600)
+
+    assert panel.status_label.text() == "VIDEO OFF"

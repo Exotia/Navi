@@ -28,10 +28,18 @@ class VideoPanel(QWidget):
     stream_requested = Signal(bool)
 
     def __init__(self, receiver=None, parent=None, poll_interval_ms: int = 33,
-                 no_frame_after_seconds: float = 2.0):
+                 no_frame_after_seconds: float = 2.0,
+                 refusal_seconds: float = 5.0):
         super().__init__(parent)
         self.receiver = receiver if receiver is not None else VideoReceiver()
         self.no_frame_after_seconds = no_frame_after_seconds
+        self.refusal_seconds = refusal_seconds
+        # A refusal is neither a rover claim nor a local fact, so it does not
+        # fit either status path - it is an answer to a button press. Held
+        # for refusal_seconds and then dropped, so the ordinary status line
+        # comes back on its own.
+        self._refusal: str | None = None
+        self._refusal_until = 0.0
         self._streaming = False
         self._last_frame_at: float | None = None
         # Kept as bytes rather than a QImage: QImage does not copy the
@@ -134,6 +142,7 @@ class VideoPanel(QWidget):
         self._dead_reckoning = dead_reckoning
         self._reports_remote_status = reports_remote_status
         self._show_localization = show_localization
+        self._refusal = None
         self._refresh_title()
         if was_streaming:
             self.set_streaming(True)
@@ -226,6 +235,22 @@ class VideoPanel(QWidget):
             self._toggle_requested = False
         self._refresh_status()
 
+    def refuse_stream(self, reason: str, now: float | None = None) -> None:
+        """Answers a stream request that will not be honoured.
+
+        Nothing about the view changes: the source on screen was not what
+        was requested, and stopping it would punish the operator for
+        asking. Only the button is put back where reality is - the click
+        already flipped _toggle_requested, and leaving it flipped would make
+        the next click send the opposite of what the operator means.
+        """
+        now = monotonic() if now is None else now
+        self._refusal = reason
+        self._refusal_until = now + self.refusal_seconds
+        self._toggle_requested = self._streaming
+        self.toggle_button.setText("Stop video" if self._streaming else "Start video")
+        self._refresh_status(now)
+
     def _poll_frame(self, now: float | None = None) -> None:
         now = monotonic() if now is None else now
         if not self._streaming:
@@ -275,6 +300,16 @@ class VideoPanel(QWidget):
         self._render_frame()
 
     def _refresh_status(self, now: float | None = None) -> None:
+        now = monotonic() if now is None else now
+
+        if self._refusal is not None:
+            if now < self._refusal_until:
+                self.status_label.setText(self._refusal)
+                self.status_label.setStyleSheet(
+                    f"color: {theme.ACCENT}; font-family: {theme.MONO_FONT_FAMILY}; border: none;")
+                return
+            self._refusal = None
+
         if not self._reports_remote_status:
             self._refresh_local_only_status(now)
             return
@@ -325,7 +360,6 @@ class VideoPanel(QWidget):
                 f"color: {theme.ACCENT}; font-family: {theme.MONO_FONT_FAMILY}; border: none;")
             return
 
-        now = monotonic() if now is None else now
         starving = (self._last_frame_at is not None
                     and now - self._last_frame_at > self.no_frame_after_seconds)
         if starving and self._rover_state in ("streaming", "starting"):
@@ -341,7 +375,7 @@ class VideoPanel(QWidget):
         self.status_label.setStyleSheet(
             f"color: {color}; font-family: {theme.MONO_FONT_FAMILY}; border: none;")
 
-    def _refresh_local_only_status(self, now: float | None = None) -> None:
+    def _refresh_local_only_status(self, now: float) -> None:
         """The status line for a source with no remote self-report (the
         simulation). There is only one fact available - whether frames are
         actually arriving here - so this shows that alone, rather than
@@ -360,7 +394,6 @@ class VideoPanel(QWidget):
                 f"color: {theme.ACCENT}; font-family: {theme.MONO_FONT_FAMILY}; border: none;")
             return
 
-        now = monotonic() if now is None else now
         starving = (self._last_frame_at is not None
                     and now - self._last_frame_at > self.no_frame_after_seconds)
         if starving:

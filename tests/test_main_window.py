@@ -651,3 +651,35 @@ def test_the_twist_still_reaches_the_rover_in_simulation(qtbot):
         "linear": {"x": 0.4, "y": 0.0, "z": 0.0},
         "angular": {"x": 0.0, "y": 0.0, "z": 0.2},
     }
+
+
+def test_the_video_toggle_is_refused_in_semi_auto_with_the_reason_on_the_panel(qtbot,
+                                                                               monkeypatch):
+    # Semi-autonomous exists so the operator drives on the Gazebo view and
+    # the field link carries no video at all. A toggle here must not command
+    # the rover's camera, must not start a local receiver pointed at a
+    # camera that is off, and must not be silent about either.
+    window, _ = make_window(qtbot)
+    monkeypatch.setattr(window, "local_address_for", lambda host, port: "10.20.30.40")
+    window.dashboard_page.mode_changed.emit("semi_auto")
+    topic = next(t for t in FakeTopic.instances if t.name == "/video_request")
+    requests_before = len(topic.published_messages)
+
+    window.dashboard_page.video_panel.toggle_button.click()
+
+    assert len(topic.published_messages) == requests_before
+    assert window.dashboard_page.video_panel.status_label.text() == (
+        "no camera stream in semi-autonomous mode")
+
+
+def test_the_semi_auto_refusal_does_not_start_a_local_receiver(qtbot):
+    # The simulation's own stream is started by the mode switch, not by this
+    # button - and in semi-auto the button must move nothing at all.
+    window, _ = make_window(qtbot)
+    window.dashboard_page.mode_changed.emit("semi_auto")
+    panel = window.dashboard_page.video_panel
+    streaming_before = panel.streaming
+
+    window._on_stream_requested(True)
+
+    assert panel.streaming is streaming_before
