@@ -1,3 +1,80 @@
+# Asterope rover ground station — project goal and state
+
+Updated 2026-08-30 from the live repository (`~/star/Navi`, `master`).
+
+## The goal
+
+**The Gazebo view in the ground station must reflect the real world as
+faithfully as the rover's sensors allow.** An operator at the base-station
+laptop, in semi-autonomous mode, sees the real rover placed by its own
+localisation inside a live 3-D reconstruction of the yard — the ground it
+has driven on and the objects around it — built from the ZED 2i as the rover
+moves, with no camera video. What the operator sees in Gazebo *is* what the
+rover has seen: nothing invented, nothing hidden that the sensors captured.
+Everything else in this repository serves that: localisation places the
+rover, the map pipeline builds the world, the ground station shows it and
+lets the operator drive, save and reload.
+
+Context: the Asterope rover of STAR Dresden for the European Rover
+Challenge Mars yard (≈ 35 × 35 m, tours ≤ 250 m). Jetson Orin (25 W mode)
+with a ZED 2i on the rover; a laptop as ground station.
+
+## Operating modes and what "done" means
+
+| mode | state | definition of done |
+|---|---|---|
+| **Manual** | done | gamepad drive over rosbridge, rover video (15 fps) in the panel |
+| **Semi-autonomous** | working, being refined | Gazebo shows the rover at its localised pose on the live terrain with obstacles as 3-D blocks; no video; MAP row: save / load / clear maps stored on the rover |
+| **Simulation** | done | the old dead-reckoning sim with the organisers' scan, for the laptop alone |
+| **Autonomous** | designed, deliberately not built | Nav2 goal navigation (specs/plans of 2026-08-29-autonomy*) |
+
+Quality bar for the reconstruction, in order: (1) geometry at the right
+place and size (5 cm ground cells, 10 cm obstacle voxels, tiles of 2.5 m);
+(2) completeness — everything the ZED has fused appears, holes close as the
+rover keeps looking; (3) no artefacts — no spikes, no stale objects the
+sensor no longer sees, no flash on update; (4) texture/colour last (an
+after-ride textured export via the ZED's `save_3d_map` is the planned
+next step).
+
+## Constraints that shape every decision
+
+- ZED 2i is the only localisation sensor: visual-inertial tracking + area
+  memory; **the magnetometer is never used**; there is no wheel odometry.
+- Rover code runs on the Orin (`rover/`, deployed with `deploy_rover.sh`);
+  the ground station has **no ROS** (PySide6 + roslibpy over rosbridge);
+  the simulation runs on its own ROS domain (42) behind a one-way bridge.
+- Maps live on the rover (`~/navi_maps/<name>.npz`), saved only on request.
+- Never publish to `/manual_twist` from tests (it drives the physical
+  rover); `sim/src/navi_sim_ik/vendor/` is read-only.
+- WiFi is shared with video: map traffic is tiles and deltas, tens of KB/s.
+
+## Where things are
+
+- Designs: `docs/superpowers/specs/` — localisation (08-29), tiled map
+  (08-29), obstacle voxels (08-30), autonomy (08-29, not executed).
+- Plans and execution ledgers: `docs/superpowers/plans/`, `.superpowers/sdd/`.
+- Rover packages: `rover/src/navi_localization` (pose, status, elevation
+  grid, tiles, voxels, mapper), `rover/src/navi_teleop` (video).
+- Simulation: `sim/src/navi_sim_bringup` (bridge, terrain/obstacle writer,
+  meshes), `sim/src/navi_sim_ik`, `sim/src/navi_sim_video`.
+- Ground station: `ground_station/` with tests in `tests/`.
+- Launchers: `start_navi.sh` (rover), `start_sim.sh --mode semi`,
+  `start_ground_station.sh`; Claude Code helpers in `.claude/`
+  (`/deploy-rover`, `/sim-e2e`, `ros-reviewer`).
+
+## Open items (2026-08-30)
+
+- Holes in obstacle surfaces while the rover is static (fill pass on the
+  laptop or finer ZED mapping resolution).
+- Stale objects (a person who walked through) stay until the ZED re-fuses
+  that chunk — no free-space decay yet.
+- Textured after-ride export (tier 2); overwrite of a saved map from the UI;
+  review of the last obstacle fix (commit e4fbbd5) still to be done.
+
+---
+
+# History — planning notes of 2026-08-25 (superseded; kept for context)
+
 # Mars Rover Navigation — Planning & Development Summary
 
 Written 2026-08-25. **Environment note**: this file was written from a session that does
