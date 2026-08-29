@@ -858,3 +858,36 @@ def test_the_staleness_timer_ages_the_map_command_outcome_off_the_row(qtbot):
     window._check_staleness(now=row._last_command_at + 11.0)
     assert "save" not in row.status_label.text()
     assert row.load_button.isEnabled()              # the row itself is not stale
+
+
+def test_a_mode_round_trip_does_not_switch_the_rover_camera_on(qtbot, monkeypatch):
+    # Video OFF in manual; semi mode forces the local receiver on for the
+    # Gazebo stream. Coming back must not turn that into a /video_request
+    # enable the operator never asked for.
+    window, _ = make_window(qtbot, initial_host="192.168.178.33")
+    monkeypatch.setattr(window, "local_address_for", lambda host, port: "10.20.30.40")
+    panel = window.dashboard_page.video_panel
+    assert panel.streaming is False
+
+    window.dashboard_page.mode_changed.emit("semi_auto")
+    assert panel.streaming is True
+    window.dashboard_page.mode_changed.emit("manual")
+
+    assert panel.streaming is False
+    requests = [json.loads(m["data"]) for t in FakeTopic.instances
+                if t.name == "/video_request" for m in t.published_messages]
+    assert all(r["enable"] is False for r in requests), requests
+
+
+def test_a_mode_round_trip_restores_the_rover_camera_that_was_on(qtbot, monkeypatch):
+    window, _ = make_window(qtbot, initial_host="192.168.178.33")
+    monkeypatch.setattr(window, "local_address_for", lambda host, port: "10.20.30.40")
+    window._on_stream_requested(True)
+    panel = window.dashboard_page.video_panel
+    assert panel.streaming is True
+
+    window.dashboard_page.mode_changed.emit("semi_auto")
+    window.dashboard_page.mode_changed.emit("manual")
+
+    assert panel.streaming is True
+    assert _last_video_request()["enable"] is True

@@ -51,6 +51,7 @@ class MapRow(QWidget):
         # already took.
         self._clock = clock
         self._last_command_at: float | None = None
+        self._seen_command = None
         self.ask_name = self._ask_name_dialog
         self.confirm_clear = self._confirm_clear_dialog
 
@@ -79,11 +80,13 @@ class MapRow(QWidget):
         self.set_state(None)
 
     def set_state(self, state) -> None:
-        previous_command = self._state.last_command if self._state is not None else None
-        new_command = state.last_command if state is not None else None
-        if new_command != previous_command:
+        # Compared against the last command *seen*, not the last state: a
+        # status drop (state None) must not make the same old outcome look
+        # new - and start its 10 s red window again - when status resumes.
+        if state is not None and state.last_command != self._seen_command:
+            self._seen_command = state.last_command
             self._notice = ""
-            self._last_command_at = self._clock() if new_command else None
+            self._last_command_at = self._clock() if state.last_command else None
         self._state = state
         enabled = state is not None
         if state is not None:

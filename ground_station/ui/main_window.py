@@ -66,6 +66,7 @@ class MainWindow(QMainWindow):
         # rosbridge. Kept here rather than read back off the radio buttons
         # so the window does not depend on the dashboard's widget layout.
         self._mode = "manual"
+        self._rover_video_before_simulation = False
         # The last /localization/status seen, or None if none has arrived.
         # Kept here as well as on the panel so entering semi-autonomous can
         # show the current state immediately instead of a blank marker until
@@ -461,8 +462,14 @@ class MainWindow(QMainWindow):
         takes its place.
         """
         panel = self.dashboard_page.video_panel
+        previous_mode = self._mode
         self._mode = mode
         self.dashboard_page.map_row.setVisible(mode == "semi_auto")
+        if previous_mode not in ("simulation", "semi_auto") and mode in ("simulation", "semi_auto"):
+            # What the operator had before the simulation modes forced the
+            # local receiver on; restored on the way back, so a mode
+            # round-trip never switches the rover's camera on by itself.
+            self._rover_video_before_simulation = panel.streaming
 
         if mode == "autonomous":
             # Unreachable from the UI (the radio is disabled). Reached only
@@ -509,5 +516,13 @@ class MainWindow(QMainWindow):
         # of the field link that _on_stream_requested guards against. A
         # failed request reports itself on the panel via _request_rover_video
         # rather than doing nothing quietly.
+        #
+        # And only if it was on before the simulation mode: semi mode forces
+        # the local receiver on (the toggle is refused there), and set_source
+        # carries that "on" back - which is not the operator's choice.
+        if not self._rover_video_before_simulation:
+            if panel.streaming:
+                panel.set_streaming(False)
+            return
         if panel.streaming:
             self._request_rover_video(True)

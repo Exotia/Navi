@@ -156,3 +156,19 @@ def test_refresh_accepts_the_windows_own_clock_reading(qtbot):
     assert "clear" in row.status_label.text()
     row.refresh(now=111.0)
     assert "clear" not in row.status_label.text()
+
+
+def test_a_status_drop_does_not_revive_an_old_outcome(qtbot):
+    clock = FakeClock()
+    row = MapRow(clock=clock)
+    qtbot.addWidget(row)
+    command = {"action": "save", "name": "x", "ok": False, "error": "disk full"}
+    row.set_state(state(last_command=command))
+    clock.t = 120.0
+    row.refresh()
+    assert "save" not in row.status_label.text()      # aged off
+
+    row.set_state(None)                                # 3 s blip / rosbridge drop
+    clock.t = 125.0
+    row.set_state(state(last_command=command))         # same old command comes back
+    assert "save" not in row.status_label.text()
