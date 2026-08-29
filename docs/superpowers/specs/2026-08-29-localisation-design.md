@@ -60,8 +60,13 @@ Verified on 2026-08-29 on the Orin (`star@a_navi`) and this laptop:
   are its nodes).
 - Neither machine has `domain_bridge`. `rclpy` in Humble supports several
   contexts with different `domain_id`s in one process, which is enough.
-- Gazebo Classic cannot update a heightmap in place; a terrain model has to be
-  respawned to change.
+- Gazebo Classic cannot update a model's geometry in place; a terrain model
+  has to be respawned to change.
+- Gazebo Classic cannot survive respawning a *heightmap*: on the third
+  respawn of a changing map gzserver died with an Ogre terrain error
+  ("Zero sized texture surface on texture TerrBlend3"), taking the chase
+  camera and the ground station's picture with it. Reproduced on demand.
+  The terrain is therefore a mesh (amended 2026-08-29, commit 421e58a).
 
 ## Architecture
 
@@ -308,14 +313,17 @@ deferred item recorded below, not built now.
 ### On the laptop
 
 `terrain_writer` (Python, `navi_sim_bringup`, sim domain) subscribes
-`/localization/map`, writes it as a Gazebo heightmap (a `(2^n + 1)`-square
-16-bit PNG plus the SDF model wrapping it), and respawns the `terrain` model
+`/localization/map`, writes it as an OBJ mesh (one vertex per grid sample in
+world coordinates, triangles only where all four corners were seen, at most
+257 samples a side; originally a `(2^n + 1)`-square 16-bit heightmap PNG,
+see the constraint above for why not) plus the SDF model wrapping it, and
+respawns the `terrain` model
 through `/delete_entity` + `/spawn_entity`, at most every 5 s and only on
 change. The rover model is untouched by the respawn. The world file gets no
 static terrain in `semi` mode; the ground plane at z = 0 remains so the rover
 is never in the void.
 
-Gazebo renders the heightmap with a single flat colour; the rover's own scan
+Gazebo renders the mesh with a single flat colour; the rover's own scan
 shows as relief only. That is the truth of what has been seen, which is the
 point.
 
