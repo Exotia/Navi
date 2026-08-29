@@ -5,6 +5,8 @@
     sim/src/navi_sim_bringup/test/test_terrain_writer.py -q'
 """
 
+import os
+
 import numpy as np
 import pytest
 import rclpy
@@ -75,10 +77,10 @@ def test_a_circular_buffer_message_is_refused_rather_than_read_wrongly():
         elevation_from_message(grid_map)
 
 
-def test_model_names_alternate_per_tile():
-    assert model_name((3, -2), 0) == 'terrain_3_-2_a'
-    assert model_name((3, -2), 1) == 'terrain_3_-2_b'
-    assert model_name((3, -2), 2) == 'terrain_3_-2_a'
+def test_model_names_are_unique_per_generation():
+    assert model_name((3, -2), 0) == 'terrain_3_-2_g0'
+    assert model_name((3, -2), 1) == 'terrain_3_-2_g1'
+    assert model_name((3, -2), 2) == 'terrain_3_-2_g2'
 
 
 def test_tile_index_of_matches_the_rovers_convention():
@@ -140,15 +142,19 @@ class FakeFuture:
     def __init__(self):
         self._callbacks = []
         self._result = None
+        self._done = False
 
     def add_done_callback(self, callback):
         self._callbacks.append(callback)
+        if self._done:                # already resolved before this was added
+            callback(self)
 
     def result(self):
         return self._result
 
     def resolve(self, result):
         self._result = result
+        self._done = True
         for callback in self._callbacks:
             callback(self)
 
@@ -214,7 +220,7 @@ def test_the_replacement_is_spawned_before_the_old_tile_is_deleted(writer):
     writer._on_tile(tile_message((0, 0), 1.0))
     writer._pump(now=0.0)
     request, future = writer._spawn.calls[0]
-    assert request.name == 'terrain_0_0_a'
+    assert request.name == 'terrain_0_0_g0'
     writer._clock_fn.set(0.0)
     future.resolve(Response())
     assert writer._delete.calls == []                    # nothing to delete yet
@@ -222,11 +228,11 @@ def test_the_replacement_is_spawned_before_the_old_tile_is_deleted(writer):
     writer._on_tile(tile_message((0, 0), 2.0))
     writer._pump(now=2.0)
     request, future = writer._spawn.calls[1]
-    assert request.name == 'terrain_0_0_b'
+    assert request.name == 'terrain_0_0_g1'
     assert writer._delete.calls == []                    # old one still standing
     writer._clock_fn.set(2.0)
     future.resolve(Response())
-    assert [r.name for r, _ in writer._delete.calls] == ['terrain_0_0_a']
+    assert [r.name for r, _ in writer._delete.calls] == ['terrain_0_0_g0']
 
 
 def test_a_failed_spawn_leaves_the_old_tile_and_deletes_nothing(writer):
@@ -239,7 +245,7 @@ def test_a_failed_spawn_leaves_the_old_tile_and_deletes_nothing(writer):
     writer._clock_fn.set(2.0)
     writer._spawn.calls[1][1].resolve(Response(False, 'nope'))
     assert writer._delete.calls == []
-    assert writer._current[(0, 0)] == 'terrain_0_0_a'
+    assert writer._current[(0, 0)] == 'terrain_0_0_g0'
 
 
 def test_an_all_nan_tile_deletes_the_model(writer):
@@ -250,7 +256,7 @@ def test_an_all_nan_tile_deletes_the_model(writer):
     writer._on_tile(tile_message((0, 0), float('nan')))
     writer._clock_fn.set(2.0)
     writer._pump(now=2.0)
-    assert [r.name for r, _ in writer._delete.calls] == ['terrain_0_0_a']
+    assert [r.name for r, _ in writer._delete.calls] == ['terrain_0_0_g0']
     assert len(writer._spawn.calls) == 1
 
 
@@ -266,7 +272,7 @@ def test_the_rate_cap_is_measured_from_when_gazebo_confirms_not_when_dispatched(
 
     writer._pump(now=3.0)
     assert len(writer._spawn.calls) == 2
-    assert writer._spawn.calls[1][0].name == 'terrain_0_0_b'
+    assert writer._spawn.calls[1][0].name == 'terrain_0_0_g1'
 
 
 def test_a_dispatch_error_does_not_strand_the_tile_in_flight(writer):
@@ -282,3 +288,136 @@ def test_a_dispatch_error_does_not_strand_the_tile_in_flight(writer):
     due = writer._policy.next_due(now=1.0)
     assert len(due) == 1
     assert due[0][0] == (0, 0)
+
+
+class CollidingSpawnService(FakeService):
+    """Behaves like real Gazebo: refuses to spawn a name that is already
+    alive. Regression guard for the a/b naming bug, where a later
+    replacement could reuse an earlier generation's name while that
+    generation's delete was still stuck, and Gazebo refused the spawn with
+    "already exists".
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.alive = set()
+
+    def call_async(self, request):
+        future = FakeFuture()
+        self.calls.append((request, future))
+        if request.name in self.alive:
+            future.resolve(Response(False, f'Entity [{request.name}] already exists'))
+        else:
+            self.alive.add(request.name)
+        return future
+
+
+def test_repeated_replacements_never_collide_even_when_deletes_never_succeed(writer):
+    writer._spawn = CollidingSpawnService()
+    names = []
+    for i, value in enumerate((1.0, 2.0, 3.0, 4.0)):
+        writer._clock_fn.set(float(i))
+        writer._on_tile(tile_message((0, 0), value))
+        writer._pump(now=float(i))
+        request, future = writer._spawn.calls[i]
+        names.append(request.name)
+        if future.result() is None:                  # not auto-refused
+            future.resolve(Response())
+        assert future.result().success                # never refused as already existing
+        if writer._delete.calls:
+            writer._delete.calls[-1][1].resolve(Response(False, 'nope'))  # delete never succeeds
+
+    assert names == ['terrain_0_0_g0', 'terrain_0_0_g1', 'terrain_0_0_g2', 'terrain_0_0_g3']
+    assert len(set(names)) == 4
+
+
+def test_a_failed_delete_is_retried_after_the_interval_and_stays_tracked(writer):
+    writer._on_tile(tile_message((0, 0), 1.0))
+    writer._pump(now=0.0)
+    writer._clock_fn.set(0.0)
+    writer._spawn.calls[0][1].resolve(Response())
+
+    writer._on_tile(tile_message((0, 0), 2.0))
+    writer._pump(now=1.0)
+    writer._clock_fn.set(1.0)
+    writer._spawn.calls[1][1].resolve(Response())        # dooms terrain_0_0_g0
+    assert len(writer._delete.calls) == 1
+    writer._delete.calls[0][1].resolve(Response(False, 'busy'))
+    assert 'terrain_0_0_g0' in writer._doomed             # still tracked after failure
+
+    writer._pump(now=1.5)                                  # only 0.5 s since the attempt
+    assert len(writer._delete.calls) == 1                  # not retried yet
+
+    writer._pump(now=2.0)                                  # 1.0 s since the attempt
+    assert len(writer._delete.calls) == 2                  # retried
+    assert writer._delete.calls[1][0].name == 'terrain_0_0_g0'
+    assert 'terrain_0_0_g0' in writer._doomed
+
+
+def test_a_successful_delete_unlinks_the_mesh_and_untracks(writer):
+    writer._on_tile(tile_message((0, 0), 1.0))
+    writer._pump(now=0.0)
+    writer._clock_fn.set(0.0)
+    writer._spawn.calls[0][1].resolve(Response())
+    old_mesh = writer._mesh_file[(0, 0)]
+    old_mesh_path = os.path.join(writer._mesh_dir, old_mesh)
+    assert os.path.exists(old_mesh_path)
+
+    writer._on_tile(tile_message((0, 0), 2.0))
+    writer._pump(now=1.0)
+    writer._clock_fn.set(1.0)
+    writer._spawn.calls[1][1].resolve(Response())          # dooms terrain_0_0_g0
+    assert 'terrain_0_0_g0' in writer._doomed
+
+    writer._delete.calls[0][1].resolve(Response(True))
+
+    assert 'terrain_0_0_g0' not in writer._doomed
+    assert not os.path.exists(old_mesh_path)
+
+
+def test_remove_with_a_failing_delete_keeps_retrying(writer):
+    writer._on_tile(tile_message((0, 0), 1.0))
+    writer._pump(now=0.0)
+    writer._clock_fn.set(0.0)
+    writer._spawn.calls[0][1].resolve(Response())
+
+    writer._on_tile(tile_message((0, 0), float('nan')))
+    writer._clock_fn.set(1.0)
+    writer._pump(now=1.0)                                   # _remove dispatches the delete
+    assert len(writer._delete.calls) == 1
+    writer._delete.calls[0][1].resolve(Response(False, 'nope'))
+    assert 'terrain_0_0_g0' in writer._doomed
+
+    writer._pump(now=1.5)
+    assert len(writer._delete.calls) == 1                    # not due yet
+
+    writer._pump(now=2.0)
+    assert len(writer._delete.calls) == 2                    # retried
+    assert writer._delete.calls[1][0].name == 'terrain_0_0_g0'
+
+
+def test_giving_up_after_the_retry_cap_stops_tracking_and_retrying(writer):
+    writer._max_delete_attempts = 2
+    writer._on_tile(tile_message((0, 0), 1.0))
+    writer._pump(now=0.0)
+    writer._clock_fn.set(0.0)
+    writer._spawn.calls[0][1].resolve(Response())
+
+    writer._on_tile(tile_message((0, 0), 2.0))
+    writer._pump(now=1.0)
+    writer._clock_fn.set(1.0)
+    writer._spawn.calls[1][1].resolve(Response())            # dooms terrain_0_0_g0, attempt 1
+    assert 'terrain_0_0_g0' in writer._doomed
+
+    writer._delete.calls[0][1].resolve(Response(False, 'nope'))   # attempt 1 fails (1 < cap 2)
+    assert 'terrain_0_0_g0' in writer._doomed
+
+    writer._clock_fn.set(2.0)
+    writer._pump(now=2.0)                                     # attempt 2 dispatched
+    writer._delete.calls[1][1].resolve(Response(False, 'nope'))   # attempt 2 fails (2 >= cap 2)
+
+    assert 'terrain_0_0_g0' not in writer._doomed              # gave up
+
+    writer._clock_fn.set(10.0)
+    writer._pump(now=10.0)
+    assert len(writer._delete.calls) == 2                       # no further retries

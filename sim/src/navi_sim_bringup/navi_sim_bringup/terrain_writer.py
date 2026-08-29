@@ -17,11 +17,18 @@ Runs on the simulation's ROS domain. /localization/map_tile reaches that
 domain from the rover's domain 0 through sim_bridge (sub-project 2); this
 node knows nothing about domains and simply subscribes.
 
-Each replacement gets its own mesh file name. Gazebo's MeshManager caches
-meshes by file name, so respawning with the same name would put the
-*previous* terrain back on the screen while every log line says the new
-one was loaded. A new name every time sidesteps that entirely; the old
-file is deleted once the new one is up.
+Each replacement gets its own mesh file name and its own model name
+(terrain_<ix>_<iy>_g<generation>, generation only ever increasing per
+tile). Two reasons: Gazebo's MeshManager caches meshes by file name, so
+respawning with the same mesh name would put the *previous* terrain back
+on the screen while every log line says the new one was loaded; and a
+model name can only be reused once Gazebo confirms the old one is gone, so
+a name that is ever repeated (the old a/b alternation) will eventually
+collide with a model whose delete is still stuck, and Gazebo refuses the
+spawn outright ("Entity [...] already exists"). Generation-numbered names
+make that collision structurally impossible - see `_delete_model`/`_doomed` below for
+the other half of the fix: a delete failure used to be silently dropped,
+orphaning the model forever.
 """
 
 import os
@@ -56,7 +63,17 @@ def tile_index_of(pose_x: float, pose_y: float):
 
 
 def model_name(key, generation: int) -> str:
-    return f"terrain_{key[0]}_{key[1]}_{'ab'[generation % 2]}"
+    """Every generation of every tile gets its own name, forever.
+
+    Not a/b alternation: that reused a name every other replacement, and a
+    name can only safely be reused once Gazebo has confirmed the old model
+    holding it is gone. A delete that is still stuck (see `_doomed`)
+    then made the *next* spawn of that name fail with "already exists" -
+    observed in the field as thousands of such errors and stray models
+    left on screen. Monotonically increasing names make the collision
+    impossible regardless of how many deletes are stuck.
+    """
+    return f"terrain_{key[0]}_{key[1]}_g{generation}"
 
 
 def elevation_from_message(message: GridMap):
@@ -136,6 +153,12 @@ class TileRespawnPolicy:
 
 class TerrainWriter(Node):
 
+    # A delete that keeps failing is retried at most this many times before
+    # this node gives up on it (logged at ERROR) - a stuck Gazebo/rosbridge
+    # would otherwise retry forever, once a second, per stuck model.
+    MAX_DELETE_ATTEMPTS = 20
+    DELETE_RETRY_INTERVAL_S = 1.0
+
     def __init__(self, model_dir: str = None) -> None:
         super().__init__('terrain_writer')
         self.declare_parameter('tile_topic', '/localization/map_tile')
@@ -153,9 +176,20 @@ class TerrainWriter(Node):
         # execution time, not with whenever `_pump` happened to be called.
         self._clock_fn = time.monotonic
         self._policy = TileRespawnPolicy()
-        self._generation = {}     # key -> int, flips on every replacement
+        self._generation = {}     # key -> int, only ever increases
         self._current = {}        # key -> model name on screen
         self._mesh_file = {}      # key -> mesh file name on screen
+        self._max_delete_attempts = self.MAX_DELETE_ATTEMPTS
+        self._delete_retry_interval = self.DELETE_RETRY_INTERVAL_S
+        # model -> {'mesh_name', 'attempts', 'last_attempt', 'in_flight'}.
+        # A model is doomed the instant it is superseded and stays here -
+        # retried by `_pump` - until Gazebo confirms the delete or this
+        # node gives up after `_max_delete_attempts`. Without this a failed
+        # delete was silently forgotten: the model dropped out of
+        # `_current`/`_mesh_file` bookkeeping but never actually left
+        # Gazebo, orphaning it forever and, under the old a/b naming,
+        # eventually blocking a same-named spawn with "already exists".
+        self._doomed = {}
         self._version = 0
         self._warned_no_service = False
 
@@ -197,6 +231,14 @@ class TerrainWriter(Node):
                                        "with libgazebo_ros_factory.so? Retrying.")
             return
         self._warned_no_service = False
+
+        for model, entry in list(self._doomed.items()):
+            if entry['in_flight']:
+                continue
+            if now - entry['last_attempt'] < self._delete_retry_interval:
+                continue
+            self._attempt_delete(model)
+
         for key, payload in self._policy.next_due(now):
             self._policy.started(key)
             try:
@@ -264,8 +306,64 @@ class TerrainWriter(Node):
         self._policy.finished(key, payload, self._clock_fn(), ok=True)
 
     def _delete_model(self, model: str, mesh_name) -> None:
-        future = self._delete.call_async(DeleteEntity.Request(name=model))
-        future.add_done_callback(lambda _done: self._unlink(mesh_name))
+        """Marks `model` for deletion; `_pump` retries until it is gone.
+
+        Registering it here - rather than firing one DeleteEntity call and
+        forgetting it - is what makes a failed delete recoverable: the
+        model stays tracked in `_doomed` and `_pump` keeps re-attempting it
+        (at most once a second, up to `_max_delete_attempts`) until Gazebo
+        confirms it is gone, instead of silently leaving an orphan on
+        screen forever.
+        """
+        self._doomed[model] = {
+            'mesh_name': mesh_name,
+            'attempts': 0,
+            'last_attempt': self._clock_fn(),
+            'in_flight': False,
+        }
+        self._attempt_delete(model)
+
+    def _attempt_delete(self, model: str) -> None:
+        entry = self._doomed.get(model)
+        if entry is None:
+            return
+        entry['attempts'] += 1
+        entry['last_attempt'] = self._clock_fn()
+        entry['in_flight'] = True
+        try:
+            future = self._delete.call_async(DeleteEntity.Request(name=model))
+        except Exception as exc:                        # noqa: BLE001
+            entry['in_flight'] = False
+            self.get_logger().warn(f"deleting {model} failed to dispatch: {exc}")
+            self._maybe_give_up(model)
+            return
+        future.add_done_callback(lambda done: self._on_deleted(done, model))
+
+    def _on_deleted(self, future, model: str) -> None:
+        entry = self._doomed.get(model)
+        if entry is None:
+            return                                      # already given up
+        entry['in_flight'] = False
+        try:
+            response = future.result()
+            ok = bool(response.success)
+            error = response.status_message
+        except Exception as exc:                        # noqa: BLE001
+            ok, error = False, str(exc)
+        if ok:
+            self._unlink(entry['mesh_name'])
+            del self._doomed[model]
+            return
+        self.get_logger().warn(f"deleting {model} failed: {error}")
+        self._maybe_give_up(model)
+
+    def _maybe_give_up(self, model: str) -> None:
+        entry = self._doomed.get(model)
+        if entry is not None and entry['attempts'] >= self._max_delete_attempts:
+            self.get_logger().error(
+                f"giving up deleting {model} after {entry['attempts']} attempts; "
+                "it will stay in Gazebo until removed manually")
+            del self._doomed[model]
 
     def _unlink(self, mesh_name) -> None:
         if mesh_name:
