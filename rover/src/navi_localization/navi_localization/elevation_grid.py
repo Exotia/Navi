@@ -31,7 +31,7 @@ import numpy as np
 RESOLUTION = 0.05
 MAX_EXTENT_M = 60.0
 MAX_CELLS = int(round(MAX_EXTENT_M / RESOLUTION))   # 1200
-TILE_CELLS = 50            # cells per 2.5 m tile; tiles.py builds on this
+TILE_CELLS = 50            # cells per 2.5 m tile; tiles.py imports this
 
 # The percentile a cell's drawn height is taken at, and how it is turned
 # into a rank within a sorted cell (see update()'s docstring for why this
@@ -172,23 +172,30 @@ class ElevationGrid:
         self._height.flat[unique_flat] = z_sorted[percentile_rank]
         self._top.flat[unique_flat] = z_sorted[max_rank]
         self._count.flat[unique_flat] = counts
-        self._note_touched(ix[inside], iy[inside])
+        self._note_touched(unique_flat, cols)
 
-    def _note_touched(self, ix: np.ndarray, iy: np.ndarray) -> None:
+    def _note_touched(self, unique_flat: np.ndarray, cols: int) -> None:
         """Remembers the 2.5 m tiles whose published 51x51 samples include
-        any of these absolute cells: a cell belongs to tile `c // 50` and,
-        on a tile's first row/column (`c % 50 == 0`), to the previous
-        tile's halo too. Read and reset with `take_touched_tiles()`."""
-        tx, ty = np.unique(ix // TILE_CELLS), np.unique(iy // TILE_CELLS)
-        halo_x = np.unique(ix[ix % TILE_CELLS == 0] // TILE_CELLS - 1)
-        halo_y = np.unique(iy[iy % TILE_CELLS == 0] // TILE_CELLS - 1)
-        xs = np.union1d(tx, halo_x).tolist()
-        ys = np.union1d(ty, halo_y).tolist()
-        # The cross product over-approximates (a halo column touches only
-        # the tiles whose rows were hit) - harmless: a tile cut and found
-        # unchanged costs one comparison, a tile missed costs a stale
-        # picture.
-        self._touched_tiles.update((int(x), int(y)) for x in xs for y in ys)
+        any of these (flat, already unique) cells. A cell `c` is published
+        by tile `c // TILE_CELLS` and - as the halo sample on the far edge -
+        by tile `(c - 1) // TILE_CELLS`, so both are taken per axis. Works
+        from the cells, not the points: a cloud is ~200k points but ~25k
+        cells, and the sort is already paid. Read and reset with
+        `take_touched_tiles()`."""
+        cx = unique_flat % cols + self._origin_ix
+        cy = unique_flat // cols + self._origin_iy
+        tx = np.stack([cx // TILE_CELLS, (cx - 1) // TILE_CELLS])      # own, halo
+        ty = np.stack([cy // TILE_CELLS, (cy - 1) // TILE_CELLS])
+        # All four (x-choice, y-choice) combinations per cell - a tile
+        # corner cell is the halo sample of three neighbours.
+        all_tx = np.concatenate([tx[0], tx[1], tx[0], tx[1]])
+        all_ty = np.concatenate([ty[0], ty[0], ty[1], ty[1]])
+        # Packed into one int64 for a 1-D unique: np.unique(axis=0) sorts a
+        # structured view and is ~50x slower on 100k rows.
+        packed = np.unique((all_tx.astype(np.int64) << 32) + (all_ty.astype(np.int64) & 0xFFFFFFFF))
+        xs = (packed >> 32).astype(np.int32)
+        ys = (packed & 0xFFFFFFFF).astype(np.uint32).astype(np.int32)   # two's complement back
+        self._touched_tiles.update(zip(xs.tolist(), ys.tolist()))
 
     def take_touched_tiles(self) -> set:
         """The tiles touched by update()s since the last call, then none."""
@@ -253,6 +260,7 @@ class ElevationGrid:
         self._origin_ix, self._origin_iy = new_ox, new_oy
 
     def clear(self) -> None:
+        self._touched_tiles = set()
         self._origin_ix = self._origin_iy = None
         self._height = np.zeros((0, 0), dtype=np.float64)
         self._top = np.zeros((0, 0), dtype=np.float64)
@@ -274,6 +282,7 @@ class ElevationGrid:
         harmless since `count` masks those cells everywhere they are read),
         so a later update() replaces a touched cell exactly as it would
         have on the original."""
+        self._touched_tiles = set()
         if state.resolution != self.resolution:
             raise ValueError(
                 f"map was built at {state.resolution} m cells, this grid "

@@ -828,3 +828,20 @@ def test_a_rover_height_change_recuts_every_tile_for_the_clamp(node, monkeypatch
     node._on_pose(odometry)
     node._on_cloud(cloud([[10.1, 10.1, 0.0]]))
     assert calls[-1] is None                           # a full cut
+
+
+def test_an_incremental_cut_keeps_the_band_of_the_last_full_cut_so_tiles_agree(node):
+    # Full cut at z = 0 (band up to +0.5). The rover then creeps 4 cm - under
+    # CLAMP_RECUT_M - and a cloud touches another tile with a cell at 0.52:
+    # inside the band at z = 0.04, outside at z = 0. The incremental cut
+    # must use the z = 0 band, or the two tiles would disagree at the seam.
+    odometry = Odometry()
+    odometry.pose.pose.position.z = 0.0
+    node._on_pose(odometry)
+    node._on_cloud(cloud([[0.1, 0.1, 0.0]]))
+    odometry.pose.pose.position.z = 0.04
+    node._on_pose(odometry)
+    node._on_cloud(cloud([[10.1, 10.1, 0.52]]))
+    node._tick(now=0.0)
+    keys = _tile_keys(node._tile_publisher.messages)
+    assert (4, 4) not in keys                          # entirely above the band: not a tile

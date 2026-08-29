@@ -50,7 +50,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2, PointField
 from std_msgs.msg import Float32MultiArray, MultiArrayDimension, String
 
-from navi_localization.elevation_grid import RESOLUTION, ElevationGrid, finite_points
+from navi_localization.elevation_grid import RESOLUTION, TILE_CELLS, ElevationGrid, finite_points
 from navi_localization.map_store import DEFAULT_DIRECTORY, MapStore
 from navi_localization.tiles import (
     TILE_SAMPLES, PayloadScheduler, TileScheduler, tile_center, tiles_of_snapshot)
@@ -226,7 +226,6 @@ class ElevationMapper(Node):
         self._loaded = None
         self._last_command = None
         self._warned_about_cap = False
-        self._tile_count = 0
         self._clamp_above = float(self.get_parameter('clamp_above').value)
         self._clamp_below = float(self.get_parameter('clamp_below').value)
         # None until /localization/pose's first message: no rover height to
@@ -315,21 +314,43 @@ class ElevationMapper(Node):
         # the whole grid into tiles costs ~30 ms at the 60 m cap, and pose
         # arrives at 15 Hz while the cloud (the thing that actually changes
         # what there is to publish) arrives at ~1 Hz. The next _offer -
-        # from the next cloud, or from a load - uses whatever z is current
-        # by then, so the clamp is never more than one cloud tick stale.
+        # from the next cloud, or from a load - recuts every tile at the
+        # current z once it has moved more than CLAMP_RECUT_M from the
+        # height of the last full cut; until then all tiles keep that one
+        # band (see _offer).
         self._rover_z = float(message.pose.pose.position.z)
 
-    def _clamped_for_tiles(self, snapshot):
-        """`snapshot`, or a copy clamped to the rover's height for
+    def _clamp_band(self, rover_z):
+        """(low, high) of the publishable band around `rover_z`, or None
+        when nothing is clamped (no pose yet, or both limits disabled)."""
+        if rover_z is None:
+            return None
+        if self._clamp_above <= 0 and self._clamp_below <= 0:
+            return None
+        low = -np.inf if self._clamp_below <= 0 else rover_z - self._clamp_below
+        high = np.inf if self._clamp_above <= 0 else rover_z + self._clamp_above
+        return low, high
+
+    def _clamp_tile(self, tile: np.ndarray, rover_z) -> np.ndarray:
+        band = self._clamp_band(rover_z)
+        if band is None:
+            return tile
+        low, high = band
+        tile = tile.copy()
+        with np.errstate(invalid='ignore'):
+            tile[tile > high] = np.nan
+            tile = np.maximum(tile, low)
+        return tile
+
+    def _clamped_for_tiles(self, snapshot, rover_z):
+        """`snapshot`, or a copy clamped to the band around `rover_z` for
         publishing. The grid itself is never touched - a saved map must
         keep true heights - and `top` is never clamped either way, since
         it is not published yet."""
-        if self._rover_z is None:
+        band = self._clamp_band(rover_z)
+        if band is None:
             return snapshot
-        if self._clamp_above <= 0 and self._clamp_below <= 0:
-            return snapshot
-        low = -np.inf if self._clamp_below <= 0 else self._rover_z - self._clamp_below
-        high = np.inf if self._clamp_above <= 0 else self._rover_z + self._clamp_above
+        low, high = band
         # Above the band is not ground the rover can drive on (a wall, a
         # desk, a person, a boulder): those cells are published as unseen
         # rather than as a plateau at the limit. Indoors on the bench the
@@ -342,7 +363,7 @@ class ElevationMapper(Node):
             elevation = np.maximum(elevation, low)
         return dataclasses.replace(snapshot, elevation=elevation)
 
-    def _offer(self, now: float, full: bool = True) -> None:
+    def _offer(self, now: float, full: bool) -> None:
         """Offers the terrain and obstacle tiles to their schedulers.
 
         `full=False` (a cloud): only the tiles this update touched are cut
@@ -351,41 +372,37 @@ class ElevationMapper(Node):
         which changes the clamp band for every tile. Cutting a full 60 m
         map is ~576 tiles and ~32 ms on the Jetson, on every cloud, in the
         same executor as pose and command callbacks; the touched set is
-        usually a handful. `full=True` (load, clear, first offer): every
-        tile, so the scheduler's view is complete."""
+        usually a handful. The incremental cut clamps at the height the
+        last full cut used, so every published tile shares one band and a
+        tile seam never shows a step. `full=True` (a load): every tile, so
+        the scheduler's view is complete."""
         snapshot = self._grid.snapshot()
         touched = self._grid.take_touched_tiles()
         if snapshot is None:
-            self._tile_count = 0
             self._forget_vanished(self._scheduler, 'terrain', {})
         else:
-            band_moved = (self._rover_z is not None
-                          and (self._clamp_rover_z is None
-                               or abs(self._rover_z - self._clamp_rover_z) > CLAMP_RECUT_M))
+            clamping = self._rover_z is not None and (self._clamp_above > 0 or self._clamp_below > 0)
+            band_moved = clamping and (
+                self._clamp_rover_z is None
+                or abs(self._rover_z - self._clamp_rover_z) > CLAMP_RECUT_M)
             if full or band_moved:
                 self._clamp_rover_z = self._rover_z
-                keys = tiles_of_snapshot(self._clamped_for_tiles(snapshot))
-                self._tile_count = len(keys)
-                candidates = self._scheduler.known_keys() | set(keys)
+                keys = tiles_of_snapshot(self._clamped_for_tiles(snapshot, self._clamp_rover_z))
+                candidates = None                       # everything the scheduler knows
             else:
-                keys = tiles_of_snapshot(self._clamped_for_tiles(snapshot), only=touched)
+                keys = {key: self._clamp_tile(tile, self._clamp_rover_z)
+                        for key, tile in tiles_of_snapshot(snapshot, only=touched).items()}
+                # A tile whose own cells are all outside the band is not a
+                # tile (tiles_of_snapshot's rule, applied after the clamp).
+                keys = {key: tile for key, tile in keys.items()
+                        if np.isfinite(tile[:TILE_CELLS, :TILE_CELLS]).any()}
                 candidates = touched
             for key in keys:
                 # Live again before its blank went out: sending the blank
                 # now would erase terrain the map does believe in.
                 self._pending_nan_keys.discard(('terrain', key))
             self._scheduler.offer(keys, now)
-            # A candidate tile that this offer no longer contains has
-            # vanished from the map as published: every cell of it fell
-            # out of the rover's band once the first pose arrived (a desk
-            # top that was "ground" before the clamp could apply), or a
-            # load replaced the grid. Left in the scheduler it would keep
-            # going out as a keepalive forever, so it is forgotten - and
-            # blanked once if the sim ever saw it.
-            for key in candidates - set(keys):
-                if self._scheduler.forget(key):
-                    self._queue_nan('terrain', [key])
-            self._tile_count = len(self._scheduler.known_keys())
+            self._forget_vanished(self._scheduler, 'terrain', keys, candidates)
 
         obstacle_tiles = self._obstacles.tiles()
         for key in obstacle_tiles:
@@ -393,8 +410,17 @@ class ElevationMapper(Node):
         self._obstacle_scheduler.offer(obstacle_tiles, now)
         self._forget_vanished(self._obstacle_scheduler, 'obstacle', obstacle_tiles)
 
-    def _forget_vanished(self, scheduler, kind: str, current) -> None:
-        for key in scheduler.known_keys() - set(current):
+    def _forget_vanished(self, scheduler, kind: str, current, candidates=None) -> None:
+        """A candidate tile (default: every tile the scheduler knows) that
+        `current` no longer contains has vanished from the map as
+        published: every cell of it fell out of the rover's band once the
+        first pose arrived (a desk top that was "ground" before the clamp
+        could apply), or a load replaced the grid. Left in the scheduler
+        it would keep going out as a keepalive forever, so it is forgotten
+        - and blanked once if the sim ever saw it."""
+        if candidates is None:
+            candidates = scheduler.known_keys()
+        for key in set(candidates) - set(current):
             if scheduler.forget(key):
                 self._queue_nan(kind, [key])
 
@@ -516,7 +542,7 @@ class ElevationMapper(Node):
         # all.
         old_keys = self._scheduler.forget_all()
         old_obstacle_keys = self._obstacle_scheduler.forget_all()
-        self._offer(self._now())
+        self._offer(self._now(), full=True)
         # What _offer actually scheduled - the *clamped* tile set, not the
         # raw grid's: a loaded tile that is empty once clamped to the
         # rover's band is not published, so it must count as gone below.
@@ -541,7 +567,7 @@ class ElevationMapper(Node):
         self._grid.clear()
         self._obstacles.clear()
         self._loaded = None
-        self._tile_count = 0
+        self._clamp_rover_z = None
         self._queue_nan('terrain', self._scheduler.forget_all())
         self._queue_nan('obstacle', self._obstacle_scheduler.forget_all())
         self.get_logger().info("map cleared")
@@ -559,7 +585,7 @@ class ElevationMapper(Node):
             extent = [round(cols * RESOLUTION, 2), round(rows * RESOLUTION, 2)]
         self._status_publisher.publish(String(data=json.dumps({
             'resolution': RESOLUTION, 'cells_seen': cells, 'extent_m': extent,
-            'tiles': self._tile_count, 'voxels': self._obstacles.voxel_count,
+            'tiles': len(self._scheduler.known_keys()), 'voxels': self._obstacles.voxel_count,
             'loaded': self._loaded, 'maps': self._store.list_names(),
             'last_command': self._last_command})))
 

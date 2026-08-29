@@ -17,9 +17,8 @@ from collections import deque
 
 import numpy as np
 
-from navi_localization.elevation_grid import RESOLUTION
+from navi_localization.elevation_grid import RESOLUTION, TILE_CELLS
 
-TILE_CELLS = 50
 TILE_SAMPLES = TILE_CELLS + 1
 TILE_M = TILE_CELLS * RESOLUTION                       # 2.5
 DIRTY_THRESHOLD_M = 0.01
