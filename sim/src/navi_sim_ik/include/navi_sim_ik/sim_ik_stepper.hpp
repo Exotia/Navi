@@ -61,6 +61,13 @@ public:
 
   const WheelTargets & targets() const {return targets_;}
   const Pose2D & pose() const {return pose_;}
+  /// Replaces the integrated pose with one from outside (localisation).
+  ///
+  /// Not a blend and not a correction: what this replaces is dead
+  /// reckoning, which is the thing localisation exists to stop trusting.
+  /// The wheel and steering state is untouched, so the wheels keep turning
+  /// from /manual_twist while the body goes where the rover really is.
+  void set_pose(const Pose2D & pose) {pose_ = pose;}
   bool indirect_mode() const {return indirect_mode_;}
   std::array<double, 2> feasible_icr() const {return feasible_icr_;}
   const Velocity2D & achieved_velocity() const {return achieved_velocity_;}

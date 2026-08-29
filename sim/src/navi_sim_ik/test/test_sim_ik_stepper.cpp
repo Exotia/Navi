@@ -169,3 +169,39 @@ TEST(SimIkStepper, AchievedVelocityIsBodyFrameNotWorldFrame)
   EXPECT_NEAR(stepper.achieved_velocity().vx, 0.5, 0.05);
   EXPECT_GT(stepper.pose().y - y_before, 1.0);
 }
+
+TEST(SimIkStepper, SetPoseReplacesTheIntegratedPoseOutright)
+{
+  // In semi-autonomous mode the body pose comes from the rover's
+  // localisation and the integration is not a second opinion to be blended
+  // with it - it is dead reckoning, which is what localisation exists to
+  // replace.
+  SimIkStepper stepper;
+  for (int i = 0; i < 50; ++i) {
+    stepper.step(0.5, 0.0, 0.0);
+  }
+  ASSERT_GT(stepper.pose().x, 0.5);
+
+  stepper.set_pose(navi_sim_ik::Pose2D{3.0, -1.0, 0.5});
+
+  EXPECT_DOUBLE_EQ(stepper.pose().x, 3.0);
+  EXPECT_DOUBLE_EQ(stepper.pose().y, -1.0);
+  EXPECT_DOUBLE_EQ(stepper.pose().yaw, 0.5);
+}
+
+TEST(SimIkStepper, SteppingAfterSetPoseCarriesOnFromTheNewPose)
+{
+  // The wheels keep turning from /manual_twist while the body pose comes
+  // from outside, so the next step must integrate from where localisation
+  // put the rover, not from where dead reckoning had it.
+  SimIkStepper stepper;
+  for (int i = 0; i < 50; ++i) {
+    stepper.step(0.5, 0.0, 0.0);
+  }
+  stepper.set_pose(navi_sim_ik::Pose2D{10.0, 0.0, 0.0});
+
+  stepper.step(0.5, 0.0, 0.0);
+
+  EXPECT_GT(stepper.pose().x, 10.0);
+  EXPECT_LT(stepper.pose().x, 10.1);   // one 0.06 s tick at ~0.5 m/s
+}
