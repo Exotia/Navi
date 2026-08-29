@@ -17,7 +17,7 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
-def _robot_description(xacro_path):
+def _robot_description(xacro_path, planar_move: bool):
     """Expands the xacro into a URDF string, or raises.
 
     This used to be os.popen(f"xacro {robot}").read(), which throws the
@@ -31,7 +31,11 @@ def _robot_description(xacro_path):
     a three-line message; the robot description, which is the whole point
     of the launch, got none.
     """
-    command = ["xacro", xacro_path]
+    # planar_move:= is passed explicitly in both modes rather than relying on
+    # the xacro default, so the expansion this function produces is a
+    # function of its arguments alone and reading the caller is enough to
+    # know which plugins are in the model.
+    command = ["xacro", xacro_path, f"planar_move:={'true' if planar_move else 'false'}"]
     printable = " ".join(command)
     try:
         description = subprocess.check_output(
@@ -62,6 +66,24 @@ def _world_with_mesh(context, *args, **kwargs):
     share = get_package_share_directory("navi_sim_bringup")
     mesh = LaunchConfiguration("map_mesh").perform(context)
     twist_topic = LaunchConfiguration("twist_topic").perform(context)
+    mode = LaunchConfiguration("mode").perform(context)
+    sim_domain = int(LaunchConfiguration("sim_domain").perform(context))
+    rover_domain = int(LaunchConfiguration("rover_domain").perform(context))
+
+    if mode not in ("simulation", "semi"):
+        raise RuntimeError(
+            f"mode must be 'simulation' or 'semi', not {mode!r}.\n"
+            "  simulation - the IK-driven, dead-reckoned rover on whatever "
+            "domain this process is on. What has always run here.\n"
+            "  semi       - the body pose comes from the rover's own "
+            "/localization/pose, bridged in from domain "
+            f"{rover_domain}. Run it on its own ROS_DOMAIN_ID.")
+
+    # The one place the two modes differ, named once. Everything below reads
+    # this rather than re-testing the string, so a third mode cannot be
+    # half-added.
+    external_pose = mode == "semi"
+
     if not os.path.exists(mesh):
         raise RuntimeError(
             f"map mesh not found: {mesh}\n"
@@ -77,9 +99,11 @@ def _world_with_mesh(context, *args, **kwargs):
         handle.write(world)
 
     robot = os.path.join(share, "urdf", "asterope_sim.urdf.xacro")
-    description = _robot_description(robot)
+    # planar_move and sim_ik_node's set_entity_state would both be writing
+    # the model's pose every tick. Two writers of one pose fight.
+    description = _robot_description(robot, planar_move=not external_pose)
 
-    return [
+    actions = [
         ExecuteProcess(
             # publish_rate is libgazebo_ros_init's /clock rate, and it
             # defaults to 10 Hz. That default is not survivable here:
@@ -116,19 +140,54 @@ def _world_with_mesh(context, *args, **kwargs):
              arguments=["-topic", "robot_description", "-entity", "asterope",
                         "-z", "0.05"],
              output="screen"),
-        # use_sim_time matters here beyond timestamp cosmetics:
-        # gazebo_ros_joint_pose_trajectory compares each trajectory's
-        # header.stamp against the simulation clock to decide when to
-        # apply it. Without this, sim_ik_node's now() is the wall clock,
-        # so every stamp lands far in the sim's future and the plugin
-        # never applies a single position - confirmed by watching
-        # `gz model -m asterope -i` sit at a fixed joint angle no matter
-        # what /test_manual_twist commanded.
-        Node(package="navi_sim_ik", executable="sim_ik_node", output="screen",
-             parameters=[{"use_sim_time": True}],
-             remappings=[("/manual_twist", twist_topic)]),
-        Node(package="navi_sim_video", executable="sim_video_sender", output="screen"),
     ]
+
+    # use_sim_time matters here beyond timestamp cosmetics:
+    # gazebo_ros_joint_pose_trajectory compares each trajectory's
+    # header.stamp against the simulation clock to decide when to
+    # apply it. Without this, sim_ik_node's now() is the wall clock,
+    # so every stamp lands far in the sim's future and the plugin
+    # never applies a single position - confirmed by watching
+    # `gz model -m asterope -i` sit at a fixed joint angle no matter
+    # what /test_manual_twist commanded.
+    ik_parameters = {"use_sim_time": True}
+    if external_pose:
+        ik_parameters.update({
+            "pose_topic": "/localization/pose",
+            "status_topic": "/localization/status",
+            # The name spawn_entity.py above gives the model. Set together
+            # with it or set_entity_state addresses a model that is not there.
+            "model_name": "asterope",
+            "pose_z_offset": 0.05,
+        })
+    actions.append(
+        Node(package="navi_sim_ik", executable="sim_ik_node", output="screen",
+             parameters=[ik_parameters],
+             remappings=[("/manual_twist", twist_topic)]))
+    actions.append(
+        Node(package="navi_sim_video", executable="sim_video_sender", output="screen"))
+
+    if external_pose:
+        # The twist entry follows twist_topic: with --twist-topic pointed at
+        # a scratch topic, the bridge has to carry that one or the wheels in
+        # the picture never move.
+        bridged = [f"{twist_topic}:geometry_msgs/msg/Twist",
+                   "/localization/pose:nav_msgs/msg/Odometry",
+                   "/localization/status:std_msgs/msg/String",
+                   "/localization/map:grid_map_msgs/msg/GridMap"]
+        arguments = ["--rover-domain", str(rover_domain),
+                     "--sim-domain", str(sim_domain)]
+        for spec in bridged:
+            arguments += ["--topic", spec]
+        # Arguments rather than parameters: the bridge builds its two
+        # contexts before it could own a node to read parameters from, and
+        # a node that has to exist before it can be configured is the wrong
+        # shape for this.
+        actions.append(
+            Node(package="navi_sim_bringup", executable="sim_bridge.py",
+                 name="sim_bridge", arguments=arguments, output="screen"))
+
+    return actions
 
 
 def generate_launch_description():
@@ -145,5 +204,29 @@ def generate_launch_description():
                 "/manual_twist, read off its ROS graph over DDS. Point it at a "
                 "scratch topic to exercise the simulation without publishing "
                 "onto the topic that drives the physical rover.")),
+        DeclareLaunchArgument(
+            "mode",
+            default_value="simulation",
+            description=(
+                "'simulation' (default): the IK-driven, dead-reckoned rover, "
+                "moved by planar_move - what has always run here. 'semi': the "
+                "body pose comes from the rover's own /localization/pose, "
+                "bridged in from the rover's domain, planar_move is not "
+                "loaded, and the model is placed through "
+                "/gazebo/set_entity_state.")),
+        DeclareLaunchArgument(
+            "sim_domain",
+            default_value="42",
+            description=(
+                "The ROS domain this simulation is expected to be running on, "
+                "for sim_bridge's sim-side context. Set ROS_DOMAIN_ID to the "
+                "same value for the launch itself - start_sim.sh does both.")),
+        DeclareLaunchArgument(
+            "rover_domain",
+            default_value="0",
+            description=(
+                "The ROS domain the rover's graph is on, for sim_bridge's "
+                "rover-side context. 0 in the field; a throwaway domain when "
+                "testing against mock/fake_localization.py.")),
         OpaqueFunction(function=_world_with_mesh),
     ])
