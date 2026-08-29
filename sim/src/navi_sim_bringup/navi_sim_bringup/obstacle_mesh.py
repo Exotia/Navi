@@ -200,8 +200,8 @@ def obstacle_sdf(mesh_uri: str, model_name: str = MODEL_NAME) -> str:
           </mesh>
         </geometry>
         <material>
-          <ambient>0.55 0.55 0.58 1</ambient>
-          <diffuse>0.62 0.62 0.65 1</diffuse>
+          <ambient>0.82 0.80 0.70 1</ambient>
+          <diffuse>0.92 0.90 0.78 1</diffuse>
           <specular>0.05 0.05 0.05 1</specular>
         </material>
       </visual>

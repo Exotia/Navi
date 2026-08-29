@@ -41,9 +41,13 @@ def test_a_point_5cm_above_ground_is_not_a_voxel_15cm_is():
     assert above[(0, 0)].tolist() == [[voxel, voxel, voxel_z]]
 
 
-def test_a_single_point_in_a_voxel_is_dropped_two_are_kept():
+def test_a_single_point_makes_a_voxel_the_fused_cloud_is_already_filtered():
+    # MIN_POINTS_PER_VOXEL is 1: the SDK's fused cloud carries about one
+    # point per 5 cm voxel on a surface, so requiring two dropped most of
+    # the desk and walls on the bench.
     one = np.array([[1.0, 1.0, 0.20]], dtype=np.float64)
-    assert occupied_voxels(one, flat_ground(0.0), rover_z=None) == {}
+    result = occupied_voxels(one, flat_ground(0.0), rover_z=None)
+    assert list(result) == [(0, 0)] and result[(0, 0)].shape == (1, 3)
 
     two = two_points_at(1.0, 1.0, 0.20)
     result = occupied_voxels(two, flat_ground(0.0), rover_z=None)

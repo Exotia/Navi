@@ -14,7 +14,7 @@ objects on the bench.
 ## What
 
 A sparse 3-D voxel map of everything that is not ground, published per
-2.5 m tile next to the terrain tiles, and drawn in Gazebo as grey blocky
+2.5 m tile next to the terrain tiles, and drawn in Gazebo as light-sand blocky
 geometry (5 cm cubes with hidden faces removed) on top of the orange
 terrain.
 
@@ -32,8 +32,10 @@ From the same fused-cloud update the grid bins:
   `OBSTACLE_MAX_ABOVE_ROVER = 2.5` m above the rover's footprint (no pose
   yet → no upper limit). A cell with no ground height uses the rover's
   footprint z − 1.0 m as its reference.
-- A voxel is **occupied** when ≥ `MIN_POINTS_PER_VOXEL = 2` candidate
-  points fall in it (a flying pixel has one).
+- A voxel is **occupied** when ≥ `MIN_POINTS_PER_VOXEL = 1` candidate
+  point falls in it. (Started at 2 to drop flying pixels; on the bench the
+  SDK's fused cloud has ~1 point per 5 cm voxel, so 2 threw away most real
+  surfaces. The fused cloud is already the SDK's filtered map.)
 - Per tile `(ix // 50, iy // 50)` the update yields the occupied voxels
   as an `(N, 3) int32` array of absolute voxel indices, sorted (so equal
   content gives equal bytes). Tiles touched by this update **replace**
@@ -78,7 +80,7 @@ deque). `map_status` gains `"voxels": <count>`.
   removal** (a face is emitted only if the neighbouring voxel in that
   direction is absent), outward-facing winding, per-face normals, sorted
   input → deterministic `obj_bytes`; `obstacle_sdf(uri, model_name)` grey
-  (`0.55 0.55 0.58`) static visual-only model.
+  (`0.82 0.80 0.70`) static visual-only model.
 - `terrain_writer`: a second model **kind** per tile. Keys become
   `(kind, ix, iy)` with `kind ∈ {"terrain", "obst"}`; model names
   `terrain_<ix>_<iy>_<run>_g<N>` / `obst_<ix>_<iy>_<run>_g<N>`; mesh

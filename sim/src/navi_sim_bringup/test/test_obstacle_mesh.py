@@ -118,8 +118,8 @@ def test_sdf_is_grey_static_and_visual_only():
     sdf = obstacle_sdf('model://obst_0_0_run1_g3/mesh.obj', 'obst_0_0_run1_g3')
 
     assert '<static>true</static>' in sdf
-    assert '0.55 0.55 0.58' in sdf
-    assert '0.62 0.62 0.65' in sdf
+    assert '0.82 0.80 0.70' in sdf
+    assert '0.92 0.90 0.78' in sdf
     assert '<collision' not in sdf
     assert '<heightmap' not in sdf
     assert 'model://obst_0_0_run1_g3/mesh.obj' in sdf

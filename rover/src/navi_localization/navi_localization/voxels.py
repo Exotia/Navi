@@ -33,7 +33,7 @@ from navi_localization.tiles import TILE_CELLS
 from navi_localization.elevation_grid import RESOLUTION as VOXEL  # one cell size, by construction
 OBSTACLE_MIN_ABOVE_GROUND = 0.10
 OBSTACLE_MAX_ABOVE_ROVER = 2.5
-MIN_POINTS_PER_VOXEL = 2
+MIN_POINTS_PER_VOXEL = 1   # the fused cloud is already the SDK's filtered map (~1 point per 5 cm voxel); 2 dropped most real surfaces on the bench
 
 
 def _floor_index(values: np.ndarray) -> np.ndarray:

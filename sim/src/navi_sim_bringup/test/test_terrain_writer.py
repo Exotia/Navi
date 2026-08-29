@@ -985,7 +985,7 @@ def test_an_obstacle_tile_spawns_a_grey_obst_model_with_its_mesh_file(writer):
     assert len(writer._spawn.calls) == 1
     request, future = writer._spawn.calls[0]
     assert request.name == tile_name(writer, 0, kind='obst')
-    assert '0.55 0.55 0.58' in request.xml          # obstacle_sdf's grey material
+    assert '0.82 0.80 0.70' in request.xml          # obstacle_sdf's grey material
 
     writer._clock_fn.set(0.0)
     future.resolve(Response())
