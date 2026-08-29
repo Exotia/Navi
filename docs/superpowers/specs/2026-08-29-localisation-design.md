@@ -115,12 +115,19 @@ A `navi_localization/config/zed_front.yaml` overlaying the wrapper's
   wrong mount offset is one number in one place.
 - Object detection, body tracking, streaming and SVO recording off. Mapping
   off here; sub-project 3 turns it on.
-- Image transport: only `raw` published, ffmpeg/compressed/theora plugins
-  disabled through the `.image_transport` parameter namespace. Image
-  publishing at `pub_downscale_factor: 2.0` (640 x 360) and `pub_frame_rate`
-  15; the video sender is the only consumer.
-- Target: odometry within **20 s** of launch. Measured before and after; the
-  number goes in the launch file's docstring.
+- Image transport: only `raw` published — each image topic's
+  `zed_node.<topic>.enable_pub_plugins` parameter (the name read off the live
+  node) pinned to `['image_transport/raw']`. Images at
+  `pub_downscale_factor: 2.0` (640 x 360). `pub_frame_rate` stays **30**:
+  the wrapper gates pose and odometry on it too, and at 15 the pose ran at
+  14 Hz.
+- Target: odometry within **20 s** of launch on a quiet ROS domain. Found
+  during implementation: the 90 s was not the ffmpeg encoders but DDS
+  discovery stalling against foreign participants on the shared domain 0
+  (stale simulation launches on the laptop). On a quiet domain the wrapper
+  reaches odometry in about 5 s. Sub-project 2's move of the simulation to
+  its own domain is therefore load-bearing for the rover's startup, not
+  only for TF hygiene.
 
 ### `localization_status` node (Python, `navi_localization`)
 
