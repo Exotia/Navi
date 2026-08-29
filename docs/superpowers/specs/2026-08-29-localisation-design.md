@@ -119,23 +119,32 @@ A `navi_localization/config/zed_front.yaml` overlaying the wrapper's
 
 ### `localization_status` node (Python, `navi_localization`)
 
-Subscribes `/zed/zed_node/odom` and `/zed/zed_node/pose/status`. Publishes:
+Subscribes `/zed/zed_node/pose` (the SDK pose in the `map` frame, loop
+closures applied), `/zed/zed_node/pose_with_covariance` and
+`/zed/zed_node/pose/status`. Publishes:
 
 - `/localization/pose` — `nav_msgs/Odometry`, `frame_id: map`,
   `child_frame_id: base_footprint`, at the wrapper's rate. The wrapper's
-  `map -> odom` and `odom -> zed_camera_link` are composed with the static
-  `zed_camera_link -> base_footprint` from the URDF. Covariance copied from
-  the wrapper's pose-with-covariance.
-- `/localization/status` — `navi_localization_msgs/LocalizationStatus`:
-  `state` (`OK`, `SEARCHING`, `OFF`), `seconds_since_ok`, `source`
-  (`"zed_vio"`), `distance_travelled`. Published at 2 Hz and on every state
-  change. While `SEARCHING`, `/localization/pose` keeps publishing the **last
-  good** pose with its stamp frozen, so consumers can see it is stale. Nothing
-  is extrapolated.
+  tracking base frame is hard-coded to `zed_camera_link` (wrapper 4.2), so the
+  pose is re-expressed in pure Python: `T_map_footprint = T_map_camera *
+  inverse(T_footprint_camera)`, with `T_footprint_camera` the fixed mount
+  offset `(0.322, 0, 0.563)` from the URDF. No `tf2`, no
+  `robot_state_publisher` on the Orin — the wrapper already owns
+  `zed_camera_link` in TF and a second parent for it would break the tree.
+  Covariance copied from the wrapper's pose-with-covariance.
+- `/localization/status` — `std_msgs/String` carrying JSON, the same
+  convention as `/video_status`, so the ground station reads it over
+  rosbridge without a custom type: `{"state": "OK" | "SEARCHING" | "OFF",
+  "seconds_since_ok": float, "source": "zed_vio", "distance_travelled":
+  float, "mount_offset_verified": false}`. Published at 2 Hz and on every
+  state change. While `SEARCHING`, `/localization/pose` keeps publishing the
+  **last good** pose with its stamp frozen, so consumers can see it is
+  stale. Nothing is extrapolated. `OFF` after 2 s without any wrapper pose.
 
-A custom message rather than `diagnostic_msgs` because the ground station
-reads it over rosbridge as JSON and a flat, typed message is the thing it can
-render without parsing key/value strings.
+JSON in a `String` rather than a custom `.msg` for the reason
+`video_request.py` records: a custom message would force an `ament_cmake`
+package for the sake of one message, and rosbridge would have to discover
+it.
 
 ### `zed_video_sender` (Python, `navi_teleop`)
 
@@ -158,21 +167,20 @@ is still available: `video_sender` gains a `source` parameter, `zed_topic`
 `asterope_iiI.urdf` gains a `zed_camera_link` on a fixed joint from
 `base_link` at `xyz="0.322 0 0.154" rpy="0 0 0"` — the front camera box's
 centre — and a `zed_rear_camera_link` at the rear box, unused. `tests/test_urdf.py`
-asserts both. The wrapper's own `zed_descr.urdf.xacro` is **not** loaded on
-the rover; the composed tree is `map -> odom -> zed_camera_link` from the
-wrapper and the static `base_link -> zed_camera_link` from `robot_state_publisher`
-on the Orin, which therefore now runs there with the URDF.
+asserts both. These links serve the laptop (simulation, tests); on the Orin
+the URDF is not loaded, for the TF reason above. The mount offset constant in
+`navi_localization` and the URDF joint must agree; a test parses the URDF and
+checks that.
 
 Because the ZED body box was authored from photos, not from a measurement,
-the offset is flagged in the URDF comment as **unverified** and
-`localization_status` logs it at startup. Verifying it is a rover-day item.
+the offset is flagged in the URDF comment as **unverified**,
+`localization_status` logs it at startup and reports it in the status JSON.
+Verifying it is a rover-day item.
 
 ### `start_navi.sh`
 
-- `--no-localization` skips the wrapper, `robot_state_publisher` and
-  `localization_status`; `video_sender` is then launched with `source:=v4l2`.
-- Stale-process cleanup gains `component_container_isolated` and
-  `robot_state_publisher`.
+- `--no-localization` skips the wrapper and `localization_status`; `video_sender` is then launched with `source:=v4l2`.
+- Stale-process cleanup gains `component_container_isolated`.
 - Readiness waits for `/localization/status` to be **received** on a
   subscription, with a 60 s timeout that fails the launcher loudly.
 
