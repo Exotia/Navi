@@ -103,6 +103,35 @@ def test_status_is_published_on_every_state_change(node):
     assert states[-1] == "SEARCHING"
 
 
+def test_the_last_good_pose_is_still_republished_while_off(node):
+    # OFF means no wrapper pose is arriving, so _on_pose stops running and
+    # /localization/pose would go silent - a ground station that connects
+    # while the wrapper is down would then see no position at all, though
+    # the last known one is right there. tracker.py promises it stays on
+    # offer, stamp frozen; the timer is the only thing left to say it.
+    node._on_status(status(True))
+    node._on_pose(camera_pose(2.345, 0.0, 0.548, 0.0, 100.0))
+    published = len(node._pose_publisher.messages)
+    node._tracker._last_message_at = node._now() - 60.0
+
+    node._tick()
+
+    assert json.loads(node._status_publisher.messages[-1].data)["state"] == "OFF"
+    assert len(node._pose_publisher.messages) == published + 1
+    last = node._pose_publisher.messages[-1]
+    assert last.pose.pose.position.x == pytest.approx(2.0, abs=1e-9)
+    assert last.header.stamp.sec == 100
+
+
+def test_nothing_is_published_while_off_before_any_pose_arrived(node):
+    # A node that has never seen a pose has none to offer, and must not
+    # publish an empty one that reads as "the rover is at the origin".
+    node._tick()
+
+    assert node._pose_publisher.messages == []
+    assert json.loads(node._status_publisher.messages[-1].data)["state"] == "OFF"
+
+
 def test_the_magnetometer_is_never_subscribed(node):
     topics = [s.topic_name for s in node.subscriptions]
     assert not any("mag" in t for t in topics)

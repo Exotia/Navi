@@ -86,6 +86,15 @@ class LocalizationStatus(Node):
 
     def _tick(self) -> None:
         self._tracker.on_tick(self._now())
+        if self._tracker.state == LocalizationTracker.OFF:
+            # While OFF no wrapper pose is arriving, so _on_pose - the only
+            # other publisher - never runs, and /localization/pose goes
+            # silent. tracker.py's rule is that the last good pose stays on
+            # offer with its stamp frozen, and a consumer that joins while
+            # the wrapper is down can only see it if something repeats it.
+            # Nothing is invented: this is the same pose with the same old
+            # stamp, and the status alongside says OFF.
+            self._publish_pose()
         self._publish_status(force=True)
 
     def _publish_pose(self) -> None:
