@@ -115,10 +115,17 @@ class ElevationMapper(Node):
         # 600 * 600 * 4 = 1.44 MB, which a wired link carries without
         # noticing; a run's real map is far smaller.
         self.declare_parameter('publish_interval_seconds', 2.0)
+        # A map that only ever goes out when it changes is invisible to anyone
+        # who joins after the last change - terrain_writer starting a minute
+        # into a run, or a restarted bridge. The keepalive resends the current
+        # map at this interval even when nothing changed; on a wired link a
+        # 1.4 MB message every 10 s is nothing.
+        self.declare_parameter('keepalive_seconds', 10.0)
 
         self._frame_id = str(self.get_parameter('frame_id').value)
         self._grid = ElevationGrid()
         self._last_published = None
+        self._last_publish_time = None
         self._warned_about_cap = False
 
         # Default QoS on both sides: reliable, volatile, depth 1. Not
@@ -154,7 +161,13 @@ class ElevationMapper(Node):
 
     def _publish_if_changed(self) -> None:
         snapshot = self._grid.snapshot()
-        if snapshot is None or snapshot.equals(self._last_published):
+        if snapshot is None:
+            return
+        now = self.get_clock().now().nanoseconds / 1e9
+        keepalive = float(self.get_parameter('keepalive_seconds').value)
+        stale = (self._last_publish_time is None or
+                 now - self._last_publish_time >= keepalive)
+        if snapshot.equals(self._last_published) and not stale:
             return
         if self._last_published is None or \
                 snapshot.elevation.shape != self._last_published.elevation.shape:
@@ -165,6 +178,7 @@ class ElevationMapper(Node):
         self._publisher.publish(build_grid_map_message(
             snapshot, self._frame_id, self.get_clock().now().to_msg()))
         self._last_published = snapshot
+        self._last_publish_time = now
 
 
 def main(args=None) -> None:

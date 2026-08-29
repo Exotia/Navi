@@ -218,3 +218,16 @@ def test_a_malformed_cloud_is_logged_and_does_not_publish(node):
 def test_the_node_subscribes_only_the_fused_cloud_topic(node):
     topics = [s.topic_name for s in node.subscriptions]
     assert topics == [FUSED_CLOUD_TOPIC]
+
+
+def test_an_unchanged_map_is_resent_once_the_keepalive_has_elapsed(node):
+    # A late joiner - terrain_writer starting after the map stopped growing,
+    # or a restarted bridge - would otherwise never see the map at all.
+    node._on_cloud(cloud([(0.05, 0.05, 1.0), (0.25, 0.05, 2.0)]))
+    node._publish_if_changed()
+    assert len(node._publisher.messages) == 1
+    node._last_publish_time -= 11.0     # pretend 11 s passed (keepalive is 10)
+
+    node._publish_if_changed()
+
+    assert len(node._publisher.messages) == 2
