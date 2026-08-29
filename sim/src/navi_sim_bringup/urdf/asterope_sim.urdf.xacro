@@ -5,6 +5,12 @@
      separate so asterope_iiI.urdf stays a description of the rover that
      exists, with no fictional camera on it. -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="asterope">
+  <!-- planar_move moves the model from /sim_cmd_vel. In semi-autonomous
+       mode the body pose comes from the rover's localisation instead, and
+       sim_ik_node writes it through /gazebo/set_entity_state - two writers
+       of one model pose fight, and the picture jitters between them. So the
+       launch expands this file with planar_move:=false in that mode. -->
+  <xacro:arg name="planar_move" default="true"/>
   <xacro:include filename="$(find navi_sim_bringup)/urdf/asterope_base.urdf"/>
 
   <!-- Chase camera: rigidly behind and above the rover, looking down at it.
@@ -37,16 +43,19 @@
   </gazebo>
 
   <!-- Moves the model from /sim_cmd_vel without physics: exactly the
-       kinematic body motion this simulation wants. -->
-  <gazebo>
-    <plugin name="planar_move" filename="libgazebo_ros_planar_move.so">
-      <ros><remapping>cmd_vel:=/sim_cmd_vel</remapping></ros>
-      <robot_base_frame>base_footprint</robot_base_frame>
-      <odometry_frame>odom</odometry_frame>
-      <publish_odom>false</publish_odom>
-      <publish_odom_tf>true</publish_odom_tf>
-    </plugin>
-  </gazebo>
+       kinematic body motion this simulation wants. Not loaded in
+       semi-autonomous mode - see the argument at the top of this file. -->
+  <xacro:if value="$(arg planar_move)">
+    <gazebo>
+      <plugin name="planar_move" filename="libgazebo_ros_planar_move.so">
+        <ros><remapping>cmd_vel:=/sim_cmd_vel</remapping></ros>
+        <robot_base_frame>base_footprint</robot_base_frame>
+        <odometry_frame>odom</odometry_frame>
+        <publish_odom>false</publish_odom>
+        <publish_odom_tf>true</publish_odom_tf>
+      </plugin>
+    </gazebo>
+  </xacro:if>
 
   <!-- Sets joint positions from /set_joint_trajectory. -->
   <gazebo>
