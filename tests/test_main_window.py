@@ -788,3 +788,32 @@ def test_entering_semi_auto_with_video_off_still_listens_for_the_simulation(qtbo
     assert panel.streaming is True
     assert panel.receiver.port == 5601
     assert panel.receiver.started is True
+
+
+def test_semi_auto_mode_shows_the_map_row_and_other_modes_hide_it(qtbot):
+    window, _ = make_window(qtbot)
+    row = window.dashboard_page.map_row
+    assert not row.isVisibleTo(window)
+    window.dashboard_page.mode_changed.emit("semi_auto")
+    assert row.isVisibleTo(window)
+    window.dashboard_page.mode_changed.emit("manual")
+    assert not row.isVisibleTo(window)
+
+
+def test_map_status_reaches_the_row_and_goes_stale(qtbot):
+    window, client = make_window(qtbot)
+    topic = next(t for t in FakeTopic.instances if t.name == "/localization/map_status")
+    topic.callback({"data": '{"cells_seen": 5, "maps": ["m"]}'})
+    assert window.dashboard_page.map_row.load_button.isEnabled()
+    window._check_staleness(now=window._map_status_at + 10.0)
+    assert not window.dashboard_page.map_row.load_button.isEnabled()
+
+
+def test_map_row_buttons_send_commands(qtbot):
+    window, client = make_window(qtbot)
+    topic = next(t for t in FakeTopic.instances if t.name == "/localization/map_status")
+    topic.callback({"data": '{"cells_seen": 5, "maps": ["m"]}'})
+    row = window.dashboard_page.map_row
+    row.load_button.click()
+    command_topic = next(t for t in FakeTopic.instances if t.name == "/localization/map_command")
+    assert json.loads(command_topic.published_messages[-1]["data"]) == {"action": "load", "name": "m"}

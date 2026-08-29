@@ -63,6 +63,10 @@ class MainWindow(QMainWindow):
         self._localization_status: dict | None = None
         # monotonic() when that status arrived, or None if none has.
         self._localization_status_at: float | None = None
+        # monotonic() when the last /localization/map_status arrived, or
+        # None if none has (or it has gone stale) - mirrors
+        # _localization_status_at for the same reason.
+        self._map_status_at: float | None = None
 
         input_style = (
             f"background-color: {theme.PANEL}; color: {theme.TEXT}; "
@@ -135,6 +139,11 @@ class MainWindow(QMainWindow):
         )
         self.dashboard_page.video_panel.stream_requested.connect(self._on_stream_requested)
         self.dashboard_page.mode_changed.connect(self._on_mode_changed)
+
+        row = self.dashboard_page.map_row
+        row.save_requested.connect(lambda name: self._send_map_command("save", name))
+        row.load_requested.connect(lambda name: self._send_map_command("load", name))
+        row.clear_requested.connect(lambda: self._send_map_command("clear"))
 
         self._node_poll_timer = QTimer(self)
         self._node_poll_timer.timeout.connect(self._poll_nodes)
@@ -212,6 +221,7 @@ class MainWindow(QMainWindow):
             self._on_localization_status)
         self.ros_client.signals.localization_pose_received.connect(
             self._on_localization_pose)
+        self.ros_client.signals.map_status_received.connect(self._on_map_status)
 
         try:
             self.ros_client.connect()
@@ -219,6 +229,7 @@ class MainWindow(QMainWindow):
             self.ros_client.subscribe_video_status()
             self.ros_client.subscribe_localization_status()
             self.ros_client.subscribe_localization_pose()
+            self.ros_client.subscribe_map_status()
         except Exception as exc:
             print(f"ground_station: failed to connect to rosbridge: {exc}", file=sys.stderr)
 
@@ -276,6 +287,7 @@ class MainWindow(QMainWindow):
             # keep coming.
             if self._mode not in ("semi_auto", "simulation"):
                 self.dashboard_page.video_panel.stop_receiver(keep_failed_reason=True)
+            self._on_map_status(None)
 
     def closeEvent(self, event) -> None:
         """Stops the local video receiver on window close for the same
@@ -301,6 +313,13 @@ class MainWindow(QMainWindow):
             self._localization_status = None
             self._localization_status_at = None
             self.dashboard_page.video_panel.set_localization_status(None)
+
+        # Same staleness rule, for the map row: a rover that has gone quiet
+        # must not leave stale map controls (load/save/clear) enabled.
+        if (self._map_status_at is not None
+                and now - self._map_status_at > LOCALIZATION_STATUS_STALE_AFTER_SECONDS):
+            self._map_status_at = None
+            self.dashboard_page.map_row.set_state(None)
 
     def local_address_for(self, host: str, port: int) -> str:
         """Our own address on the interface that reaches the rover. The
@@ -402,6 +421,15 @@ class MainWindow(QMainWindow):
             f"LOC: x {pose['x']:.2f}  y {pose['y']:.2f}  "
             f"yaw {math.degrees(pose['yaw']):.1f}°")
 
+    def _send_map_command(self, action: str, name: str | None = None) -> None:
+        if self.ros_client is None:
+            return
+        self.ros_client.send_map_command(action, name)
+
+    def _on_map_status(self, state) -> None:
+        self._map_status_at = monotonic() if state is not None else None
+        self.dashboard_page.map_row.set_state(state)
+
     def _on_mode_changed(self, mode: str) -> None:
         """Switches the panel's view source only. The twist keeps reaching
         the rover in every mode - driving stays on the gamepad/rosbridge
@@ -418,6 +446,7 @@ class MainWindow(QMainWindow):
         """
         panel = self.dashboard_page.video_panel
         self._mode = mode
+        self.dashboard_page.map_row.setVisible(mode == "semi_auto")
 
         if mode == "autonomous":
             # Unreachable from the UI (the radio is disabled). Reached only
