@@ -30,7 +30,7 @@ import numpy as np
 from navi_localization.elevation_grid import finite_points
 from navi_localization.tiles import TILE_CELLS
 
-VOXEL = 0.05
+from navi_localization.elevation_grid import RESOLUTION as VOXEL  # one cell size, by construction
 OBSTACLE_MIN_ABOVE_GROUND = 0.10
 OBSTACLE_MAX_ABOVE_ROVER = 2.5
 MIN_POINTS_PER_VOXEL = 2
