@@ -279,13 +279,16 @@ def tile_message(key, value=1.0):
     return message(TILE_SAMPLES, TILE_SAMPLES, values, resolution=0.05, center=(cx, cy))
 
 
-def obstacle_tile_message(ix, iy, centres=()):
+def obstacle_tile_message(ix, iy, centres=(), voxel_m=None):
     """A PointCloud2 laid out the way the rover's obstacle-tile publisher
-    writes it: x/y/z float32 tightly packed, frame_id 'map|<ix>|<iy>' -
-    the only place tile identity can travel for an empty (all-clear) tile."""
+    writes it: x/y/z float32 tightly packed, frame_id 'map|<ix>|<iy>' (or
+    'map|<ix>|<iy>|<voxel_m>' when `voxel_m` is given) - the only place
+    tile identity, and the obstacle voxel's own size, can travel for an
+    empty (all-clear) tile."""
     centres = np.asarray(list(centres), dtype='<f4').reshape(-1, 3)
     out = PointCloud2()
-    out.header.frame_id = f'map|{ix}|{iy}'
+    out.header.frame_id = (f'map|{ix}|{iy}' if voxel_m is None
+                           else f'map|{ix}|{iy}|{voxel_m}')
     out.height = 1
     out.width = centres.shape[0]
     out.is_bigendian = False
@@ -938,8 +941,14 @@ def test_a_tile_message_with_no_layout_is_logged_not_raised(writer):
     assert writer._policy._pending == {}
 
 
-def test_obstacle_key_from_frame_id_parses_map_ix_iy():
-    assert obstacle_key_from_frame_id('map|3|-2') == ('obst', 3, -2)
+def test_obstacle_key_from_frame_id_parses_map_ix_iy_as_the_legacy_5cm():
+    # No 4th part: backwards compatible with a message built before the
+    # obstacle voxel size became a parameter, which was always 5 cm.
+    assert obstacle_key_from_frame_id('map|3|-2') == (('obst', 3, -2), 0.05)
+
+
+def test_obstacle_key_from_frame_id_reads_the_voxel_size_from_the_fourth_part():
+    assert obstacle_key_from_frame_id('map|3|-2|0.1') == (('obst', 3, -2), 0.10)
 
 
 def test_obstacle_key_from_frame_id_refuses_anything_else():
@@ -949,6 +958,8 @@ def test_obstacle_key_from_frame_id_refuses_anything_else():
         obstacle_key_from_frame_id('odom|3|-2')
     with pytest.raises(ValueError):
         obstacle_key_from_frame_id('map|three|-2')
+    with pytest.raises(ValueError):
+        obstacle_key_from_frame_id('map|3|-2|not_a_number')
 
 
 def test_obstacle_centres_from_message_reads_xyz_back():
@@ -994,6 +1005,29 @@ def test_an_obstacle_tile_spawns_a_grey_obst_model_with_its_mesh_file(writer):
     mesh_name = writer._mesh_file[('obst', 0, 0)]
     assert mesh_name.startswith('obst_0_0_v')
     assert os.path.exists(os.path.join(writer._mesh_dir, mesh_name))
+
+
+def test_an_obstacle_tile_derives_the_cube_size_from_the_frame_id(writer):
+    # A 0.10 m voxel centred at (0.15, 0.15, 0.15) is index (1, 1, 1) at
+    # that size; obstacle_mesh_from_voxels must be built at 0.10, not the
+    # old fixed 0.05 - if the geometry were built at the wrong size the
+    # vertex extent would be wrong by 2x.
+    from navi_sim_bringup.obstacle_mesh import DEFAULT_SIZE
+    writer._on_obstacle_tile(
+        obstacle_tile_message(0, 0, [(0.15, 0.15, 0.15)], voxel_m=0.10))
+    writer._pump(now=0.0)
+    writer._clock_fn.set(0.0)
+    writer._spawn.calls[0][1].resolve(Response())
+
+    mesh_name = writer._mesh_file[('obst', 0, 0)]
+    obj_path = os.path.join(writer._mesh_dir, mesh_name)
+    with open(obj_path) as handle:
+        vertex_xs = [float(line.split()[1]) for line in handle if line.startswith('v ')]
+    # A cube of edge 0.10 centred at x=0.15 spans [0.10, 0.20]; at the old
+    # fixed 0.05 it would span [0.125, 0.175] instead.
+    assert min(vertex_xs) == pytest.approx(0.10, abs=1e-6)
+    assert max(vertex_xs) == pytest.approx(0.20, abs=1e-6)
+    assert DEFAULT_SIZE == 0.05                 # sanity: the old fixed default is unchanged
 
 
 def test_an_empty_obstacle_tile_removes_the_model(writer):

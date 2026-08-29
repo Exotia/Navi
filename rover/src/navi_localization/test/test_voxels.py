@@ -94,7 +94,7 @@ def test_voxel_to_tile_key_for_negative_indices():
     assert list(result) == [(-2, -2)]
 
 
-def test_two_updates_second_replaces_first_tile_leaves_untouched_alone():
+def test_second_update_leaves_a_different_tile_untouched():
     obstacle_map = ObstacleMap()
     tile_a = two_points_at(1.0, 1.0, 0.5)          # tile (0, 0)
     tile_b = two_points_at(-3.0, -3.0, 0.5)        # tile (-2, -2)
@@ -102,16 +102,71 @@ def test_two_updates_second_replaces_first_tile_leaves_untouched_alone():
     assert set(obstacle_map.tiles()) == {(0, 0), (-2, -2)}
     first_b = obstacle_map.tiles()[(-2, -2)].copy()
 
-    moved_a = two_points_at(1.05, 1.0, 0.5)        # still tile (0, 0), new voxel
+    # Second update touches only tile (0, 0) - a column of it, at that -
+    # with a point at a new z. Tile (-2, -2) is not in this update at all.
+    moved_a = two_points_at(1.0, 1.0, 0.9)
     obstacle_map.update(moved_a, flat_ground(0.0), rover_z=None)
 
     tiles = obstacle_map.tiles()
     assert set(tiles) == {(0, 0), (-2, -2)}
     assert np.array_equal(tiles[(-2, -2)], first_b)          # untouched, unchanged
-    voxel_x = int(np.floor(1.05 / VOXEL))
-    voxel_y = int(np.floor(1.0 / VOXEL))
-    voxel_z = int(np.floor(0.5 / VOXEL))
-    assert tiles[(0, 0)].tolist() == [[voxel_x, voxel_y, voxel_z]]  # replaced, not merged
+
+
+def test_second_update_replaces_only_the_voxel_column_it_touches():
+    # Bug 1: replacing a whole tile whenever any one point in it moved wiped
+    # every voxel of that tile every cycle, shrinking a mapped room to
+    # stripes. The fix replaces per (x, y) voxel column: a column this
+    # update did not mention keeps its old voxels; a column it did touch
+    # (candidate or not) has its old voxels replaced by whatever - if
+    # anything - this update found there.
+    cell = VOXEL
+    c1 = (1.0, 1.0)
+    c2 = (1.0 + cell * 3, 1.0)      # a different column, same tile (0, 0)
+
+    obstacle_map = ObstacleMap()
+    obstacle_map.update(
+        np.concatenate([two_points_at(*c1, 0.5), two_points_at(*c2, 0.5)]),
+        flat_ground(0.0), rover_z=None)
+    assert set(obstacle_map.tiles()) == {(0, 0)}
+    voxel_x2 = int(np.floor(c2[0] / cell))
+    before = obstacle_map.tiles()[(0, 0)]
+    c2_before = before[before[:, 0] == voxel_x2].copy()
+    assert c2_before.shape[0] == 1
+
+    # Update B touches only c1, with a different z - a new voxel there.
+    obstacle_map.update(two_points_at(c1[0], c1[1], 0.9), flat_ground(0.0), rover_z=None)
+    after = obstacle_map.tiles()[(0, 0)]
+    voxel_x1 = int(np.floor(c1[0] / cell))
+    voxel_y1 = int(np.floor(c1[1] / cell))
+    voxel_z_new = int(np.floor(0.9 / cell))
+    c1_after = after[after[:, 0] == voxel_x1]
+    assert c1_after.tolist() == [[voxel_x1, voxel_y1, voxel_z_new]]   # replaced
+    c2_after = after[after[:, 0] == voxel_x2]
+    assert np.array_equal(c2_after, c2_before)                         # unchanged
+
+
+def test_a_column_touched_with_only_ground_points_is_emptied_but_others_kept():
+    cell = VOXEL
+    c1 = (1.0, 1.0)
+    c2 = (1.0 + cell * 3, 1.0)
+
+    obstacle_map = ObstacleMap()
+    obstacle_map.update(
+        np.concatenate([two_points_at(*c1, 0.5), two_points_at(*c2, 0.5)]),
+        flat_ground(0.0), rover_z=None)
+    voxel_x2 = int(np.floor(c2[0] / cell))
+    before = obstacle_map.tiles()[(0, 0)]
+    c2_before = before[before[:, 0] == voxel_x2].copy()
+
+    # This update touches c1 only, with a point 2 cm above ground: no
+    # candidate at all, so c1 is emptied - but c2 was not in this update
+    # and keeps its voxel.
+    obstacle_map.update(two_points_at(c1[0], c1[1], 0.02), flat_ground(0.0), rover_z=None)
+    after = obstacle_map.tiles()[(0, 0)]
+    voxel_x1 = int(np.floor(c1[0] / cell))
+    assert not (after[:, 0] == voxel_x1).any()
+    c2_after = after[after[:, 0] == voxel_x2]
+    assert np.array_equal(c2_after, c2_before)
 
 
 def test_a_touched_tile_that_lost_all_voxels_becomes_empty():
@@ -182,6 +237,99 @@ def test_state_is_sorted_deterministically():
     state = obstacle_map.state()
     resorted = state[np.lexsort((state[:, 2], state[:, 1], state[:, 0]))]
     assert np.array_equal(state, resorted)
+
+
+def test_voxel_m_is_a_parameter_not_a_constant_default_path_still_5cm():
+    # Same scenario as test_a_point_5cm_above_ground_is_not_a_voxel_15cm_is,
+    # but with voxel_m passed explicitly rather than relied on as a default
+    # - proving the 5 cm path runs through the parameter, not a constant.
+    result = occupied_voxels(
+        two_points_at(1.0, 1.0, 0.15), flat_ground(0.0), rover_z=None, voxel_m=0.05)
+    assert list(result) == [(0, 0)]
+    voxel = int(np.floor(1.0 / 0.05))
+    voxel_z = int(np.floor(0.15 / 0.05))
+    assert result[(0, 0)].tolist() == [[voxel, voxel, voxel_z]]
+
+
+def test_a_10cm_voxel_is_coarser_than_the_5cm_cell():
+    # A single point at (1.02, 1.02): its 5 cm cell is (20, 20), but its
+    # 10 cm voxel is (10, 10) - independent index spaces.
+    one = np.array([[1.02, 1.02, 0.20]], dtype=np.float64)
+    result = occupied_voxels(one, flat_ground(0.0), rover_z=None, voxel_m=0.10)
+    assert list(result) == [(0, 0)]
+    voxel = int(np.floor(1.02 / 0.10))
+    voxel_z = int(np.floor(0.20 / 0.10))
+    assert result[(0, 0)].tolist() == [[voxel, voxel, voxel_z]]
+
+
+def test_10cm_voxels_fill_holes_a_5cm_voxel_would_leave():
+    # One point every 5 cm along a line - a real surface's density from the
+    # SDK's fused cloud. At 5 cm voxels, only every other voxel is occupied
+    # (MIN_POINTS_PER_VOXEL=1, but each point is alone in its own 5 cm
+    # voxel every other step is still one point, so this is really about
+    # voxel *count*, not holes - the real claim is coarser voxels merge
+    # what would otherwise be many sparsely-lit small voxels into fewer,
+    # solidly-lit large ones).
+    # Offset 0.02 into each 5 cm cell rather than landing on its boundary:
+    # floor(x / size) at an exact multiple is one floating-point ULP from
+    # flipping either way, which would collide two points into one voxel
+    # for reasons that have nothing to do with what this test checks.
+    xs = 1.02 + np.arange(0, 20) * 0.05
+    points = np.stack([xs, np.full_like(xs, 1.0), np.full_like(xs, 0.5)], axis=1)
+
+    at_5cm = occupied_voxels(points, flat_ground(0.0), rover_z=None, voxel_m=0.05)
+    at_10cm = occupied_voxels(points, flat_ground(0.0), rover_z=None, voxel_m=0.10)
+    assert sum(v.shape[0] for v in at_5cm.values()) == 20    # one voxel per point
+    assert sum(v.shape[0] for v in at_10cm.values()) == 10   # pairs merge into one voxel
+
+
+def test_ground_reference_and_tile_stay_at_the_5cm_cell_regardless_of_voxel_m():
+    # Two points 6 cm apart in x - different 5 cm cells (20 and 21) but the
+    # same 10 cm voxel column (10). A ground_height that reports different
+    # heights per distinct 5 cm cell proves the candidate test is still
+    # querying at cell granularity, not voxel granularity: only one of the
+    # two points clears its own cell's ground.
+    def per_cell_ground(ix, iy):
+        # Cell 20's ground is 0.0 (point at z=0.30 clears it); cell 21's
+        # ground is 0.25 (point at z=0.30 does not clear it).
+        return np.where(ix == 20, 0.0, 0.25).astype(np.float64)
+
+    points = np.array([[1.00, 1.0, 0.30], [1.06, 1.0, 0.30]], dtype=np.float64)
+    result = occupied_voxels(points, per_cell_ground, rover_z=None, voxel_m=0.10)
+    voxels = result[(0, 0)]
+    assert voxels.shape[0] == 1
+    voxel_x = int(np.floor(1.00 / 0.10))
+    assert voxels[0, 0] == voxel_x    # only the point over cell 20 qualifies
+
+
+def test_obstacle_map_voxel_m_is_set_at_construction_and_the_message_centre_uses_it():
+    obstacle_map = ObstacleMap(voxel_m=0.10)
+    assert obstacle_map.voxel_m == 0.10
+    obstacle_map.update(two_points_at(1.0, 1.0, 0.5), flat_ground(0.0), rover_z=None)
+    voxels = obstacle_map.tiles()[(0, 0)]
+    centre = (voxels[0].astype(np.float64) + 0.5) * obstacle_map.voxel_m
+    assert centre == pytest.approx([1.05, 1.05, 0.55])
+
+
+def test_replace_adopts_a_given_voxel_m_state_round_trips_it():
+    obstacle_map = ObstacleMap(voxel_m=0.10)
+    obstacle_map.update(two_points_at(1.0, 1.0, 0.5), flat_ground(0.0), rover_z=None)
+    state = obstacle_map.state()
+
+    fresh = ObstacleMap()                     # default voxel_m, not 0.10 yet
+    fresh.replace(state, voxel_m=0.10)
+    assert fresh.voxel_m == 0.10
+    assert np.array_equal(fresh.state(), state)
+    assert set(fresh.tiles()) == {(0, 0)}
+
+
+def test_replace_without_voxel_m_keeps_the_maps_own_size():
+    # map_store.py's npz `voxel_m` key is absent for a map saved before the
+    # obstacle voxel size became a parameter; ObstacleMap.replace must not
+    # require the caller to know a size in that case.
+    obstacle_map = ObstacleMap(voxel_m=0.10)
+    obstacle_map.replace(np.array([[1, 2, 3]], dtype=np.int32))
+    assert obstacle_map.voxel_m == 0.10
 
 
 def test_200k_points_voxelise_under_60ms():

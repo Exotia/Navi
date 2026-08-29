@@ -188,24 +188,32 @@ _OBSTACLE_POINT_STEP = 12
 
 
 def obstacle_key_from_frame_id(frame_id: str):
-    """("obst", ix, iy) from a "map|<ix>|<iy>" frame_id.
+    """(("obst", ix, iy), voxel_m) from a "map|<ix>|<iy>" or
+    "map|<ix>|<iy>|<voxel_m>" frame_id.
 
     That odd home for the tile index is the spec's, not this node's choice:
     a PointCloud2 has nowhere else that can carry identity for an *empty*
     tile (width 0, no points to read an index back out of), which an
-    obstacle tile going fully clear must still be able to publish.
+    obstacle tile going fully clear must still be able to publish. The
+    obstacle voxel's own edge length rides along the same way, in an
+    optional 4th part - the rover's default cube size used to be a fixed
+    5 cm, and a frame_id without that part means exactly that (backwards
+    compatible with a message built before the size became a parameter).
     """
     parts = frame_id.split('|')
-    if len(parts) != 3 or parts[0] != 'map':
+    if len(parts) not in (3, 4) or parts[0] != 'map':
         raise ValueError(
-            f"obstacle tile frame_id {frame_id!r} is not 'map|<ix>|<iy>'")
+            f"obstacle tile frame_id {frame_id!r} is not 'map|<ix>|<iy>' "
+            "or 'map|<ix>|<iy>|<voxel_m>'")
     try:
         ix, iy = int(parts[1]), int(parts[2])
+        voxel_m = float(parts[3]) if len(parts) == 4 else 0.05
     except ValueError as error:
         raise ValueError(
-            f"obstacle tile frame_id {frame_id!r} has non-integer indices"
+            f"obstacle tile frame_id {frame_id!r} has a non-numeric index "
+            "or voxel size"
         ) from error
-    return ('obst', ix, iy)
+    return ('obst', ix, iy), voxel_m
 
 
 def obstacle_centres_from_message(message: PointCloud2) -> np.ndarray:
@@ -498,7 +506,7 @@ class TerrainWriter(Node):
 
     def _on_obstacle_tile(self, message: PointCloud2) -> None:
         try:
-            key = obstacle_key_from_frame_id(message.header.frame_id)
+            key, voxel_m = obstacle_key_from_frame_id(message.header.frame_id)
             centres = obstacle_centres_from_message(message)
         except (ValueError, IndexError) as error:
             # Same reasoning as _on_tile: this is a subscription callback,
@@ -509,7 +517,9 @@ class TerrainWriter(Node):
         if centres.shape[0] == 0:
             payload = b''                       # the tile is gone
         else:
-            mesh = obstacle_mesh_from_voxels(centres)
+            # The cube size travels in frame_id, not assumed to be the old
+            # fixed 5 cm - see obstacle_key_from_frame_id.
+            mesh = obstacle_mesh_from_voxels(centres, size=voxel_m)
             payload = obstacle_obj_bytes(mesh) if mesh is not None else b''
         self._policy.offer(key, payload, self._clock_fn())
 

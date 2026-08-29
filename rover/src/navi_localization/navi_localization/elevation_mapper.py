@@ -141,22 +141,25 @@ def build_tile_message(key, tile: np.ndarray, frame_id: str, stamp) -> GridMap:
     return message
 
 
-def build_obstacle_message(key, voxels: np.ndarray, stamp) -> PointCloud2:
+def build_obstacle_message(key, voxels: np.ndarray, stamp, voxel_m: float = VOXEL) -> PointCloud2:
     """One obstacle tile's occupied voxels as a PointCloud2 of their
-    centres, `(index + 0.5) * VOXEL` in the map frame.
+    centres, `(index + 0.5) * voxel_m` in the map frame.
 
     A GridMap's own fields have nowhere to carry a tile's identity for an
     *empty* obstacle tile (all its voxels gone), which still has to be
     publishable so a consumer can remove whatever it drew there - so, like
     the design's `map|<ix>|<iy>`, that identity travels in `header.frame_id`
-    instead of the usual bare `"map"`. `parse_obstacle_frame` is the
-    inverse.
+    instead of the usual bare `"map"`. The obstacle voxel's own size travels
+    there too - `map|<ix>|<iy>|<voxel_m>` - since the message's own fields
+    stay x/y/z only and a consumer (the sim's mesh builder) needs the cube
+    size to draw solid voxels rather than assuming the old fixed 5 cm.
+    `parse_obstacle_frame` is the inverse.
     """
     ix, iy = key
     voxels = np.asarray(voxels, dtype=np.int32).reshape(-1, 3)
-    centres = ((voxels.astype(np.float64) + 0.5) * VOXEL).astype(np.float32)
+    centres = ((voxels.astype(np.float64) + 0.5) * voxel_m).astype(np.float32)
     message = PointCloud2()
-    message.header.frame_id = f"map|{ix}|{iy}"
+    message.header.frame_id = f"map|{ix}|{iy}|{voxel_m}"
     message.header.stamp = stamp
     message.height = 1
     message.width = int(centres.shape[0])
@@ -174,12 +177,17 @@ def build_obstacle_message(key, voxels: np.ndarray, stamp) -> PointCloud2:
 
 
 def parse_obstacle_frame(frame_id: str) -> tuple:
-    """`"map|<ix>|<iy>"` -> `(ix, iy)`: the inverse of the frame_id
-    `build_obstacle_message` writes."""
+    """`"map|<ix>|<iy>"` or `"map|<ix>|<iy>|<voxel_m>"` -> `(ix, iy,
+    voxel_m)`: the inverse of the frame_id `build_obstacle_message` writes.
+    A frame_id without the 4th part means `voxel_m == RESOLUTION` (0.05) -
+    backwards compatible with a message built before the obstacle voxel
+    size became a parameter, which was always that size."""
     parts = frame_id.split('|')
-    if len(parts) != 3 or parts[0] != 'map':
+    if len(parts) not in (3, 4) or parts[0] != 'map':
         raise ValueError(f"not an obstacle tile frame_id: {frame_id!r}")
-    return int(parts[1]), int(parts[2])
+    ix, iy = int(parts[1]), int(parts[2])
+    voxel_m = float(parts[3]) if len(parts) == 4 else RESOLUTION
+    return ix, iy, voxel_m
 
 
 class ElevationMapper(Node):
@@ -196,11 +204,15 @@ class ElevationMapper(Node):
         # ground under a ramp or a curb the rover can actually climb.
         self.declare_parameter('clamp_above', 0.5)
         self.declare_parameter('clamp_below', 1.0)
+        # Independent of the grid's 5 cm cell (RESOLUTION): the fused cloud
+        # carries ~1 point per 5 cm on a surface, so 5 cm obstacle voxels
+        # were hit-or-miss - a coarser default voxel fills those holes.
+        self.declare_parameter('obstacle_voxel_m', 0.10)
 
         self._frame_id = str(self.get_parameter('frame_id').value)
         self._grid = ElevationGrid()
         self._scheduler = TileScheduler()
-        self._obstacles = ObstacleMap()
+        self._obstacles = ObstacleMap(voxel_m=float(self.get_parameter('obstacle_voxel_m').value))
         self._obstacle_scheduler = PayloadScheduler()
         self._store = MapStore(str(self.get_parameter('map_directory').value))
         self._loaded = None
@@ -367,7 +379,8 @@ class ElevationMapper(Node):
                 self._tile_publisher.publish(
                     build_tile_message(key, empty_terrain, self._frame_id, stamp))
             else:
-                self._obstacle_publisher.publish(build_obstacle_message(key, empty_voxels, stamp))
+                self._obstacle_publisher.publish(build_obstacle_message(
+                    key, empty_voxels, stamp, voxel_m=self._obstacles.voxel_m))
             sent += 1
         for key, tile in self._scheduler.due(now):
             self._tile_publisher.publish(build_tile_message(key, tile, self._frame_id, stamp))
@@ -376,7 +389,8 @@ class ElevationMapper(Node):
         # ground, which the rover can drive on, matters more than the
         # blocky obstacles drawn on top of it.
         for key, voxels in self._obstacle_scheduler.due(now):
-            self._obstacle_publisher.publish(build_obstacle_message(key, voxels, stamp))
+            self._obstacle_publisher.publish(build_obstacle_message(
+                key, voxels, stamp, voxel_m=self._obstacles.voxel_m))
             self._obstacle_scheduler.published(key, voxels, now)
 
     # -- commands ---------------------------------------------------------
@@ -421,13 +435,14 @@ class ElevationMapper(Node):
         if state is None:
             raise ValueError("nothing to save: the map is empty")
         voxels = self._obstacles.state()
-        path = self._store.save(name, state, voxels, overwrite=overwrite)
+        path = self._store.save(
+            name, state, voxels, voxel_m=self._obstacles.voxel_m, overwrite=overwrite)
         self.get_logger().info(f"map saved to {path}")
 
     def _load(self, name) -> None:
-        state, voxels = self._store.load(name)
+        state, voxels, voxel_m = self._store.load(name)
         self._grid.replace(state)
-        self._obstacles.replace(voxels)
+        self._obstacles.replace(voxels, voxel_m=voxel_m)
         self._loaded = name
         # A load replaces the grid and the obstacle map outright, so each
         # scheduler's memory of the previous one is dropped too: without

@@ -25,6 +25,12 @@ from navi_localization.voxels import VOXEL
 from std_msgs.msg import String
 
 
+def obstacle_key(frame_id):
+    """(ix, iy) from an obstacle tile frame_id, ignoring the voxel size -
+    for the many tests here that only care which tile a message is about."""
+    return parse_obstacle_frame(frame_id)[:2]
+
+
 def cloud(points, with_rgb=True):
     """A PointCloud2 shaped exactly like the ZED wrapper's fused cloud."""
     message = PointCloud2()
@@ -118,8 +124,8 @@ def test_build_obstacle_message_carries_tile_identity_and_voxel_centres():
     voxels = np.array([[2, 2, 10], [2, 3, 10]], dtype=np.int32)
     message = build_obstacle_message((0, 1), voxels, Time())
 
-    assert message.header.frame_id == 'map|0|1'
-    assert parse_obstacle_frame(message.header.frame_id) == (0, 1)
+    assert message.header.frame_id == f'map|0|1|{VOXEL}'
+    assert parse_obstacle_frame(message.header.frame_id) == (0, 1, VOXEL)
     assert message.height == 1 and message.width == 2
     assert message.is_dense is True
     assert message.point_step == 12
@@ -131,16 +137,43 @@ def test_build_obstacle_message_carries_tile_identity_and_voxel_centres():
     assert points == pytest.approx(expected, abs=1e-6)
 
 
+def test_build_obstacle_message_carries_a_non_default_voxel_size():
+    voxels = np.array([[2, 2, 10]], dtype=np.int32)
+    message = build_obstacle_message((0, 1), voxels, Time(), voxel_m=0.10)
+
+    assert message.header.frame_id == 'map|0|1|0.1'
+    assert parse_obstacle_frame(message.header.frame_id) == (0, 1, 0.10)
+    points = np.frombuffer(bytes(message.data), dtype=np.float32).reshape(-1, 3)
+    expected = (voxels.astype(np.float64) + 0.5) * 0.10
+    assert points == pytest.approx(expected, abs=1e-6)
+
+
 def test_build_obstacle_message_with_no_voxels_is_an_empty_but_valid_message():
     message = build_obstacle_message((3, -2), np.zeros((0, 3), dtype=np.int32), Time())
     assert message.width == 0
     assert bytes(message.data) == b''
-    assert parse_obstacle_frame(message.header.frame_id) == (3, -2)
+    assert parse_obstacle_frame(message.header.frame_id) == (3, -2, VOXEL)
 
 
 def test_parse_obstacle_frame_refuses_a_plain_map_frame():
     with pytest.raises(ValueError):
         parse_obstacle_frame('map')
+
+
+def test_parse_obstacle_frame_accepts_the_legacy_three_part_frame_id_as_5cm():
+    # Backwards compatible: a frame_id built before the obstacle voxel size
+    # became a parameter has no 4th part, and every voxel it describes was
+    # 5 cm.
+    assert parse_obstacle_frame('map|3|-2') == (3, -2, 0.05)
+
+
+def test_parse_obstacle_frame_reads_the_voxel_size_from_the_fourth_part():
+    assert parse_obstacle_frame('map|3|-2|0.1') == (3, -2, 0.10)
+
+
+def test_parse_obstacle_frame_refuses_a_non_numeric_size():
+    with pytest.raises(ValueError):
+        parse_obstacle_frame('map|3|-2|not_a_number')
 
 
 # Node-level tests: the node is exercised with messages fed straight into its
@@ -407,7 +440,7 @@ class ExplodingStore:
     def list_names(self):
         return self._real.list_names()
 
-    def save(self, name, state, voxels=None, overwrite=False):
+    def save(self, name, state, voxels=None, voxel_m=None, overwrite=False):
         raise OSError('[Errno 28] No space left on device')
 
     def load(self, name):
@@ -544,13 +577,17 @@ def test_a_wall_publishes_an_obstacle_tile_with_the_right_frame_id_and_centres(n
     non_empty = [m for m in node._obstacle_publisher.messages if m.width > 0]
     assert len(non_empty) == 1
     message = non_empty[0]
-    assert parse_obstacle_frame(message.header.frame_id) == (0, 0)     # cell (2, 2) -> tile (0, 0)
+    # cell (2, 2) (5 cm) -> tile (0, 0), regardless of the obstacle voxel's
+    # own size; the frame_id also carries that size, the node's default.
+    assert parse_obstacle_frame(message.header.frame_id) == (0, 0, node._obstacles.voxel_m)
     assert message.point_step == 12 and message.is_dense is True
 
     points = np.frombuffer(bytes(message.data), dtype=np.float32).reshape(-1, 3)
     assert points.shape == (1, 3)
-    wall_voxel = np.array([2, 2, int(np.floor(0.5 / VOXEL))])
-    expected_centre = (wall_voxel.astype(np.float64) + 0.5) * VOXEL
+    voxel_m = node._obstacles.voxel_m
+    wall_voxel = np.array([int(np.floor(0.1 / voxel_m)), int(np.floor(0.1 / voxel_m)),
+                          int(np.floor(0.5 / voxel_m))])
+    expected_centre = (wall_voxel.astype(np.float64) + 0.5) * voxel_m
     assert points[0] == pytest.approx(expected_centre, abs=1e-5)
 
 
@@ -582,13 +619,13 @@ def test_save_load_round_trips_the_obstacle_voxels_and_the_status_count(node):
 
     node._tick(now=1.0)
     non_empty = [m for m in node._obstacle_publisher.messages if m.width > 0]
-    assert any(parse_obstacle_frame(m.header.frame_id) == (0, 0) for m in non_empty)
+    assert any(obstacle_key(m.header.frame_id) == (0, 0) for m in non_empty)
 
 
 def test_clear_sends_an_empty_obstacle_tile_for_every_published_one(node):
     node._on_cloud(wall_cloud())
     node._tick(now=0.0)
-    published_keys = {parse_obstacle_frame(m.header.frame_id)
+    published_keys = {obstacle_key(m.header.frame_id)
                        for m in node._obstacle_publisher.messages if m.width > 0}
     assert published_keys                      # sanity: the wall did publish
 
@@ -597,7 +634,7 @@ def test_clear_sends_an_empty_obstacle_tile_for_every_published_one(node):
     assert node._obstacle_publisher.messages == []      # paced by _tick, not bursted
 
     node._tick(now=1.0)
-    keys = {parse_obstacle_frame(m.header.frame_id) for m in node._obstacle_publisher.messages}
+    keys = {obstacle_key(m.header.frame_id) for m in node._obstacle_publisher.messages}
     assert keys == published_keys
     assert all(m.width == 0 for m in node._obstacle_publisher.messages)
 
@@ -615,7 +652,7 @@ def test_an_obstacle_tile_that_loses_all_voxels_is_republished_empty(node):
 
     empty = [m for m in node._obstacle_publisher.messages if m.width == 0]
     assert empty
-    assert parse_obstacle_frame(empty[0].header.frame_id) == (0, 0)
+    assert obstacle_key(empty[0].header.frame_id) == (0, 0)
 
 
 def test_load_sends_empty_obstacle_tile_for_tiles_the_loaded_map_no_longer_covers(node):
@@ -635,7 +672,7 @@ def test_load_sends_empty_obstacle_tile_for_tiles_the_loaded_map_no_longer_cover
 
     by_key = {}
     for message in node._obstacle_publisher.messages:
-        key = parse_obstacle_frame(message.header.frame_id)
+        key = obstacle_key(message.header.frame_id)
         by_key.setdefault(key, []).append(message)
 
     # Tile B is not in the loaded map at all: it must go out once more as an

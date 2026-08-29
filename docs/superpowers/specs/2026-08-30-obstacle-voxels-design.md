@@ -111,3 +111,13 @@ chase-camera frame; Orin: rates and bytes with the bench scene.
 
 Ray-cast free-space decay; textured meshes (tier 2: `save_3d_map`);
 obstacle use for planning.
+
+## Fix: solid voxels, not stripes (2026-08-30)
+
+Replacing whole tiles instead of the (x, y) columns actually touched wiped
+a tile's untouched voxels every time any single point in it moved, so a
+mapped room shrank to stripes each cycle; the fix replaces per column, and
+the obstacle voxel size became a parameter (`obstacle_voxel_m`, default
+0.10 m, independent of the grid's 5 cm cell) carried in `frame_id` as
+`map|<ix>|<iy>|<voxel_m>` so the fused cloud's ~1-point-per-5cm density no
+longer leaves holes.
