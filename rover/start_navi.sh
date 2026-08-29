@@ -16,6 +16,12 @@
 #   ./start_navi.sh --port 9091  serve rosbridge on a different port
 #   ./start_navi.sh --keep-stale don't clean up a previous run first
 #
+# Bring the rover up BEFORE starting any simulation on ROS domain 0. The
+# ZED wrapper's startup grows from ~5 s to ~35 s with a sim running, because
+# DDS spends that time discovering the simulation's participants over the
+# network before it gets to the camera. Nothing fails - it just looks like
+# the rover has hung.
+#
 # Ctrl+C stops everything. The laptop counterpart is start_ground_station.sh
 # in the Navi repo.
 
