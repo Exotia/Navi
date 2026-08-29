@@ -97,3 +97,34 @@ def test_the_wheels_sit_at_the_910mm_square(robot):
         assert z == pytest.approx(-0.284)
         seen.add((x > 0, y > 0))
     assert len(seen) == 4, "the four corners must be four distinct corners"
+
+
+def test_the_front_zed_mount_is_where_the_hardware_team_measured_it(robot):
+    # The frame the ZED wrapper tracks is <camera_name>_camera_link, the 1/4"
+    # mounting screw. These numbers were placed from the measured left
+    # optical centres (see the comment block in the URDF); navi_localization's
+    # CAMERA_IN_BASE_FOOTPRINT is derived from them, so they are pinned here.
+    j = joint(robot, "zed_front_camera_joint")
+    assert j.get("type") == "fixed"
+    assert j.find("parent").get("link") == "base_link"
+    assert j.find("child").get("link") == "zed_front_camera_link"
+    assert j.find("origin").get("xyz") == "0.345 0 0.139"
+    assert j.find("origin").get("rpy") == "0 0 0"
+
+
+def test_the_rear_zed_faces_backwards(robot):
+    j = joint(robot, "zed_rear_camera_joint")
+    assert j.get("type") == "fixed"
+    assert j.find("parent").get("link") == "base_link"
+    assert j.find("child").get("link") == "zed_rear_camera_link"
+    assert j.find("origin").get("xyz") == "-0.345 0 0.139"
+    assert j.find("origin").get("rpy") == "0 0 3.141592654"
+
+
+def test_each_zed_carries_the_wrapper_frame_layout(robot):
+    # camera_center sits 15 mm above the mounting screw, the two eyes 60 mm
+    # either side of it and 10 mm back - the wrapper's own macro layout.
+    for cam in ("zed_front", "zed_rear"):
+        assert joint(robot, f"{cam}_camera_center_joint").find("origin").get("xyz") == "0 0 0.015"
+        assert joint(robot, f"{cam}_left_camera_joint").find("origin").get("xyz") == "-0.01 0.06 0"
+        assert joint(robot, f"{cam}_right_camera_joint").find("origin").get("xyz") == "-0.01 -0.06 0"

@@ -29,9 +29,14 @@ physics, the second (rear) ZED, and matching against a prior scan (see
 - The rover side (localisation, video, mapping) runs without the simulation
   and without the ground station. Gazebo is a consumer of the pose and the
   map, never a dependency of anything on the rover.
-- Only the front ZED is connected today. The URDF already carries both camera
-  bodies; the front one is the black 37 x 188 x 30 mm box at
-  `(0.322, 0, 0.154)` in `base_link`, facing +X.
+- Only the front ZED is connected today. The URDF already carries, from the
+  hardware team, a full frame tree for both cameras laid out like the
+  wrapper's own `zed_macro.urdf.xacro` and placed from measured optical
+  centres: `zed_front_camera_link` (the 1/4" mounting screw, what the wrapper
+  tracks) at `(0.345, 0, 0.139)` in `base_link`, facing +X; `zed_rear_camera_link`
+  mirrored. The wrapper is launched as `camera_name: zed_front` so its
+  hard-coded base frame name is that link. Topics are therefore under
+  `/zed_front/zed_node/`.
 
 ## Constraints found in the environment
 
@@ -39,7 +44,7 @@ Verified on 2026-08-29 on the Orin (`star@a_navi`) and this laptop:
 
 - ZED SDK 4.2.5; `zed-ros2-wrapper humble-v4.2.5` built and working in
   `~/workspaces/isaac_ros-dev`. With positional tracking on,
-  `/zed/zed_node/odom` publishes at **30.0 Hz** in `odom -> zed_camera_link`;
+  `/zed_front/zed_node/odom` publishes at **30.0 Hz** in `odom -> zed_front_camera_link`;
   load is ~25 % per core, GPU 68 %, 1.2 GB RAM. `robot_localization`,
   `slam_toolbox`, `nav2_bringup`, `grid_map_*`, `pcl_ros` are installed.
 - **The wrapper takes 90 s to reach odometry** because it advertises ~30
@@ -62,8 +67,8 @@ Verified on 2026-08-29 on the Orin (`star@a_navi`) and this laptop:
 
 ```
                               ORIN                                     LAPTOP
- ZED 2i --stereo+IMU--> zed_wrapper --/zed/zed_node/odom-------> localization_status
-                             |        --/zed/zed_node/pose/status-->        |
+ ZED 2i --stereo+IMU--> zed_wrapper --/zed_front/zed_node/odom-------> localization_status
+                             |        --/zed_front/zed_node/pose/status-->        |
                              |                                    /localization/pose   (map -> base_footprint, 30 Hz)
                              |                                    /localization/status (OK | SEARCHING | OFF)
                              |                                              |
@@ -105,39 +110,50 @@ A `navi_localization/config/zed_front.yaml` overlaying the wrapper's
   SDK's own loop closure), `publish_tf: true`, `publish_map_tf: true`,
   `two_d_mode: false`, `set_gravity_as_origin: true`.
 - `camera_name: zed`, `base_frame: base_footprint` is **not** used: the wrapper
-  is told its own frame is `zed_camera_link` and the offset to the rover is
+  is told its own frame is `zed_front_camera_link` and the offset to the rover is
   in the URDF (below). Re-expression happens in `localization_status`, so a
   wrong mount offset is one number in one place.
 - Object detection, body tracking, streaming and SVO recording off. Mapping
   off here; sub-project 3 turns it on.
-- Image transport: only `raw` published, ffmpeg/compressed/theora plugins
-  disabled through the `.image_transport` parameter namespace. Image
-  publishing at `pub_downscale_factor: 2.0` (640 x 360) and `pub_frame_rate`
-  15; the video sender is the only consumer.
-- Target: odometry within **20 s** of launch. Measured before and after; the
-  number goes in the launch file's docstring.
+- Image transport: only `raw` published — each image topic's
+  `zed_node.<topic>.enable_pub_plugins` parameter (the name read off the live
+  node) pinned to `['image_transport/raw']`. Images at
+  `pub_downscale_factor: 2.0` (640 x 360). `pub_frame_rate` stays **30**:
+  the wrapper gates pose and odometry on it too, and at 15 the pose ran at
+  14 Hz.
+- Target: odometry within **20 s** of launch on a quiet ROS domain. Found
+  during implementation: the 90 s was not the ffmpeg encoders but DDS
+  discovery stalling against foreign participants on the shared domain 0
+  (stale simulation launches on the laptop). On a quiet domain the wrapper
+  reaches odometry in about 5 s. Sub-project 2's move of the simulation to
+  its own domain is therefore load-bearing for the rover's startup, not
+  only for TF hygiene.
 
 ### `localization_status` node (Python, `navi_localization`)
 
-Subscribes `/zed/zed_node/pose` (the SDK pose in the `map` frame, loop
-closures applied), `/zed/zed_node/pose_with_covariance` and
-`/zed/zed_node/pose/status`. Publishes:
+Subscribes `/zed_front/zed_node/pose` (the SDK pose in the `map` frame, loop
+closures applied), `/zed_front/zed_node/pose_with_covariance` and
+`/zed_front/zed_node/pose/status`. Publishes:
 
 - `/localization/pose` — `nav_msgs/Odometry`, `frame_id: map`,
   `child_frame_id: base_footprint`, at the wrapper's rate. The wrapper's
-  tracking base frame is hard-coded to `zed_camera_link` (wrapper 4.2), so the
+  tracking base frame is hard-coded to `zed_front_camera_link` (wrapper 4.2), so the
   pose is re-expressed in pure Python: `T_map_footprint = T_map_camera *
   inverse(T_footprint_camera)`, with `T_footprint_camera` the fixed mount
-  offset `(0.322, 0, 0.563)` from the URDF. No `tf2`, no
+  offset `(0.345, 0, 0.548)` from the URDF. No `tf2`, no
   `robot_state_publisher` on the Orin — the wrapper already owns
-  `zed_camera_link` in TF and a second parent for it would break the tree.
+  `zed_front_camera_link` in TF and a second parent for it would break the tree.
   Covariance copied from the wrapper's pose-with-covariance.
 - `/localization/status` — `std_msgs/String` carrying JSON, the same
   convention as `/video_status`, so the ground station reads it over
   rosbridge without a custom type: `{"state": "OK" | "SEARCHING" | "OFF",
-  "seconds_since_ok": float, "source": "zed_vio", "distance_travelled":
-  float, "mount_offset_verified": false}`. Published at 2 Hz and on every
-  state change. While `SEARCHING`, `/localization/pose` keeps publishing the
+  "seconds_since_ok": float | null, "source": "zed_vio",
+  "distance_travelled": float, "mount_offset_verified": true}`.
+  `seconds_since_ok` is `null` until the first OK, because there is no
+  honest number for "how long since something that never happened" - a 0
+  would read as tracking that is fine right now, and a large number as
+  tracking that was fine once. Published at 2 Hz and on every state
+  change. While `SEARCHING`, `/localization/pose` keeps publishing the
   **last good** pose with its stamp frozen, so consumers can see it is
   stale. Nothing is extrapolated. `OFF` after 2 s without any wrapper pose.
 
@@ -150,13 +166,17 @@ it.
 
 `video_sender` keeps its `/video_request` / `/video_status` contract and its
 refusal logic (`video_request.py` is untouched). Its source changes from
-`v4l2src device=...` to a subscription on `/zed/zed_node/rgb/image_rect_color`
+`v4l2src device=...` to a subscription on `/zed_front/zed_node/rgb/image_rect_color`
 whose frames are written into `gst-launch-1.0` through stdin — the exact
 `fdsrc blocksize=... ! rawvideoparse` front end `navi_sim_video` uses, which
 is the one that was verified to frame a byte stream correctly. The request's
-`device` field is ignored with a logged note; width/height come from the
-image, and a request whose geometry differs from the published image is
-refused with the reason in `/video_status`, not silently rescaled.
+`device` field is still validated against `allowed_device` on both sources -
+one validator, no source-dependent holes in it - though nothing on this path
+opens a device. Width and height come from the image: the wrapper owns the
+camera, so the geometry it publishes is the only geometry there is, the
+request's is advisory, and the stream adopts it rather than refusing a
+mismatch the ground station has no way to fix. The geometry actually being
+sent is reported in `/video_status`'s detail. Nothing is rescaled.
 
 When the wrapper is not running (`--no-localization`), the old `v4l2src` path
 is still available: `video_sender` gains a `source` parameter, `zed_topic`
@@ -164,25 +184,27 @@ is still available: `video_sender` gains a `source` parameter, `zed_topic`
 
 ### URDF
 
-`asterope_iiI.urdf` gains a `zed_camera_link` on a fixed joint from
-`base_link` at `xyz="0.322 0 0.154" rpy="0 0 0"` — the front camera box's
-centre — and a `zed_rear_camera_link` at the rear box, unused. `tests/test_urdf.py`
-asserts both. These links serve the laptop (simulation, tests); on the Orin
-the URDF is not loaded, for the TF reason above. The mount offset constant in
-`navi_localization` and the URDF joint must agree; a test parses the URDF and
-checks that.
-
-Because the ZED body box was authored from photos, not from a measurement,
-the offset is flagged in the URDF comment as **unverified**,
-`localization_status` logs it at startup and reports it in the status JSON.
-Verifying it is a rover-day item.
+Unchanged. `asterope_iiI.urdf` already carries `zed_front_camera_joint`
+(`0.345 0 0.139`) and the rear mirror, measured by the hardware team;
+`tests/test_urdf.py` pins them, and a second test checks that
+`CAMERA_IN_BASE_FOOTPRINT` in `navi_localization` equals that origin plus
+`base_footprint_joint`'s 0.409 m. On the Orin the URDF is not loaded, for
+the TF reason above. `MOUNT_OFFSET_VERIFIED` is `True` on the strength of the
+URDF's "measured" note and is reported in the status JSON; a re-measurement
+that disagrees flips it.
 
 ### `start_navi.sh`
 
 - `--no-localization` skips the wrapper and `localization_status`; `video_sender` is then launched with `source:=v4l2`.
 - Stale-process cleanup gains `component_container_isolated`.
-- Readiness waits for `/localization/status` to be **received** on a
-  subscription, with a 60 s timeout that fails the launcher loudly.
+- Readiness waits for `/localization/status` to be **received** *and* to
+  report a state other than `OFF`: `localization_status` publishes an
+  initial `OFF` from its constructor, so a message alone would pass with an
+  unplugged camera behind it. ~90 s for the first message, and failing that
+  the launcher stops loudly. A further ~60 s for a non-`OFF` state, and
+  failing *that* a loud warning and the bring-up continues - an indoor run
+  with nothing to track must still work, and manual driving does not depend
+  on the pose.
 
 ### Testing
 
@@ -274,7 +296,7 @@ It is the same GPU pipeline as the tracking, needs no new package, and is
 consistent with the pose by construction.
 
 `elevation_mapper` (Python, `navi_localization`) subscribes the fused point
-cloud (`/zed/zed_node/mapping/fused_cloud`) and maintains a 2.5-D grid:
+cloud (`/zed_front/zed_node/mapping/fused_cloud`) and maintains a 2.5-D grid:
 `grid_map_msgs/GridMap` with one `elevation` layer, 0.10 m cells, in the
 `map` frame, growing as needed up to 60 x 60 m. Each cell holds the mean z
 of the points in it; empty cells are NaN. Published on `/localization/map`
@@ -320,7 +342,7 @@ point.
 - Rover unreachable: `sim_bridge` stops receiving; `sim_ik_node` zeroes the
   command as it does today; status goes stale and the panel says so.
 - A video request in semi-auto is refused with the reason on the panel.
-- The mount offset is logged at startup as unverified until measured.
+- The mount offset and whether it is verified are logged at startup and carried in the status JSON.
 
 ## Deferred
 

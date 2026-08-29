@@ -1,0 +1,79 @@
+# Overrides applied on top of the wrapper's own common_stereo.yaml + zed2i.yaml
+# + ffmpeg.yaml (zed_camera.launch.py appends this file last via
+# ros_params_override_path, so these values win). Some of these repeat a
+# wrapper default on purpose: they pin the behaviour this sub-project depends
+# on, so a wrapper upgrade cannot change it underneath us silently.
+/**:
+    ros__parameters:
+        general:
+            camera_name: 'zed_front'
+            grab_resolution: 'HD720'
+            grab_frame_rate: 30
+            pub_resolution: 'CUSTOM'
+            pub_downscale_factor: 2.0     # 640 x 360 images: the video sender is their only consumer
+            # Gates pose and odom publishing too, not just the images: at 15.0 the camera still grabs at 30 but /localization/pose ran at 14 Hz.
+            pub_frame_rate: 30.0
+        depth:
+            depth_mode: 'PERFORMANCE'
+            min_depth: 0.3
+            max_depth: 10.0
+            point_cloud_freq: 5.0         # nobody consumes it in sub-project 1; kept cheap, not off, so sub-project 3 can turn it up
+        pos_tracking:
+            pos_tracking_enabled: true
+            pos_tracking_mode: 'GEN_1'
+            imu_fusion: true
+            publish_tf: true
+            publish_map_tf: true
+            area_memory: true             # the SDK's loop closure
+            reset_odom_with_loop_closure: true
+            set_gravity_as_origin: true
+            two_d_mode: false
+            floor_alignment: false
+        sensors:
+            publish_imu_tf: true
+            sensors_pub_rate: 100.0
+        mapping:
+            mapping_enabled: false        # sub-project 3
+        object_detection:
+            od_enabled: false
+        body_tracking:
+            bt_enabled: false
+        stream_server:
+            stream_enabled: false
+
+        # Image transport plugins, one parameter per image topic. Raw only.
+        # Nothing on the rover consumes the compressed streams: the ground
+        # station gets video from the video sender.
+        #
+        # Without these, every image topic also gets an ffmpeg publisher, which
+        # is 15 more publishers to create. That is nearly free on a quiet ROS
+        # domain (measured 2026-08-29: 4.9 s to odometry with them, 4.7 s
+        # without) but it is not free on this rover's domain 0, where creating
+        # publishers is slow for reasons outside this package - 88.6 s to
+        # odometry with them, ~21 s without. See localization.launch.py's
+        # docstring for the measurements and the cause.
+        #
+        # The name is what image_transport actually declares, read off the live
+        # node with `ros2 param list /zed_front/zed_node | grep enable_pub_plugins`:
+        # the node's namespace (/zed_front) is stripped but its name is not, and
+        # there is no leading dot - unlike ffmpeg_image_transport's own
+        # parameters, which are named `.zed_node.<topic>.ffmpeg.*`. The value is
+        # the transport name, i.e. the pluginlib class with '_pub' removed, so
+        # 'image_transport/raw_pub' is written 'image_transport/raw'.
+        #
+        # Keep this list in step with IMAGE_TOPICS in launch/localization.launch.py.
+        zed_node.depth.depth_registered.enable_pub_plugins: ['image_transport/raw']
+        zed_node.left.image_rect_color.enable_pub_plugins: ['image_transport/raw']
+        zed_node.left_gray.image_rect_gray.enable_pub_plugins: ['image_transport/raw']
+        zed_node.left_raw.image_raw_color.enable_pub_plugins: ['image_transport/raw']
+        zed_node.left_raw_gray.image_raw_gray.enable_pub_plugins: ['image_transport/raw']
+        zed_node.rgb.image_rect_color.enable_pub_plugins: ['image_transport/raw']
+        zed_node.rgb_gray.image_rect_gray.enable_pub_plugins: ['image_transport/raw']
+        zed_node.rgb_raw.image_raw_color.enable_pub_plugins: ['image_transport/raw']
+        zed_node.rgb_raw_gray.image_raw_gray.enable_pub_plugins: ['image_transport/raw']
+        zed_node.right.image_rect_color.enable_pub_plugins: ['image_transport/raw']
+        zed_node.right_gray.image_rect_gray.enable_pub_plugins: ['image_transport/raw']
+        zed_node.right_raw.image_raw_color.enable_pub_plugins: ['image_transport/raw']
+        zed_node.right_raw_gray.image_raw_gray.enable_pub_plugins: ['image_transport/raw']
+        zed_node.stereo.image_rect_color.enable_pub_plugins: ['image_transport/raw']
+        zed_node.stereo_raw.image_raw_color.enable_pub_plugins: ['image_transport/raw']
