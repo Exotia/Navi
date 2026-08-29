@@ -23,7 +23,7 @@ import numpy as np
 import rclpy
 from grid_map_msgs.msg import GridMap
 from rclpy.node import Node
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import PointCloud2, PointField
 from std_msgs.msg import Float32MultiArray, MultiArrayDimension
 
 from navi_localization.elevation_grid import RESOLUTION, ElevationGrid
@@ -37,11 +37,15 @@ def points_from_cloud(message: PointCloud2) -> np.ndarray:
     """(N, 3) float64 of the x/y/z columns of a float32 PointCloud2."""
     names = [field.name for field in message.fields]
     offsets = [field.offset for field in message.fields]
+    datatypes = [field.datatype for field in message.fields]
     if names[:3] != ['x', 'y', 'z'] or offsets[:3] != [0, 4, 8]:
         raise ValueError(
             f"fused cloud has an unexpected layout: fields={names} "
             f"offsets={offsets}. This node reads x/y/z as the first three "
             f"float32s of every point and will not guess at anything else.")
+    if datatypes[:3] != [PointField.FLOAT32] * 3:
+        raise ValueError(
+            f"fused cloud's x/y/z fields are not float32: datatypes={datatypes[:3]}")
     if message.is_bigendian:
         raise ValueError("fused cloud is big-endian; this node reads little-endian")
     if message.point_step % 4:

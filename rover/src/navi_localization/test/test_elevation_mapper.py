@@ -8,12 +8,14 @@ Needs grid_map_msgs and sensor_msgs importable, so:
 
 import numpy as np
 import pytest
+import rclpy
 from builtin_interfaces.msg import Time
 from sensor_msgs.msg import PointCloud2, PointField
 
-from navi_localization.elevation_grid import GridSnapshot
+from navi_localization.elevation_grid import GridSnapshot, RESOLUTION
 from navi_localization.elevation_mapper import (
-    LAYER, build_grid_map_message, points_from_cloud)
+    FUSED_CLOUD_TOPIC, LAYER, ElevationMapper, build_grid_map_message,
+    points_from_cloud)
 
 
 def cloud(points, with_rgb=True):
@@ -63,6 +65,14 @@ def test_a_cloud_with_an_unexpected_layout_is_refused_rather_than_misread():
 def test_a_big_endian_cloud_is_refused():
     message = cloud([(1.0, 2.0, 3.0)])
     message.is_bigendian = True
+
+    with pytest.raises(ValueError):
+        points_from_cloud(message)
+
+
+def test_a_cloud_whose_xyz_fields_are_not_float32_is_refused():
+    message = cloud([(1.0, 2.0, 3.0)])
+    message.fields[0].datatype = PointField.FLOAT64
 
     with pytest.raises(ValueError):
         points_from_cloud(message)
@@ -130,3 +140,81 @@ def test_the_circular_buffer_indices_are_left_at_zero():
 
     assert message.outer_start_index == 0
     assert message.inner_start_index == 0
+
+
+# Node-level tests: the node is exercised with messages fed straight into its
+# callbacks and its publisher replaced with a recorder, the same pattern
+# test_localization_status.py uses. No spinning, no executor - the timer is
+# ticked by calling _publish_if_changed() directly.
+
+
+class Recorder:
+    def __init__(self):
+        self.messages = []
+
+    def publish(self, msg):
+        self.messages.append(msg)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def ros():
+    rclpy.init()
+    yield
+    rclpy.shutdown()
+
+
+@pytest.fixture
+def node():
+    n = ElevationMapper()
+    n._publisher = Recorder()
+    yield n
+    n.destroy_node()
+
+
+def test_a_cloud_then_a_tick_publishes_one_grid_map(node):
+    node._on_cloud(cloud([(0.05, 0.05, 1.0), (0.25, 0.05, 2.0)]))
+    node._publish_if_changed()
+
+    assert len(node._publisher.messages) == 1
+    message = node._publisher.messages[0]
+    assert message.header.frame_id == 'map'
+    assert message.layers == [LAYER]
+    assert message.info.resolution == pytest.approx(RESOLUTION)
+    layer = message.data[0]
+    assert len(layer.data) == layer.layout.dim[0].size * layer.layout.dim[1].size
+
+
+def test_a_second_tick_without_a_new_cloud_publishes_nothing(node):
+    node._on_cloud(cloud([(0.05, 0.05, 1.0), (0.25, 0.05, 2.0)]))
+    node._publish_if_changed()
+
+    node._publish_if_changed()
+
+    assert len(node._publisher.messages) == 1
+
+
+def test_a_changed_cloud_then_a_tick_publishes_again(node):
+    node._on_cloud(cloud([(0.05, 0.05, 1.0), (0.25, 0.05, 2.0)]))
+    node._publish_if_changed()
+
+    # Same cell, different z - the grid replaces rather than accumulates, so
+    # this changes the published mean and should trigger a republish.
+    node._on_cloud(cloud([(0.05, 0.05, 9.0), (0.25, 0.05, 2.0)]))
+    node._publish_if_changed()
+
+    assert len(node._publisher.messages) == 2
+
+
+def test_a_malformed_cloud_is_logged_and_does_not_publish(node):
+    message = cloud([(1.0, 2.0, 3.0)])
+    message.fields[0].name = 'intensity'
+
+    node._on_cloud(message)
+    node._publish_if_changed()
+
+    assert node._publisher.messages == []
+
+
+def test_the_node_subscribes_only_the_fused_cloud_topic(node):
+    topics = [s.topic_name for s in node.subscriptions]
+    assert topics == [FUSED_CLOUD_TOPIC]
