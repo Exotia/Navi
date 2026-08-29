@@ -17,17 +17,18 @@ domain from the rover's domain 0 through sim_bridge (sub-project 2); this
 node knows nothing about domains and simply subscribes.
 
 Each replacement gets its own mesh file name and its own model name
-(terrain_<ix>_<iy>_g<generation>, generation only ever increasing per
-tile). Two reasons: Gazebo's MeshManager caches meshes by file name, so
-respawning with the same mesh name would put the *previous* terrain back
-on the screen while every log line says the new one was loaded; and a
-model name can only be reused once Gazebo confirms the old one is gone, so
-a name that is ever repeated (the old a/b alternation) will eventually
-collide with a model whose delete is still stuck, and Gazebo refuses the
-spawn outright ("Entity [...] already exists"). Generation-numbered names
-make that collision structurally impossible - see `_delete_model`/`_doomed`
-below for the other half of the fix: a delete failure used to be silently
-dropped, orphaning the model forever.
+(terrain_<ix>_<iy>_<run id>_g<generation>, generation only ever increasing
+per tile, run id drawn once per process). Two reasons: Gazebo's MeshManager
+caches meshes by file name, so respawning with the same mesh name would put
+the *previous* terrain back on the screen while every log line says the new
+one was loaded; and a model name can only be reused once Gazebo confirms
+the old one is gone, so a name that is ever repeated (the old a/b
+alternation) will eventually collide with a model whose delete is still
+stuck, and Gazebo refuses the spawn outright ("Entity [...] already
+exists"). The generation number rules that out within a run and the run id
+rules it out across runs - see `_delete_model`/`_doomed` below for the
+other half of the fix: a delete failure used to be silently dropped,
+orphaning the model forever.
 
 Round 3: under sustained tile churn (several replacements a second across
 many tiles), /delete_entity was observed answering success=True while the
@@ -51,9 +52,18 @@ requests are outstanding at once. Two fixes:
    At start-up, any terrain_* model already in the world (left over from a
    previous, uncleanly stopped run) is found the same way and deleted
    through the same bounded path.
+
+Round 4: the same live run showed factory requests that simply never come
+back - neither success nor failure, just a future that never resolves.
+Every dispatched request therefore carries its dispatch time and a token;
+`_pump` treats anything older than FACTORY_REQUEST_TIMEOUT_S as failed,
+frees its slot and retries it, and the token makes a late resolution a
+no-op so a slot is never released twice. Without that watchdog, four
+stalled requests wedged the shared budget shut forever.
 """
 
 import os
+import re
 import time
 
 import numpy as np
@@ -84,18 +94,36 @@ def tile_index_of(pose_x: float, pose_y: float):
             int(round((pose_y - _CENTER_OFFSET) / TILE_M)))
 
 
-def model_name(key, generation: int) -> str:
-    """Every generation of every tile gets its own name, forever.
+def model_name(key, generation: int, run_id: str) -> str:
+    """Every generation of every tile gets its own name, for this run and
+    for any run that overlaps a leftover of a previous one.
 
     Not a/b alternation: that reused a name every other replacement, and a
     name can only safely be reused once Gazebo has confirmed the old model
     holding it is gone. A delete that is still stuck (see `_doomed`)
     then made the *next* spawn of that name fail with "already exists" -
     observed in the field as thousands of such errors and stray models
-    left on screen. Monotonically increasing names make the collision
-    impossible regardless of how many deletes are stuck.
+    left on screen.
+
+    The guarantee is: within one process, `generation` only ever increases
+    per tile, so a name is never reused however many deletes are stuck;
+    across processes, `run_id` (6 random hex characters, drawn once per
+    TerrainWriter) makes a fresh run's names disjoint from any leftover of
+    an earlier run that the start-up sweep has not finished deleting yet.
+    It is not a mathematical impossibility - two runs can in principle draw
+    the same 6 hex characters (about 1 in 16.8 million) - but nothing weaker
+    than a random run id would survive an unclean restart at all, because
+    generation numbers restart at 0.
     """
-    return f"terrain_{key[0]}_{key[1]}_g{generation}"
+    return f"terrain_{key[0]}_{key[1]}_{run_id}_g{generation}"
+
+
+# Names this node may have spawned, in any build: the current
+# terrain_<ix>_<iy>_<runid>_g<N>, the run-id-less form that preceded it, and
+# the original a/b alternation. Used by the start-up sweep, which must clean
+# up leftovers from *any* previous run, not just ones this build wrote.
+LEFTOVER_MODEL_RE = re.compile(
+    r'^terrain_-?\d+_-?\d+_(?:[0-9a-f]{6}_g\d+|g\d+|[ab])$')
 
 
 def elevation_from_message(message: GridMap):
@@ -188,6 +216,14 @@ class TerrainWriter(Node):
     # made Gazebo's factory service unreliable.
     MAX_FACTORY_IN_FLIGHT = 4
 
+    # How long a dispatched SpawnEntity/DeleteEntity request may go
+    # unanswered before it is written off as failed and its budget slot
+    # freed. Gazebo answers in milliseconds when it answers at all; the
+    # failure mode this guards against is a request that never comes back,
+    # which without a watchdog holds its slot forever and (four of them)
+    # wedges the whole node.
+    FACTORY_REQUEST_TIMEOUT_S = 10.0
+
     # How often /get_model_list is polled while anything is doomed, and how
     # long a model may stay listed after a "successful" delete response
     # before that response is disbelieved and the delete is re-sent.
@@ -210,6 +246,14 @@ class TerrainWriter(Node):
         # `_remove`, which stamp the policy with `self._clock_fn()` at their own
         # execution time, not with whenever `_pump` happened to be called.
         self._clock_fn = time.monotonic
+        # Six random hex characters, drawn once per process and baked into
+        # every model name (see `model_name`). Generation numbers restart at
+        # 0 on every start, so without this a fresh spawn of tile (0, 0)
+        # after an unclean restart would ask for terrain_0_0_g0 while the
+        # previous run's terrain_0_0_g0 was still in the world, waiting for
+        # the start-up sweep's delete to confirm - and Gazebo would refuse
+        # it with "already exists".
+        self._run_id = os.urandom(3).hex()
         self._policy = TileRespawnPolicy()
         self._generation = {}     # key -> int, only ever increases
         self._current = {}        # key -> model name on screen
@@ -229,7 +273,15 @@ class TerrainWriter(Node):
         # Total SpawnEntity + DeleteEntity requests dispatched and not yet
         # answered, across every tile - see MAX_FACTORY_IN_FLIGHT.
         self._max_factory_in_flight = self.MAX_FACTORY_IN_FLIGHT
-        self._factory_in_flight = 0
+        self._factory_timeout = self.FACTORY_REQUEST_TIMEOUT_S
+        # token -> {'kind', 'dispatched_at', 'model', and, for a spawn, the
+        # 'key'/'payload'/'mesh_name' needed to hand the tile back to the
+        # policy if the request is written off. `_factory_in_flight` is just
+        # this dict's size; the token is what makes releasing a slot
+        # idempotent, so a response that arrives after the watchdog already
+        # wrote the request off cannot free a second, unrelated slot.
+        self._factory_requests = {}
+        self._next_factory_token = 0
         self._model_list_interval = self.MODEL_LIST_POLL_INTERVAL_S
         self._delete_confirm_grace = self.DELETE_CONFIRM_GRACE_S
         self._last_list_poll = None
@@ -250,7 +302,64 @@ class TerrainWriter(Node):
         self.create_timer(0.25, self._pump)
         self.get_logger().info(
             f"terrain tiles under {self._model_dir}; one model per 2.5 m tile, "
-            "replaced at most once a second, spawned before the old one is deleted")
+            "replaced at most once a second, spawned before the old one is "
+            f"deleted; this run's models are named terrain_<ix>_<iy>_"
+            f"{self._run_id}_g<n>")
+
+    @property
+    def _factory_in_flight(self) -> int:
+        """SpawnEntity + DeleteEntity requests dispatched and unanswered."""
+        return len(self._factory_requests)
+
+    def _claim_factory_slot(self, kind: str, now, **context) -> int:
+        """Takes one of the shared factory slots and returns its token."""
+        self._next_factory_token += 1
+        token = self._next_factory_token
+        self._factory_requests[token] = dict(
+            kind=kind,
+            dispatched_at=self._clock_fn() if now is None else now,
+            **context)
+        return token
+
+    def _release_factory_slot(self, token: int) -> bool:
+        """True if this call released the slot, False if it was already gone.
+
+        False means the watchdog wrote the request off first, and the caller
+        (a late `_on_spawned`/`_on_deleted`) must not do any accounting: the
+        tile has already been handed back to the policy and possibly
+        re-dispatched, so a second release would free somebody else's slot.
+        """
+        return self._factory_requests.pop(token, None) is not None
+
+    def _expire_stalled_factory_requests(self, now: float) -> None:
+        """Writes off factory requests Gazebo never answered.
+
+        Round 2's live run saw SpawnEntity/DeleteEntity futures that never
+        resolved either way. Their slots were only ever freed by a response,
+        so four of them permanently wedged the shared budget and the node
+        stopped spawning and deleting anything at all, silently. A written-off
+        request is treated exactly like a failed one: the tile goes back to
+        the policy for a retry, a doomed model keeps its counted attempt and
+        becomes due again.
+        """
+        for token, entry in list(self._factory_requests.items()):
+            waited = now - entry['dispatched_at']
+            if waited < self._factory_timeout:
+                continue
+            del self._factory_requests[token]
+            self.get_logger().warn(
+                f"{entry['kind']} of {entry['model']} was never answered by "
+                f"Gazebo ({waited:.1f}s); treating it as failed and freeing "
+                "the factory slot")
+            if entry['kind'] == 'spawn':
+                self._unlink(entry['mesh_name'])       # nothing will load it
+                self._policy.finished(
+                    entry['key'], entry['payload'], self._clock_fn(), ok=False)
+                continue
+            doomed = self._doomed.get(entry['model'])
+            if doomed is not None:
+                doomed['in_flight'] = False            # due again after the interval
+            self._maybe_give_up(entry['model'])
 
     def _on_tile(self, message: GridMap) -> None:
         try:
@@ -283,6 +392,7 @@ class TerrainWriter(Node):
             self._startup_scan_done = True
             self._scan_for_leftover_models()
 
+        self._expire_stalled_factory_requests(now)
         self._maybe_poll_model_list(now)
 
         for model, entry in list(self._doomed.items()):
@@ -312,7 +422,7 @@ class TerrainWriter(Node):
                 continue                    # wait its turn; still pending next tick
             self._policy.started(key)
             try:
-                self._replace(key, payload)
+                self._replace(key, payload, now)
             except Exception as exc:                    # noqa: BLE001
                 # Writing the mesh file, building the SDF, or call_async
                 # itself can all raise before any future/callback exists to
@@ -323,29 +433,39 @@ class TerrainWriter(Node):
                     f"dispatching a replacement for tile {key} failed: {exc}")
                 self._policy.finished(key, payload, self._clock_fn(), ok=False)
 
-    def _replace(self, key, payload: bytes) -> None:
+    def _replace(self, key, payload: bytes, now: float = None) -> None:
         self._version += 1
         name = f"tile_{key[0]}_{key[1]}_v{self._version:05d}.obj"
         with open(os.path.join(self._mesh_dir, name), 'wb') as handle:
             handle.write(payload)
-        self._factory_in_flight += 1
+        generation = self._generation.get(key, -1) + 1
+        model = model_name(key, generation, self._run_id)
+        token = self._claim_factory_slot(
+            'spawn', now, model=model, key=key, payload=payload, mesh_name=name)
         try:
-            generation = self._generation.get(key, -1) + 1
-            model = model_name(key, generation)
             sdf = terrain_sdf(f"model://{GAZEBO_MODEL_NAME}/meshes/{name}", model)
             request = SpawnEntity.Request()
             request.name = model
             request.xml = sdf
             future = self._spawn.call_async(request)
         except Exception:
-            self._factory_in_flight -= 1
+            self._release_factory_slot(token)
             self._unlink(name)                          # nothing will load it now
             raise
         future.add_done_callback(
-            lambda done: self._on_spawned(done, key, payload, model, name, generation))
+            lambda done: self._on_spawned(
+                done, token, key, payload, model, name, generation))
 
-    def _on_spawned(self, future, key, payload, model, mesh_name, generation) -> None:
-        self._factory_in_flight = max(0, self._factory_in_flight - 1)
+    def _on_spawned(self, future, token, key, payload, model, mesh_name,
+                    generation) -> None:
+        if not self._release_factory_slot(token):
+            # The watchdog already wrote this request off and handed the
+            # tile back to the policy; doing any of that again here would
+            # free a slot this request no longer holds.
+            self.get_logger().warn(
+                f"spawning {model} was answered after it had already timed "
+                "out; ignoring the late answer")
+            return
         # Stamped with the clock at completion time, not with whatever
         # `now` `_pump` was dispatched at: Gazebo can take a while to
         # answer, and the per-tile 1 s cap must count from when the
@@ -403,19 +523,25 @@ class TerrainWriter(Node):
         entry['attempts'] += 1
         entry['last_attempt'] = self._clock_fn() if now is None else now
         entry['in_flight'] = True
-        self._factory_in_flight += 1
+        token = self._claim_factory_slot('delete', now, model=model)
         try:
             future = self._delete.call_async(DeleteEntity.Request(name=model))
         except Exception as exc:                        # noqa: BLE001
             entry['in_flight'] = False
-            self._factory_in_flight = max(0, self._factory_in_flight - 1)
+            self._release_factory_slot(token)
             self.get_logger().warn(f"deleting {model} failed to dispatch: {exc}")
             self._maybe_give_up(model)
             return
-        future.add_done_callback(lambda done: self._on_deleted(done, model))
+        future.add_done_callback(lambda done: self._on_deleted(done, token, model))
 
-    def _on_deleted(self, future, model: str) -> None:
-        self._factory_in_flight = max(0, self._factory_in_flight - 1)
+    def _on_deleted(self, future, token: int, model: str) -> None:
+        if not self._release_factory_slot(token):
+            # Written off by the watchdog already - the doomed entry has been
+            # freed for a retry (or given up on) without this answer.
+            self.get_logger().warn(
+                f"deleting {model} was answered after it had already timed "
+                "out; ignoring the late answer")
+            return
         entry = self._doomed.get(model)
         if entry is None:
             return                                      # already given up
@@ -489,9 +615,14 @@ class TerrainWriter(Node):
                 entry['last_attempt'] = float('-inf')   # due again on the next _pump
 
     def _scan_for_leftover_models(self) -> None:
-        """Deletes any terrain_* model already in the world at start-up -
+        """Deletes any terrain tile model already in the world at start-up -
         left over from a previous, uncleanly stopped run - through the same
-        bounded delete path as everything else."""
+        bounded delete path as everything else.
+
+        Leftovers carry a *different* run id (or none at all, from an older
+        build), so this run's own names can never be caught by the sweep,
+        and no leftover is missed for being from a build that named its
+        models differently - see LEFTOVER_MODEL_RE."""
         try:
             future = self._model_list.call_async(GetModelList.Request())
         except Exception as exc:                        # noqa: BLE001
@@ -506,11 +637,17 @@ class TerrainWriter(Node):
         except Exception as exc:                        # noqa: BLE001
             self.get_logger().warn(f"listing existing models at start-up failed: {exc}")
             return
-        leftovers = [name for name in names if name.startswith('terrain_')]
+        # The list is a snapshot taken some time ago; this run may already
+        # have spawned a tile of its own by now, and deleting that would be
+        # a self-inflicted wound. Its run id tells it apart from every
+        # leftover, which is one more thing the run id buys.
+        leftovers = [name for name in names
+                     if LEFTOVER_MODEL_RE.match(name)
+                     and f'_{self._run_id}_' not in name]
         if leftovers:
             self.get_logger().warn(
-                f"{len(leftovers)} leftover terrain_* model(s) from a previous run "
-                "found in Gazebo at start-up; deleting them")
+                f"{len(leftovers)} leftover terrain tile model(s) from a previous "
+                "run found in Gazebo at start-up; deleting them")
         for name in leftovers:
             self._delete_model(name, None)
 

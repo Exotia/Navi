@@ -14,7 +14,8 @@ from grid_map_msgs.msg import GridMap
 from std_msgs.msg import Float32MultiArray, MultiArrayDimension
 
 from navi_sim_bringup.terrain_writer import (
-    LAYER, TileRespawnPolicy, elevation_from_message, model_name, tile_index_of)
+    LAYER, LEFTOVER_MODEL_RE, TerrainWriter, TileRespawnPolicy,
+    elevation_from_message, model_name, tile_index_of)
 
 
 def message(grid_rows, grid_cols, values, resolution=0.10,
@@ -78,9 +79,44 @@ def test_a_circular_buffer_message_is_refused_rather_than_read_wrongly():
 
 
 def test_model_names_are_unique_per_generation():
-    assert model_name((3, -2), 0) == 'terrain_3_-2_g0'
-    assert model_name((3, -2), 1) == 'terrain_3_-2_g1'
-    assert model_name((3, -2), 2) == 'terrain_3_-2_g2'
+    assert model_name((3, -2), 0, 'a1b2c3') == 'terrain_3_-2_a1b2c3_g0'
+    assert model_name((3, -2), 1, 'a1b2c3') == 'terrain_3_-2_a1b2c3_g1'
+    assert model_name((3, -2), 2, 'a1b2c3') == 'terrain_3_-2_a1b2c3_g2'
+
+
+def test_model_names_from_different_runs_never_collide():
+    # Generations restart at 0 on every process start, so the run id is the
+    # only thing keeping a fresh spawn off a leftover of the same tile whose
+    # delete has not confirmed yet.
+    for generation in range(3):
+        assert (model_name((3, -2), generation, 'a1b2c3')
+                != model_name((3, -2), generation, 'd4e5f6'))
+
+
+def test_the_leftover_sweep_matches_tile_models_from_any_run_and_any_build():
+    assert LEFTOVER_MODEL_RE.match('terrain_3_-2_a1b2c3_g0')     # this build
+    assert LEFTOVER_MODEL_RE.match('terrain_-4_11_ffffff_g137')
+    assert LEFTOVER_MODEL_RE.match('terrain_3_-2_g0')            # before run ids
+    assert LEFTOVER_MODEL_RE.match('terrain_3_-2_a')             # the a/b build
+    assert LEFTOVER_MODEL_RE.match('terrain_3_-2_b')
+    assert not LEFTOVER_MODEL_RE.match('terrain_of_someone_else')
+    assert not LEFTOVER_MODEL_RE.match('rover')
+    assert not LEFTOVER_MODEL_RE.match('ground_plane')
+
+
+def test_two_writers_never_name_the_same_tile_generation_alike(tmp_path):
+    rclpy.init()
+    first = TerrainWriter(model_dir=str(tmp_path / 'one'))
+    second = TerrainWriter(model_dir=str(tmp_path / 'two'))
+    try:
+        assert first._run_id != second._run_id
+        for generation in range(3):
+            assert (model_name((0, 0), generation, first._run_id)
+                    != model_name((0, 0), generation, second._run_id))
+    finally:
+        first.destroy_node()
+        second.destroy_node()
+        rclpy.shutdown()
 
 
 def test_tile_index_of_matches_the_rovers_convention():
@@ -133,9 +169,6 @@ def test_a_failed_spawn_keeps_the_tile_pending_for_a_retry():
     policy.started((0, 0))
     policy.finished((0, 0), b'a', now=0.0, ok=False)
     assert policy.next_due(now=1.0) == [((0, 0), b'a')]
-
-
-from navi_sim_bringup.terrain_writer import TerrainWriter
 
 
 class FakeFuture:
@@ -220,6 +253,15 @@ def writer(tmp_path):
     rclpy.shutdown()
 
 
+def tile_name(writer, generation, key=(0, 0)):
+    """The model name `writer` gives `key`'s `generation`-th spawn.
+
+    Not a literal: the name carries the writer's own random run id, which
+    is what keeps a restarted node's spawns off a previous run's leftovers.
+    """
+    return model_name(key, generation, writer._run_id)
+
+
 def tile_message(key, value=1.0):
     from navi_sim_bringup.terrain_writer import TILE_SAMPLES, tile_center
     cx, cy = tile_center(*key)
@@ -231,7 +273,7 @@ def test_the_replacement_is_spawned_before_the_old_tile_is_deleted(writer):
     writer._on_tile(tile_message((0, 0), 1.0))
     writer._pump(now=0.0)
     request, future = writer._spawn.calls[0]
-    assert request.name == 'terrain_0_0_g0'
+    assert request.name == tile_name(writer, 0)
     writer._clock_fn.set(0.0)
     future.resolve(Response())
     assert writer._delete.calls == []                    # nothing to delete yet
@@ -239,15 +281,15 @@ def test_the_replacement_is_spawned_before_the_old_tile_is_deleted(writer):
     writer._on_tile(tile_message((0, 0), 2.0))
     writer._pump(now=2.0)
     request, future = writer._spawn.calls[1]
-    assert request.name == 'terrain_0_0_g1'
+    assert request.name == tile_name(writer, 1)
     assert writer._delete.calls == []                    # old one still standing
     writer._clock_fn.set(2.0)
     future.resolve(Response())
     assert writer._delete.calls == []                    # doomed, not dispatched yet
-    assert 'terrain_0_0_g0' in writer._doomed
+    assert tile_name(writer, 0) in writer._doomed
 
     writer._pump(now=2.1)                                 # dispatches the bounded delete
-    assert [r.name for r, _ in writer._delete.calls] == ['terrain_0_0_g0']
+    assert [r.name for r, _ in writer._delete.calls] == [tile_name(writer, 0)]
 
 
 def test_a_failed_spawn_leaves_the_old_tile_and_deletes_nothing(writer):
@@ -260,7 +302,7 @@ def test_a_failed_spawn_leaves_the_old_tile_and_deletes_nothing(writer):
     writer._clock_fn.set(2.0)
     writer._spawn.calls[1][1].resolve(Response(False, 'nope'))
     assert writer._delete.calls == []
-    assert writer._current[(0, 0)] == 'terrain_0_0_g0'
+    assert writer._current[(0, 0)] == tile_name(writer, 0)
 
 
 def test_an_all_nan_tile_deletes_the_model(writer):
@@ -272,11 +314,11 @@ def test_an_all_nan_tile_deletes_the_model(writer):
     writer._clock_fn.set(2.0)
     writer._pump(now=2.0)
     assert writer._delete.calls == []                    # doomed, not dispatched yet
-    assert 'terrain_0_0_g0' in writer._doomed
+    assert tile_name(writer, 0) in writer._doomed
     assert len(writer._spawn.calls) == 1
 
     writer._pump(now=2.1)                                 # dispatches the bounded delete
-    assert [r.name for r, _ in writer._delete.calls] == ['terrain_0_0_g0']
+    assert [r.name for r, _ in writer._delete.calls] == [tile_name(writer, 0)]
     assert len(writer._spawn.calls) == 1
 
 
@@ -292,7 +334,7 @@ def test_the_rate_cap_is_measured_from_when_gazebo_confirms_not_when_dispatched(
 
     writer._pump(now=3.0)
     assert len(writer._spawn.calls) == 2
-    assert writer._spawn.calls[1][0].name == 'terrain_0_0_g1'
+    assert writer._spawn.calls[1][0].name == tile_name(writer, 1)
 
 
 def test_a_dispatch_error_does_not_strand_the_tile_in_flight(writer):
@@ -347,7 +389,7 @@ def test_repeated_replacements_never_collide_even_when_deletes_never_succeed(wri
         if writer._delete.calls:
             writer._delete.calls[-1][1].resolve(Response(False, 'nope'))  # delete never succeeds
 
-    assert names == ['terrain_0_0_g0', 'terrain_0_0_g1', 'terrain_0_0_g2', 'terrain_0_0_g3']
+    assert names == [tile_name(writer, 0), tile_name(writer, 1), tile_name(writer, 2), tile_name(writer, 3)]
     assert len(set(names)) == 4
 
 
@@ -360,22 +402,22 @@ def test_a_failed_delete_is_retried_after_the_interval_and_stays_tracked(writer)
     writer._on_tile(tile_message((0, 0), 2.0))
     writer._pump(now=1.0)
     writer._clock_fn.set(1.0)
-    writer._spawn.calls[1][1].resolve(Response())          # dooms terrain_0_0_g0
+    writer._spawn.calls[1][1].resolve(Response())          # dooms generation 0
     assert writer._delete.calls == []                      # registered, not dispatched yet
 
     writer._pump(now=1.1)                                   # dispatches the first attempt
     assert len(writer._delete.calls) == 1
     writer._clock_fn.set(1.1)
     writer._delete.calls[0][1].resolve(Response(False, 'busy'))
-    assert 'terrain_0_0_g0' in writer._doomed               # still tracked after failure
+    assert tile_name(writer, 0) in writer._doomed               # still tracked after failure
 
     writer._pump(now=1.6)                                    # only 0.5 s since the attempt
     assert len(writer._delete.calls) == 1                    # not retried yet
 
     writer._pump(now=2.1)                                     # 1.0 s since the attempt
     assert len(writer._delete.calls) == 2                     # retried
-    assert writer._delete.calls[1][0].name == 'terrain_0_0_g0'
-    assert 'terrain_0_0_g0' in writer._doomed
+    assert writer._delete.calls[1][0].name == tile_name(writer, 0)
+    assert tile_name(writer, 0) in writer._doomed
 
 
 def test_a_delete_is_untracked_and_the_mesh_unlinked_once_the_model_list_confirms_absence(writer):
@@ -390,19 +432,19 @@ def test_a_delete_is_untracked_and_the_mesh_unlinked_once_the_model_list_confirm
     writer._on_tile(tile_message((0, 0), 2.0))
     writer._pump(now=1.0)
     writer._clock_fn.set(1.0)
-    writer._spawn.calls[1][1].resolve(Response())          # dooms terrain_0_0_g0
+    writer._spawn.calls[1][1].resolve(Response())          # dooms generation 0
 
     writer._pump(now=1.1)                                   # dispatches the delete + a poll
     assert len(writer._delete.calls) == 1
     assert len(writer._model_list.calls) == 1
     writer._clock_fn.set(1.1)
     writer._delete.calls[0][1].resolve(Response(True))       # "success" - not trusted alone
-    assert 'terrain_0_0_g0' in writer._doomed
+    assert tile_name(writer, 0) in writer._doomed
     assert os.path.exists(old_mesh_path)
 
-    writer._model_list.calls[0][1].resolve(Response(model_names=['terrain_0_0_g1']))  # g0 is gone
+    writer._model_list.calls[0][1].resolve(Response(model_names=[tile_name(writer, 1)]))  # g0 is gone
 
-    assert 'terrain_0_0_g0' not in writer._doomed
+    assert tile_name(writer, 0) not in writer._doomed
     assert not os.path.exists(old_mesh_path)
 
 
@@ -415,31 +457,31 @@ def test_a_model_still_listed_two_seconds_after_a_successful_delete_is_re_sent(w
     writer._on_tile(tile_message((0, 0), 2.0))
     writer._pump(now=1.0)
     writer._clock_fn.set(1.0)
-    writer._spawn.calls[1][1].resolve(Response())            # dooms terrain_0_0_g0
+    writer._spawn.calls[1][1].resolve(Response())            # dooms generation 0
 
     writer._pump(now=2.0)                                     # dispatches poll + first attempt
-    still_there = Response(model_names=['terrain_0_0_g0', 'terrain_0_0_g1'])
+    still_there = Response(model_names=[tile_name(writer, 0), tile_name(writer, 1)])
     writer._model_list.calls[0][1].resolve(still_there)
     writer._clock_fn.set(2.0)
     writer._delete.calls[0][1].resolve(Response(True))        # "success" - not trusted alone
-    assert 'terrain_0_0_g0' in writer._doomed
-    assert writer._doomed['terrain_0_0_g0']['confirmed_at'] == 2.0
+    assert tile_name(writer, 0) in writer._doomed
+    assert writer._doomed[tile_name(writer, 0)]['confirmed_at'] == 2.0
 
     writer._pump(now=3.0)                                      # polls again (1 s since last poll)
     writer._clock_fn.set(3.0)
     writer._model_list.calls[1][1].resolve(still_there)
-    assert 'terrain_0_0_g0' in writer._doomed                  # only 1 s since confirmed - not yet
+    assert tile_name(writer, 0) in writer._doomed                  # only 1 s since confirmed - not yet
     assert len(writer._delete.calls) == 1                      # no re-send yet
 
     writer._pump(now=4.0)                                       # polls again (2 s since confirmed)
     writer._clock_fn.set(4.0)
     writer._model_list.calls[2][1].resolve(still_there)
-    assert writer._doomed['terrain_0_0_g0']['confirmed_at'] is None    # reset, due again
+    assert writer._doomed[tile_name(writer, 0)]['confirmed_at'] is None    # reset, due again
 
     writer._pump(now=4.1)                                        # dispatches the re-sent delete
     assert len(writer._delete.calls) == 2
-    assert writer._delete.calls[1][0].name == 'terrain_0_0_g0'
-    assert 'terrain_0_0_g0' in writer._doomed                    # stays tracked throughout
+    assert writer._delete.calls[1][0].name == tile_name(writer, 0)
+    assert tile_name(writer, 0) in writer._doomed                    # stays tracked throughout
 
 
 def test_remove_with_a_failing_delete_keeps_retrying(writer):
@@ -452,19 +494,19 @@ def test_remove_with_a_failing_delete_keeps_retrying(writer):
     writer._clock_fn.set(1.0)
     writer._pump(now=1.0)                                    # _remove registers the doomed model
     assert writer._delete.calls == []
-    assert 'terrain_0_0_g0' in writer._doomed
+    assert tile_name(writer, 0) in writer._doomed
 
     writer._pump(now=1.1)                                     # dispatches the first attempt
     assert len(writer._delete.calls) == 1
     writer._delete.calls[0][1].resolve(Response(False, 'nope'))
-    assert 'terrain_0_0_g0' in writer._doomed
+    assert tile_name(writer, 0) in writer._doomed
 
     writer._pump(now=1.6)
     assert len(writer._delete.calls) == 1                     # not due yet
 
     writer._pump(now=2.2)
     assert len(writer._delete.calls) == 2                     # retried
-    assert writer._delete.calls[1][0].name == 'terrain_0_0_g0'
+    assert writer._delete.calls[1][0].name == tile_name(writer, 0)
 
 
 def test_giving_up_after_the_retry_cap_stops_tracking_and_retrying(writer):
@@ -477,18 +519,18 @@ def test_giving_up_after_the_retry_cap_stops_tracking_and_retrying(writer):
     writer._on_tile(tile_message((0, 0), 2.0))
     writer._pump(now=1.0)
     writer._clock_fn.set(1.0)
-    writer._spawn.calls[1][1].resolve(Response())            # dooms terrain_0_0_g0
+    writer._spawn.calls[1][1].resolve(Response())            # dooms generation 0
 
     writer._pump(now=1.1)                                     # attempt 1 dispatched
-    assert 'terrain_0_0_g0' in writer._doomed
+    assert tile_name(writer, 0) in writer._doomed
     writer._delete.calls[0][1].resolve(Response(False, 'nope'))   # attempt 1 fails (1 < cap 2)
-    assert 'terrain_0_0_g0' in writer._doomed
+    assert tile_name(writer, 0) in writer._doomed
 
     writer._clock_fn.set(2.2)
     writer._pump(now=2.2)                                     # attempt 2 dispatched
     writer._delete.calls[1][1].resolve(Response(False, 'nope'))   # attempt 2 fails (2 >= cap 2)
 
-    assert 'terrain_0_0_g0' not in writer._doomed              # gave up
+    assert tile_name(writer, 0) not in writer._doomed              # gave up
 
     writer._clock_fn.set(10.0)
     writer._pump(now=10.0)
@@ -571,7 +613,7 @@ def test_deletes_and_spawns_share_one_factory_budget_not_one_each(writer):
     requests chasing one shared budget of four - all in a single `_pump`.
     """
     for i in range(3):
-        writer._doomed[f'terrain_{i}_0_g0'] = {
+        writer._doomed[model_name((i, 0), 0, writer._run_id)] = {
             'mesh_name': None, 'attempts': 0, 'last_attempt': float('-inf'),
             'in_flight': False, 'confirmed_at': None,
         }
@@ -596,16 +638,147 @@ def test_leftover_terrain_models_from_a_previous_run_are_deleted_through_the_bou
     node._model_list = FakeService()
     node._clock_fn = FakeClock(0.0)
     try:
+        other_run = 'a1b2c3' if node._run_id != 'a1b2c3' else 'd4e5f6'
+        leftovers = [
+            f'terrain_1_2_{other_run}_g3',      # a previous run of this build
+            'terrain_5_5_g0',                   # a build from before run ids
+            'terrain_-2_4_b',                   # the original a/b build
+        ]
+        mine = model_name((0, 0), 0, node._run_id)
+
         node._pump(now=0.0)                    # triggers the start-up leftover scan
         assert len(node._model_list.calls) == 1
-        node._model_list.calls[0][1].resolve(Response(model_names=[
-            'terrain_1_2_g3', 'terrain_5_5_g0', 'rover', 'ground_plane']))
+        node._model_list.calls[0][1].resolve(Response(
+            model_names=leftovers + [mine, 'rover', 'ground_plane']))
 
-        assert set(node._doomed) == {'terrain_1_2_g3', 'terrain_5_5_g0'}
+        # Every leftover naming scheme is swept; this run's own tile is not,
+        # nor is anything that is not a terrain tile.
+        assert set(node._doomed) == set(leftovers)
         assert node._delete.calls == []             # registered, not dispatched yet
 
         node._pump(now=1.0)                          # dispatches the bounded deletes
-        assert {r.name for r, _ in node._delete.calls} == {'terrain_1_2_g3', 'terrain_5_5_g0'}
+        assert {r.name for r, _ in node._delete.calls} == set(leftovers)
     finally:
         node.destroy_node()
         rclpy.shutdown()
+
+
+def test_a_spawn_that_is_never_answered_frees_its_slot_and_is_retried(writer):
+    """Round 2's live run saw factory requests that never came back at all.
+
+    Their slots were only freed by a response, so four of them wedged the
+    shared budget shut forever and the node silently stopped drawing.
+    """
+    writer._on_tile(tile_message((0, 0), 1.0))
+    writer._pump(now=0.0)
+    assert len(writer._spawn.calls) == 1
+    assert writer._factory_in_flight == 1
+    mesh_path = os.path.join(
+        writer._mesh_dir, f'tile_0_0_v{writer._version:05d}.obj')
+    assert os.path.exists(mesh_path)
+
+    writer._pump(now=9.9)                       # still inside the timeout
+    assert writer._factory_in_flight == 1
+    assert len(writer._spawn.calls) == 1
+
+    writer._clock_fn.set(10.0)
+    writer._pump(now=10.0)                       # written off, slot freed
+    assert writer._factory_in_flight == 0
+    assert not os.path.exists(mesh_path)          # nothing will ever load it
+    assert len(writer._spawn.calls) == 1
+    assert writer._current == {}                  # nothing is on screen
+
+    writer._pump(now=11.0)                        # retried, once the 1 s/tile cap allows
+    assert len(writer._spawn.calls) == 2
+    assert writer._spawn.calls[1][0].name == tile_name(writer, 0)   # same generation
+    assert writer._factory_in_flight == 1
+
+
+def test_four_stalled_spawns_do_not_wedge_the_budget_forever(writer):
+    for i in range(6):
+        writer._on_tile(tile_message((i, 0), float(i)))
+
+    writer._pump(now=0.0)
+    assert len(writer._spawn.calls) == 4          # the whole budget, all stalled
+    writer._pump(now=1.0)
+    assert len(writer._spawn.calls) == 4          # and nothing else can move
+
+    writer._clock_fn.set(10.0)
+    writer._pump(now=10.0)                         # the four stalled ones are written off
+    assert len(writer._spawn.calls) == 6           # the two tiles that never got a turn
+    assert writer._factory_in_flight == 2
+
+    writer._pump(now=11.0)                          # and the written-off four come back
+    assert len(writer._spawn.calls) == 8
+    assert writer._factory_in_flight == 4
+
+
+def test_a_delete_that_is_never_answered_is_re_attempted_after_the_timeout(writer):
+    writer._on_tile(tile_message((0, 0), 1.0))
+    writer._pump(now=0.0)
+    writer._clock_fn.set(0.0)
+    writer._spawn.calls[0][1].resolve(Response())
+
+    writer._on_tile(tile_message((0, 0), 2.0))
+    writer._pump(now=1.0)
+    writer._clock_fn.set(1.0)
+    writer._spawn.calls[1][1].resolve(Response())            # dooms generation 0
+
+    writer._pump(now=1.1)                                     # attempt 1, never answered
+    assert len(writer._delete.calls) == 1
+    assert writer._factory_in_flight == 1
+
+    writer._pump(now=5.0)
+    assert len(writer._delete.calls) == 1                     # still waiting on it
+    assert writer._doomed[tile_name(writer, 0)]['in_flight'] is True
+
+    writer._clock_fn.set(11.1)
+    writer._pump(now=11.1)                                     # written off and re-attempted
+    assert len(writer._delete.calls) == 2
+    assert writer._delete.calls[1][0].name == tile_name(writer, 0)
+    assert writer._doomed[tile_name(writer, 0)]['attempts'] == 2
+    assert writer._factory_in_flight == 1                       # the retry, not a leak
+
+
+def test_a_late_answer_after_the_timeout_does_not_release_a_second_slot(writer):
+    writer._on_tile(tile_message((0, 0), 1.0))
+    writer._pump(now=0.0)
+    stalled = writer._spawn.calls[0][1]
+
+    writer._clock_fn.set(10.0)
+    writer._pump(now=10.0)                        # written off
+    writer._clock_fn.set(11.0)
+    writer._pump(now=11.0)                        # and retried, taking a fresh slot
+    assert writer._factory_in_flight == 1
+    assert len(writer._spawn.calls) == 2
+
+    stalled.resolve(Response())                    # the original answer, far too late
+
+    assert writer._factory_in_flight == 1          # the retry still holds its slot
+    assert writer._current == {}                   # and the late answer changed nothing
+    assert writer._delete.calls == []
+
+    writer._clock_fn.set(11.1)
+    writer._spawn.calls[1][1].resolve(Response())   # the retry lands normally
+    assert writer._factory_in_flight == 0
+    assert writer._current[(0, 0)] == tile_name(writer, 0)
+
+
+def test_a_late_delete_answer_after_the_timeout_does_not_double_release(writer):
+    writer._doomed[tile_name(writer, 0)] = {
+        'mesh_name': None, 'attempts': 0, 'last_attempt': float('-inf'),
+        'in_flight': False, 'confirmed_at': None,
+    }
+    writer._pump(now=0.0)
+    stalled = writer._delete.calls[0][1]
+    assert writer._factory_in_flight == 1
+
+    writer._clock_fn.set(10.0)
+    writer._pump(now=10.0)                         # written off, re-attempted at once
+    assert len(writer._delete.calls) == 2
+    assert writer._factory_in_flight == 1
+
+    stalled.resolve(Response(True))                 # the first answer, far too late
+
+    assert writer._factory_in_flight == 1           # the re-attempt keeps its slot
+    assert writer._doomed[tile_name(writer, 0)]['confirmed_at'] is None
