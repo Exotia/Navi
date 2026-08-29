@@ -172,12 +172,32 @@ class Response:
         self.status_message = status_message
 
 
+class FakeClock:
+    """A settable stand-in for `TerrainWriter._clock_fn`.
+
+    Lets a test control when a spawn/delete *completes* (`set`, read by
+    `_on_spawned`/`_remove`) independently of when `_pump` is *dispatched*
+    (the explicit `now=` passed to `_pump`) - the two are different clocks
+    in production whenever Gazebo takes a while to answer.
+    """
+
+    def __init__(self, t: float = 0.0):
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+    def set(self, t: float) -> None:
+        self.t = t
+
+
 @pytest.fixture
 def writer(tmp_path):
     rclpy.init()
     node = TerrainWriter(model_dir=str(tmp_path))
     node._spawn = FakeService()
     node._delete = FakeService()
+    node._clock_fn = FakeClock(0.0)
     yield node
     node.destroy_node()
     rclpy.shutdown()
@@ -195,6 +215,7 @@ def test_the_replacement_is_spawned_before_the_old_tile_is_deleted(writer):
     writer._pump(now=0.0)
     request, future = writer._spawn.calls[0]
     assert request.name == 'terrain_0_0_a'
+    writer._clock_fn.set(0.0)
     future.resolve(Response())
     assert writer._delete.calls == []                    # nothing to delete yet
 
@@ -203,6 +224,7 @@ def test_the_replacement_is_spawned_before_the_old_tile_is_deleted(writer):
     request, future = writer._spawn.calls[1]
     assert request.name == 'terrain_0_0_b'
     assert writer._delete.calls == []                    # old one still standing
+    writer._clock_fn.set(2.0)
     future.resolve(Response())
     assert [r.name for r, _ in writer._delete.calls] == ['terrain_0_0_a']
 
@@ -210,9 +232,11 @@ def test_the_replacement_is_spawned_before_the_old_tile_is_deleted(writer):
 def test_a_failed_spawn_leaves_the_old_tile_and_deletes_nothing(writer):
     writer._on_tile(tile_message((0, 0), 1.0))
     writer._pump(now=0.0)
+    writer._clock_fn.set(0.0)
     writer._spawn.calls[0][1].resolve(Response())
     writer._on_tile(tile_message((0, 0), 2.0))
     writer._pump(now=2.0)
+    writer._clock_fn.set(2.0)
     writer._spawn.calls[1][1].resolve(Response(False, 'nope'))
     assert writer._delete.calls == []
     assert writer._current[(0, 0)] == 'terrain_0_0_a'
@@ -221,8 +245,40 @@ def test_a_failed_spawn_leaves_the_old_tile_and_deletes_nothing(writer):
 def test_an_all_nan_tile_deletes_the_model(writer):
     writer._on_tile(tile_message((0, 0), 1.0))
     writer._pump(now=0.0)
+    writer._clock_fn.set(0.0)
     writer._spawn.calls[0][1].resolve(Response())
     writer._on_tile(tile_message((0, 0), float('nan')))
+    writer._clock_fn.set(2.0)
     writer._pump(now=2.0)
     assert [r.name for r, _ in writer._delete.calls] == ['terrain_0_0_a']
     assert len(writer._spawn.calls) == 1
+
+
+def test_the_rate_cap_is_measured_from_when_gazebo_confirms_not_when_dispatched(writer):
+    writer._on_tile(tile_message((0, 0), 1.0))
+    writer._pump(now=0.0)                        # dispatched at t=0
+    writer._clock_fn.set(2.0)                       # Gazebo was slow: confirms at t=2
+    writer._spawn.calls[0][1].resolve(Response())
+
+    writer._on_tile(tile_message((0, 0), 2.0))
+    writer._pump(now=2.5)                        # only 0.5 s since completion
+    assert len(writer._spawn.calls) == 1          # not due yet - eligible at t=3
+
+    writer._pump(now=3.0)
+    assert len(writer._spawn.calls) == 2
+    assert writer._spawn.calls[1][0].name == 'terrain_0_0_b'
+
+
+def test_a_dispatch_error_does_not_strand_the_tile_in_flight(writer):
+    class RaisingSpawnService(FakeService):
+        def call_async(self, request):
+            raise RuntimeError('boom')
+
+    writer._spawn = RaisingSpawnService()
+    writer._on_tile(tile_message((0, 0), 1.0))
+    writer._pump(now=0.0)
+
+    assert writer._policy._in_flight == set()
+    due = writer._policy.next_due(now=1.0)
+    assert len(due) == 1
+    assert due[0][0] == (0, 0)

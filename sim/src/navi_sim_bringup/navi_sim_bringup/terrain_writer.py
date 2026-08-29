@@ -39,7 +39,6 @@ from navi_sim_bringup.terrain_mesh import (
     terrain_mesh_from_grid)
 
 LAYER = 'elevation'
-TILE_CELLS = 50
 TILE_SAMPLES = 51
 TILE_M = 2.5
 _CENTER_OFFSET = 1.275
@@ -102,6 +101,9 @@ class TileRespawnPolicy:
         self._in_flight = set()
 
     def offer(self, key, payload, now: float) -> None:
+        # `now` is accepted for symmetry with started/finished/next_due but
+        # unused here: whether a payload is new never depends on the clock,
+        # only whether it is due (next_due) does.
         if payload == self._shown.get(key):
             self._pending.pop(key, None)
             return
@@ -145,6 +147,11 @@ class TerrainWriter(Node):
         self._model_dir = str(self.get_parameter('model_dir').value)
         self._mesh_dir = os.path.join(self._model_dir, 'meshes')
         self._draw_resolution = float(self.get_parameter('draw_resolution').value)
+        # Injectable so tests can control completion time independently of
+        # dispatch time (`_pump`'s `now` argument) - see `_on_spawned`/
+        # `_remove`, which stamp the policy with `self._clock_fn()` at their own
+        # execution time, not with whenever `_pump` happened to be called.
+        self._clock_fn = time.monotonic
         self._policy = TileRespawnPolicy()
         self._generation = {}     # key -> int, flips on every replacement
         self._current = {}        # key -> model name on screen
@@ -179,10 +186,10 @@ class TerrainWriter(Node):
             mesh = terrain_mesh_from_grid(elevation[::stride, ::stride], resolution * stride,
                                           center_x, center_y)
             payload = obj_bytes(mesh) if mesh is not None else b''
-        self._policy.offer(key, payload, time.monotonic())
+        self._policy.offer(key, payload, self._clock_fn())
 
     def _pump(self, now: float = None) -> None:
-        now = time.monotonic() if now is None else now
+        now = self._clock_fn() if now is None else now
         if not self._spawn.service_is_ready() or not self._delete.service_is_ready():
             if not self._warned_no_service:
                 self._warned_no_service = True
@@ -192,27 +199,47 @@ class TerrainWriter(Node):
         self._warned_no_service = False
         for key, payload in self._policy.next_due(now):
             self._policy.started(key)
-            if payload == b'':
-                self._remove(key, payload, now)
-            else:
-                self._replace(key, payload, now)
+            try:
+                if payload == b'':
+                    self._remove(key, payload)
+                else:
+                    self._replace(key, payload)
+            except Exception as exc:                    # noqa: BLE001
+                # Writing the mesh file, building the SDF, or call_async
+                # itself can all raise before any future/callback exists to
+                # ever call `finished` - without this the key would be
+                # stranded in `_in_flight` forever, permanently blocking
+                # this tile and shrinking the global in-flight cap.
+                self.get_logger().error(
+                    f"dispatching a replacement for tile {key} failed: {exc}")
+                self._policy.finished(key, payload, self._clock_fn(), ok=False)
 
-    def _replace(self, key, payload: bytes, now: float) -> None:
+    def _replace(self, key, payload: bytes) -> None:
         self._version += 1
         name = f"tile_{key[0]}_{key[1]}_v{self._version:05d}.obj"
         with open(os.path.join(self._mesh_dir, name), 'wb') as handle:
             handle.write(payload)
-        generation = self._generation.get(key, -1) + 1
-        model = model_name(key, generation)
-        sdf = terrain_sdf(f"model://{GAZEBO_MODEL_NAME}/meshes/{name}", model)
-        request = SpawnEntity.Request()
-        request.name = model
-        request.xml = sdf
-        future = self._spawn.call_async(request)
+        try:
+            generation = self._generation.get(key, -1) + 1
+            model = model_name(key, generation)
+            sdf = terrain_sdf(f"model://{GAZEBO_MODEL_NAME}/meshes/{name}", model)
+            request = SpawnEntity.Request()
+            request.name = model
+            request.xml = sdf
+            future = self._spawn.call_async(request)
+        except Exception:
+            self._unlink(name)                          # nothing will load it now
+            raise
         future.add_done_callback(
-            lambda done: self._on_spawned(done, key, payload, model, name, generation, now))
+            lambda done: self._on_spawned(done, key, payload, model, name, generation))
 
-    def _on_spawned(self, future, key, payload, model, mesh_name, generation, now) -> None:
+    def _on_spawned(self, future, key, payload, model, mesh_name, generation) -> None:
+        # Stamped with the clock at completion time, not with whatever
+        # `now` `_pump` was dispatched at: Gazebo can take a while to
+        # answer, and the per-tile 1 s cap must count from when the
+        # replacement actually lands, not from when it was requested -
+        # otherwise a slow spawn makes the tile eligible again immediately.
+        now = self._clock_fn()
         try:
             response = future.result()
             ok = bool(response.success)
@@ -230,11 +257,11 @@ class TerrainWriter(Node):
         if previous_model:
             self._delete_model(previous_model, previous_mesh)
 
-    def _remove(self, key, payload, now: float) -> None:
+    def _remove(self, key, payload) -> None:
         model, mesh = self._current.pop(key, None), self._mesh_file.pop(key, None)
         if model:
             self._delete_model(model, mesh)
-        self._policy.finished(key, payload, now, ok=True)
+        self._policy.finished(key, payload, self._clock_fn(), ok=True)
 
     def _delete_model(self, model: str, mesh_name) -> None:
         future = self._delete.call_async(DeleteEntity.Request(name=model))
