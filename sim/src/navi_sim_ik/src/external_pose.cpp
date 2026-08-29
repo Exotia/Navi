@@ -1,5 +1,6 @@
 #include "navi_sim_ik/external_pose.hpp"
 
+#include <cmath>
 #include <string>
 
 namespace navi_sim_ik
@@ -59,6 +60,14 @@ bool ExternalPoseGate::accept(double now_seconds)
   last_applied_ = now_seconds;
   ever_applied_ = true;
   return true;
+}
+
+double model_z(double pose_z, double spawn_offset)
+{
+  if (!std::isfinite(pose_z)) {
+    return spawn_offset;
+  }
+  return pose_z + spawn_offset;
 }
 
 }  // namespace navi_sim_ik

@@ -16,6 +16,15 @@ namespace navi_sim_ik
 /// not OK" fallback this returns directly.
 std::string localization_state(const std::string & status_json);
 
+/// The z the model is placed at in the world for a /localization/pose
+/// whose map -> base_footprint z is pose_z: the localised height plus the
+/// spawn offset (spawn_entity.py -z 0.05 puts the footprint frame that far
+/// above the ground it stands on). The terrain the mapper publishes is
+/// drawn at its true map-frame heights, so the rover must follow the same
+/// convention or it sinks into a ramp and floats over a dip. A non-finite
+/// pose_z (nothing localised yet) counts as ground level.
+double model_z(double pose_z, double spawn_offset);
+
 /// Decides whether a pose from outside may be written into the simulation.
 ///
 /// Two rules, both of them the spec's:
