@@ -173,7 +173,7 @@ def test_state_round_trips_through_replace():
         == pytest.approx(5.0)
 
 
-def test_state_of_an_empty_grid_is_none_and_replace_with_it_clears():
+def test_state_of_an_empty_grid_is_none_and_clear_empties_a_populated_grid():
     from navi_localization.elevation_grid import ElevationGrid
     grid = ElevationGrid()
     assert grid.state() is None
@@ -189,3 +189,26 @@ def test_the_snapshot_says_where_its_origin_is_on_the_lattice():
     grid.update([[0.52, -0.31, 1.0]])           # cell ix=10, iy=-7 at 0.05 m
     snapshot = grid.snapshot()
     assert (snapshot.origin_ix, snapshot.origin_iy) == (10, -7)
+
+
+def test_replace_refuses_a_state_built_at_a_different_resolution():
+    from navi_localization.elevation_grid import ElevationGrid, GridState
+    grid = ElevationGrid()
+    state = GridState(elevation=np.array([[1.0]], dtype=np.float32),
+                       count=np.array([[1]], dtype=np.int32),
+                       origin_ix=0, origin_iy=0, resolution=0.10)
+
+    with pytest.raises(ValueError):
+        grid.replace(state)
+
+
+def test_replace_refuses_a_state_bigger_than_the_cap():
+    from navi_localization.elevation_grid import ElevationGrid, GridState, MAX_CELLS, RESOLUTION
+    grid = ElevationGrid()
+    oversized_rows = MAX_CELLS + 1
+    state = GridState(elevation=np.full((oversized_rows, 1), np.nan, dtype=np.float32),
+                       count=np.zeros((oversized_rows, 1), dtype=np.int32),
+                       origin_ix=0, origin_iy=0, resolution=RESOLUTION)
+
+    with pytest.raises(ValueError):
+        grid.replace(state)
