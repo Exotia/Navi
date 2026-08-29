@@ -774,3 +774,17 @@ def test_a_fresh_status_is_not_called_stale(qtbot):
     window._check_staleness(now=window._localization_status_at + 1.0)
 
     assert window.dashboard_page.video_panel.title_label.text().endswith("LOCALISED")
+
+
+def test_entering_semi_auto_with_video_off_still_listens_for_the_simulation(qtbot):
+    # The toggle is refused in semi-autonomous mode, so if the switch did
+    # not start the receiver there would be no way to ever see the view.
+    window, _ = make_window(qtbot)
+    assert window.dashboard_page.video_panel.streaming is False
+
+    window.dashboard_page.mode_changed.emit("semi_auto")
+
+    panel = window.dashboard_page.video_panel
+    assert panel.streaming is True
+    assert panel.receiver.port == 5601
+    assert panel.receiver.started is True

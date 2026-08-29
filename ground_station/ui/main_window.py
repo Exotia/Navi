@@ -439,6 +439,13 @@ class MainWindow(QMainWindow):
                              show_localization=(mode == "semi_auto"))
             if mode == "semi_auto":
                 panel.set_localization_status(self._localization_status)
+                # The Gazebo stream is local and has no control plane, and
+                # the toggle is refused in this mode - so the receiver
+                # cannot be started by hand here. Start it now, whatever
+                # the toggle was before the switch; otherwise entering with
+                # video off leaves the panel deaf on 5601 with no way in.
+                if not panel.streaming:
+                    panel.set_streaming(True)
             return
 
         panel.set_source("zed front left", self.video_port)
