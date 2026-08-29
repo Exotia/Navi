@@ -4,8 +4,7 @@
 One Gazebo model per 2.5 m tile. Gazebo Classic cannot change a model's
 mesh in place, so a changed tile means spawning a new model and deleting
 the old one - the replacement is spawned before the old one is deleted so
-the ground never blinks. Per tile, at most one replacement a second; at
-most 4 spawns in flight globally so a keepalive burst cannot stall Gazebo.
+the ground never blinks. Per tile, at most one replacement a second.
 
 The terrain is a mesh, not a heightmap - see terrain_mesh.py for the
 gzserver crash that decided it.
@@ -26,9 +25,32 @@ model name can only be reused once Gazebo confirms the old one is gone, so
 a name that is ever repeated (the old a/b alternation) will eventually
 collide with a model whose delete is still stuck, and Gazebo refuses the
 spawn outright ("Entity [...] already exists"). Generation-numbered names
-make that collision structurally impossible - see `_delete_model`/`_doomed` below for
-the other half of the fix: a delete failure used to be silently dropped,
-orphaning the model forever.
+make that collision structurally impossible - see `_delete_model`/`_doomed`
+below for the other half of the fix: a delete failure used to be silently
+dropped, orphaning the model forever.
+
+Round 3: under sustained tile churn (several replacements a second across
+many tiles), /delete_entity was observed answering success=True while the
+model stayed in the world - Gazebo's single-threaded factory service
+appears to become unreliable once too many SpawnEntity/DeleteEntity
+requests are outstanding at once. Two fixes:
+
+1. One shared "factory budget" (`_factory_in_flight`, capped at
+   `MAX_FACTORY_IN_FLIGHT`) now covers *both* spawns and deletes, not just
+   spawns. A delete is never dispatched the instant a spawn confirms (the
+   `_delete_model` call from `_on_spawned`); it only registers the model as
+   doomed, and the bounded loop in `_pump` dispatches (and retries) the
+   actual DeleteEntity call, waiting its turn for a slot exactly like a
+   spawn does. This is what actually bounds the total request rate that
+   was overwhelming Gazebo.
+2. `response.success` from DeleteEntity is no longer trusted alone. A
+   doomed model is only untracked - and its mesh file unlinked - once
+   /get_model_list, polled once a second while anything is doomed, agrees
+   it is actually gone. A model still listed `DELETE_CONFIRM_GRACE_S`
+   after a "successful" delete response gets the delete re-sent.
+   At start-up, any terrain_* model already in the world (left over from a
+   previous, uncleanly stopped run) is found the same way and deleted
+   through the same bounded path.
 """
 
 import os
@@ -36,7 +58,7 @@ import time
 
 import numpy as np
 import rclpy
-from gazebo_msgs.srv import DeleteEntity, SpawnEntity
+from gazebo_msgs.srv import DeleteEntity, GetModelList, SpawnEntity
 from rclpy.executors import ExternalShutdownException
 from grid_map_msgs.msg import GridMap
 from rclpy.node import Node
@@ -159,6 +181,19 @@ class TerrainWriter(Node):
     MAX_DELETE_ATTEMPTS = 20
     DELETE_RETRY_INTERVAL_S = 1.0
 
+    # Total SpawnEntity + DeleteEntity requests outstanding at once, across
+    # every tile. Bounding this - not just spawns - is what round 3 added:
+    # deletes fired the instant a spawn confirmed, uncapped, and under
+    # sustained churn that flood of concurrent DeleteEntity calls is what
+    # made Gazebo's factory service unreliable.
+    MAX_FACTORY_IN_FLIGHT = 4
+
+    # How often /get_model_list is polled while anything is doomed, and how
+    # long a model may stay listed after a "successful" delete response
+    # before that response is disbelieved and the delete is re-sent.
+    MODEL_LIST_POLL_INTERVAL_S = 1.0
+    DELETE_CONFIRM_GRACE_S = 2.0
+
     def __init__(self, model_dir: str = None) -> None:
         super().__init__('terrain_writer')
         self.declare_parameter('tile_topic', '/localization/map_tile')
@@ -181,15 +216,25 @@ class TerrainWriter(Node):
         self._mesh_file = {}      # key -> mesh file name on screen
         self._max_delete_attempts = self.MAX_DELETE_ATTEMPTS
         self._delete_retry_interval = self.DELETE_RETRY_INTERVAL_S
-        # model -> {'mesh_name', 'attempts', 'last_attempt', 'in_flight'}.
-        # A model is doomed the instant it is superseded and stays here -
-        # retried by `_pump` - until Gazebo confirms the delete or this
-        # node gives up after `_max_delete_attempts`. Without this a failed
-        # delete was silently forgotten: the model dropped out of
-        # `_current`/`_mesh_file` bookkeeping but never actually left
-        # Gazebo, orphaning it forever and, under the old a/b naming,
+        # model -> {'mesh_name', 'attempts', 'last_attempt', 'in_flight',
+        # 'confirmed_at'}. A model is doomed the instant it is superseded
+        # and stays here - retried by `_pump` - until /get_model_list
+        # confirms it is actually gone, or this node gives up after
+        # `_max_delete_attempts`. Without this a failed (or falsely
+        # "successful") delete was silently forgotten: the model dropped
+        # out of `_current`/`_mesh_file` bookkeeping but never actually
+        # left Gazebo, orphaning it forever and, under the old a/b naming,
         # eventually blocking a same-named spawn with "already exists".
         self._doomed = {}
+        # Total SpawnEntity + DeleteEntity requests dispatched and not yet
+        # answered, across every tile - see MAX_FACTORY_IN_FLIGHT.
+        self._max_factory_in_flight = self.MAX_FACTORY_IN_FLIGHT
+        self._factory_in_flight = 0
+        self._model_list_interval = self.MODEL_LIST_POLL_INTERVAL_S
+        self._delete_confirm_grace = self.DELETE_CONFIRM_GRACE_S
+        self._last_list_poll = None
+        self._model_list_in_flight = False
+        self._startup_scan_done = False
         self._version = 0
         self._warned_no_service = False
 
@@ -199,6 +244,7 @@ class TerrainWriter(Node):
 
         self._delete = self.create_client(DeleteEntity, '/delete_entity')
         self._spawn = self.create_client(SpawnEntity, '/spawn_entity')
+        self._model_list = self.create_client(GetModelList, '/get_model_list')
         self.create_subscription(
             GridMap, str(self.get_parameter('tile_topic').value), self._on_tile, 16)
         self.create_timer(0.25, self._pump)
@@ -224,7 +270,8 @@ class TerrainWriter(Node):
 
     def _pump(self, now: float = None) -> None:
         now = self._clock_fn() if now is None else now
-        if not self._spawn.service_is_ready() or not self._delete.service_is_ready():
+        if not (self._spawn.service_is_ready() and self._delete.service_is_ready()
+                and self._model_list.service_is_ready()):
             if not self._warned_no_service:
                 self._warned_no_service = True
                 self.get_logger().warn("/spawn_entity is not up yet - is gazebo running "
@@ -232,20 +279,40 @@ class TerrainWriter(Node):
             return
         self._warned_no_service = False
 
+        if not self._startup_scan_done:
+            self._startup_scan_done = True
+            self._scan_for_leftover_models()
+
+        self._maybe_poll_model_list(now)
+
         for model, entry in list(self._doomed.items()):
             if entry['in_flight']:
                 continue
+            if entry.get('confirmed_at') is not None:
+                # A "successful" delete is not trusted alone - wait for
+                # /get_model_list to either confirm it is gone (untracks it,
+                # in `_on_model_list`) or say it is still there long enough
+                # to reset `confirmed_at` and make it due again below.
+                continue
             if now - entry['last_attempt'] < self._delete_retry_interval:
                 continue
-            self._attempt_delete(model)
+            if self._factory_in_flight >= self._max_factory_in_flight:
+                continue                    # no slot this tick; its turn comes later
+            self._attempt_delete(model, now)
 
         for key, payload in self._policy.next_due(now):
+            if payload == b'':
+                # A removal never itself calls the factory (it only
+                # registers the old model as doomed - see `_remove`), so it
+                # never needs a budget slot.
+                self._policy.started(key)
+                self._remove(key, payload)
+                continue
+            if self._factory_in_flight >= self._max_factory_in_flight:
+                continue                    # wait its turn; still pending next tick
             self._policy.started(key)
             try:
-                if payload == b'':
-                    self._remove(key, payload)
-                else:
-                    self._replace(key, payload)
+                self._replace(key, payload)
             except Exception as exc:                    # noqa: BLE001
                 # Writing the mesh file, building the SDF, or call_async
                 # itself can all raise before any future/callback exists to
@@ -261,6 +328,7 @@ class TerrainWriter(Node):
         name = f"tile_{key[0]}_{key[1]}_v{self._version:05d}.obj"
         with open(os.path.join(self._mesh_dir, name), 'wb') as handle:
             handle.write(payload)
+        self._factory_in_flight += 1
         try:
             generation = self._generation.get(key, -1) + 1
             model = model_name(key, generation)
@@ -270,12 +338,14 @@ class TerrainWriter(Node):
             request.xml = sdf
             future = self._spawn.call_async(request)
         except Exception:
+            self._factory_in_flight -= 1
             self._unlink(name)                          # nothing will load it now
             raise
         future.add_done_callback(
             lambda done: self._on_spawned(done, key, payload, model, name, generation))
 
     def _on_spawned(self, future, key, payload, model, mesh_name, generation) -> None:
+        self._factory_in_flight = max(0, self._factory_in_flight - 1)
         # Stamped with the clock at completion time, not with whatever
         # `now` `_pump` was dispatched at: Gazebo can take a while to
         # answer, and the per-tile 1 s cap must count from when the
@@ -306,40 +376,46 @@ class TerrainWriter(Node):
         self._policy.finished(key, payload, self._clock_fn(), ok=True)
 
     def _delete_model(self, model: str, mesh_name) -> None:
-        """Marks `model` for deletion; `_pump` retries until it is gone.
+        """Marks `model` doomed; never dispatches DeleteEntity itself.
 
-        Registering it here - rather than firing one DeleteEntity call and
-        forgetting it - is what makes a failed delete recoverable: the
-        model stays tracked in `_doomed` and `_pump` keeps re-attempting it
-        (at most once a second, up to `_max_delete_attempts`) until Gazebo
-        confirms it is gone, instead of silently leaving an orphan on
-        screen forever.
+        The instant a spawn confirms, its superseded model must be deleted -
+        but firing that DeleteEntity call right here, unconditionally, is
+        exactly the uncapped traffic that overwhelmed Gazebo's factory
+        service under sustained tile churn (round 3's live-run finding).
+        Registering it here and letting the bounded loop in `_pump` do the
+        actual dispatch (and every retry) means a delete waits its turn for
+        a factory-request slot exactly like a spawn does, and the combined
+        spawn+delete rate stays under `_max_factory_in_flight` regardless
+        of how many tiles change at once.
         """
         self._doomed[model] = {
             'mesh_name': mesh_name,
             'attempts': 0,
-            'last_attempt': self._clock_fn(),
+            'last_attempt': float('-inf'),              # due the moment a slot is free
             'in_flight': False,
+            'confirmed_at': None,
         }
-        self._attempt_delete(model)
 
-    def _attempt_delete(self, model: str) -> None:
+    def _attempt_delete(self, model: str, now: float = None) -> None:
         entry = self._doomed.get(model)
         if entry is None:
             return
         entry['attempts'] += 1
-        entry['last_attempt'] = self._clock_fn()
+        entry['last_attempt'] = self._clock_fn() if now is None else now
         entry['in_flight'] = True
+        self._factory_in_flight += 1
         try:
             future = self._delete.call_async(DeleteEntity.Request(name=model))
         except Exception as exc:                        # noqa: BLE001
             entry['in_flight'] = False
+            self._factory_in_flight = max(0, self._factory_in_flight - 1)
             self.get_logger().warn(f"deleting {model} failed to dispatch: {exc}")
             self._maybe_give_up(model)
             return
         future.add_done_callback(lambda done: self._on_deleted(done, model))
 
     def _on_deleted(self, future, model: str) -> None:
+        self._factory_in_flight = max(0, self._factory_in_flight - 1)
         entry = self._doomed.get(model)
         if entry is None:
             return                                      # already given up
@@ -351,8 +427,13 @@ class TerrainWriter(Node):
         except Exception as exc:                        # noqa: BLE001
             ok, error = False, str(exc)
         if ok:
-            self._unlink(entry['mesh_name'])
-            del self._doomed[model]
+            # Not trusted alone - Gazebo has been observed to answer
+            # success=True while the model stays in the world under heavy
+            # churn. `_on_model_list` is what actually untracks and unlinks,
+            # once /get_model_list agrees the model is gone; if it is still
+            # listed `_delete_confirm_grace` after this, the delete is
+            # re-sent (see `_on_model_list`).
+            entry['confirmed_at'] = self._clock_fn()
             return
         self.get_logger().warn(f"deleting {model} failed: {error}")
         self._maybe_give_up(model)
@@ -364,6 +445,74 @@ class TerrainWriter(Node):
                 f"giving up deleting {model} after {entry['attempts']} attempts; "
                 "it will stay in Gazebo until removed manually")
             del self._doomed[model]
+
+    def _maybe_poll_model_list(self, now: float) -> None:
+        """Polls /get_model_list at most once a second while anything is
+        doomed - the sole ground truth for whether a delete actually
+        happened, since DeleteEntity's own response has been observed to
+        lie under load (see `_on_deleted`)."""
+        if not self._doomed or self._model_list_in_flight:
+            return
+        if (self._last_list_poll is not None
+                and now - self._last_list_poll < self._model_list_interval):
+            return
+        self._last_list_poll = now
+        self._model_list_in_flight = True
+        try:
+            future = self._model_list.call_async(GetModelList.Request())
+        except Exception as exc:                        # noqa: BLE001
+            self._model_list_in_flight = False
+            self.get_logger().warn(f"listing Gazebo's models failed to dispatch: {exc}")
+            return
+        future.add_done_callback(self._on_model_list)
+
+    def _on_model_list(self, future) -> None:
+        self._model_list_in_flight = False
+        try:
+            response = future.result()
+            names = set(response.model_names)
+        except Exception as exc:                        # noqa: BLE001
+            self.get_logger().warn(f"listing Gazebo's models failed: {exc}")
+            return
+        now = self._clock_fn()
+        for model, entry in list(self._doomed.items()):
+            if model not in names:
+                self._unlink(entry['mesh_name'])
+                del self._doomed[model]
+                continue
+            confirmed_at = entry.get('confirmed_at')
+            if confirmed_at is not None and now - confirmed_at >= self._delete_confirm_grace:
+                self.get_logger().warn(
+                    f"{model} is still in Gazebo {now - confirmed_at:.1f}s after "
+                    "a successful delete response; re-sending the delete")
+                entry['confirmed_at'] = None
+                entry['last_attempt'] = float('-inf')   # due again on the next _pump
+
+    def _scan_for_leftover_models(self) -> None:
+        """Deletes any terrain_* model already in the world at start-up -
+        left over from a previous, uncleanly stopped run - through the same
+        bounded delete path as everything else."""
+        try:
+            future = self._model_list.call_async(GetModelList.Request())
+        except Exception as exc:                        # noqa: BLE001
+            self.get_logger().warn(f"could not list existing models at start-up: {exc}")
+            return
+        future.add_done_callback(self._on_startup_model_list)
+
+    def _on_startup_model_list(self, future) -> None:
+        try:
+            response = future.result()
+            names = list(response.model_names)
+        except Exception as exc:                        # noqa: BLE001
+            self.get_logger().warn(f"listing existing models at start-up failed: {exc}")
+            return
+        leftovers = [name for name in names if name.startswith('terrain_')]
+        if leftovers:
+            self.get_logger().warn(
+                f"{len(leftovers)} leftover terrain_* model(s) from a previous run "
+                "found in Gazebo at start-up; deleting them")
+        for name in leftovers:
+            self._delete_model(name, None)
 
     def _unlink(self, mesh_name) -> None:
         if mesh_name:

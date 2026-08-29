@@ -173,9 +173,10 @@ class FakeService:
 
 
 class Response:
-    def __init__(self, success=True, status_message=''):
+    def __init__(self, success=True, status_message='', model_names=()):
         self.success = success
         self.status_message = status_message
+        self.model_names = list(model_names)          # only used by /get_model_list
 
 
 class FakeClock:
@@ -203,7 +204,17 @@ def writer(tmp_path):
     node = TerrainWriter(model_dir=str(tmp_path))
     node._spawn = FakeService()
     node._delete = FakeService()
+    node._model_list = FakeService()
     node._clock_fn = FakeClock(0.0)
+    # Every _pump() triggers a one-time start-up scan for leftover terrain_*
+    # models (see test_leftover_terrain_models_..._below, which builds its
+    # own node instead of using this fixture to control that explicitly).
+    # Flush it here, as "nothing left over", so the rest of the tests below
+    # don't have to deal with the noise of an extra unresolved
+    # /get_model_list call sitting in node._model_list.calls forever.
+    node._pump(now=0.0)
+    node._model_list.calls[0][1].resolve(Response(model_names=[]))
+    node._model_list.calls.clear()
     yield node
     node.destroy_node()
     rclpy.shutdown()
@@ -232,6 +243,10 @@ def test_the_replacement_is_spawned_before_the_old_tile_is_deleted(writer):
     assert writer._delete.calls == []                    # old one still standing
     writer._clock_fn.set(2.0)
     future.resolve(Response())
+    assert writer._delete.calls == []                    # doomed, not dispatched yet
+    assert 'terrain_0_0_g0' in writer._doomed
+
+    writer._pump(now=2.1)                                 # dispatches the bounded delete
     assert [r.name for r, _ in writer._delete.calls] == ['terrain_0_0_g0']
 
 
@@ -256,6 +271,11 @@ def test_an_all_nan_tile_deletes_the_model(writer):
     writer._on_tile(tile_message((0, 0), float('nan')))
     writer._clock_fn.set(2.0)
     writer._pump(now=2.0)
+    assert writer._delete.calls == []                    # doomed, not dispatched yet
+    assert 'terrain_0_0_g0' in writer._doomed
+    assert len(writer._spawn.calls) == 1
+
+    writer._pump(now=2.1)                                 # dispatches the bounded delete
     assert [r.name for r, _ in writer._delete.calls] == ['terrain_0_0_g0']
     assert len(writer._spawn.calls) == 1
 
@@ -340,21 +360,25 @@ def test_a_failed_delete_is_retried_after_the_interval_and_stays_tracked(writer)
     writer._on_tile(tile_message((0, 0), 2.0))
     writer._pump(now=1.0)
     writer._clock_fn.set(1.0)
-    writer._spawn.calls[1][1].resolve(Response())        # dooms terrain_0_0_g0
+    writer._spawn.calls[1][1].resolve(Response())          # dooms terrain_0_0_g0
+    assert writer._delete.calls == []                      # registered, not dispatched yet
+
+    writer._pump(now=1.1)                                   # dispatches the first attempt
     assert len(writer._delete.calls) == 1
+    writer._clock_fn.set(1.1)
     writer._delete.calls[0][1].resolve(Response(False, 'busy'))
-    assert 'terrain_0_0_g0' in writer._doomed             # still tracked after failure
+    assert 'terrain_0_0_g0' in writer._doomed               # still tracked after failure
 
-    writer._pump(now=1.5)                                  # only 0.5 s since the attempt
-    assert len(writer._delete.calls) == 1                  # not retried yet
+    writer._pump(now=1.6)                                    # only 0.5 s since the attempt
+    assert len(writer._delete.calls) == 1                    # not retried yet
 
-    writer._pump(now=2.0)                                  # 1.0 s since the attempt
-    assert len(writer._delete.calls) == 2                  # retried
+    writer._pump(now=2.1)                                     # 1.0 s since the attempt
+    assert len(writer._delete.calls) == 2                     # retried
     assert writer._delete.calls[1][0].name == 'terrain_0_0_g0'
     assert 'terrain_0_0_g0' in writer._doomed
 
 
-def test_a_successful_delete_unlinks_the_mesh_and_untracks(writer):
+def test_a_delete_is_untracked_and_the_mesh_unlinked_once_the_model_list_confirms_absence(writer):
     writer._on_tile(tile_message((0, 0), 1.0))
     writer._pump(now=0.0)
     writer._clock_fn.set(0.0)
@@ -367,12 +391,55 @@ def test_a_successful_delete_unlinks_the_mesh_and_untracks(writer):
     writer._pump(now=1.0)
     writer._clock_fn.set(1.0)
     writer._spawn.calls[1][1].resolve(Response())          # dooms terrain_0_0_g0
-    assert 'terrain_0_0_g0' in writer._doomed
 
-    writer._delete.calls[0][1].resolve(Response(True))
+    writer._pump(now=1.1)                                   # dispatches the delete + a poll
+    assert len(writer._delete.calls) == 1
+    assert len(writer._model_list.calls) == 1
+    writer._clock_fn.set(1.1)
+    writer._delete.calls[0][1].resolve(Response(True))       # "success" - not trusted alone
+    assert 'terrain_0_0_g0' in writer._doomed
+    assert os.path.exists(old_mesh_path)
+
+    writer._model_list.calls[0][1].resolve(Response(model_names=['terrain_0_0_g1']))  # g0 is gone
 
     assert 'terrain_0_0_g0' not in writer._doomed
     assert not os.path.exists(old_mesh_path)
+
+
+def test_a_model_still_listed_two_seconds_after_a_successful_delete_is_re_sent(writer):
+    writer._on_tile(tile_message((0, 0), 1.0))
+    writer._pump(now=0.0)
+    writer._clock_fn.set(0.0)
+    writer._spawn.calls[0][1].resolve(Response())
+
+    writer._on_tile(tile_message((0, 0), 2.0))
+    writer._pump(now=1.0)
+    writer._clock_fn.set(1.0)
+    writer._spawn.calls[1][1].resolve(Response())            # dooms terrain_0_0_g0
+
+    writer._pump(now=2.0)                                     # dispatches poll + first attempt
+    still_there = Response(model_names=['terrain_0_0_g0', 'terrain_0_0_g1'])
+    writer._model_list.calls[0][1].resolve(still_there)
+    writer._clock_fn.set(2.0)
+    writer._delete.calls[0][1].resolve(Response(True))        # "success" - not trusted alone
+    assert 'terrain_0_0_g0' in writer._doomed
+    assert writer._doomed['terrain_0_0_g0']['confirmed_at'] == 2.0
+
+    writer._pump(now=3.0)                                      # polls again (1 s since last poll)
+    writer._clock_fn.set(3.0)
+    writer._model_list.calls[1][1].resolve(still_there)
+    assert 'terrain_0_0_g0' in writer._doomed                  # only 1 s since confirmed - not yet
+    assert len(writer._delete.calls) == 1                      # no re-send yet
+
+    writer._pump(now=4.0)                                       # polls again (2 s since confirmed)
+    writer._clock_fn.set(4.0)
+    writer._model_list.calls[2][1].resolve(still_there)
+    assert writer._doomed['terrain_0_0_g0']['confirmed_at'] is None    # reset, due again
+
+    writer._pump(now=4.1)                                        # dispatches the re-sent delete
+    assert len(writer._delete.calls) == 2
+    assert writer._delete.calls[1][0].name == 'terrain_0_0_g0'
+    assert 'terrain_0_0_g0' in writer._doomed                    # stays tracked throughout
 
 
 def test_remove_with_a_failing_delete_keeps_retrying(writer):
@@ -383,16 +450,20 @@ def test_remove_with_a_failing_delete_keeps_retrying(writer):
 
     writer._on_tile(tile_message((0, 0), float('nan')))
     writer._clock_fn.set(1.0)
-    writer._pump(now=1.0)                                   # _remove dispatches the delete
+    writer._pump(now=1.0)                                    # _remove registers the doomed model
+    assert writer._delete.calls == []
+    assert 'terrain_0_0_g0' in writer._doomed
+
+    writer._pump(now=1.1)                                     # dispatches the first attempt
     assert len(writer._delete.calls) == 1
     writer._delete.calls[0][1].resolve(Response(False, 'nope'))
     assert 'terrain_0_0_g0' in writer._doomed
 
-    writer._pump(now=1.5)
-    assert len(writer._delete.calls) == 1                    # not due yet
+    writer._pump(now=1.6)
+    assert len(writer._delete.calls) == 1                     # not due yet
 
-    writer._pump(now=2.0)
-    assert len(writer._delete.calls) == 2                    # retried
+    writer._pump(now=2.2)
+    assert len(writer._delete.calls) == 2                     # retried
     assert writer._delete.calls[1][0].name == 'terrain_0_0_g0'
 
 
@@ -406,14 +477,15 @@ def test_giving_up_after_the_retry_cap_stops_tracking_and_retrying(writer):
     writer._on_tile(tile_message((0, 0), 2.0))
     writer._pump(now=1.0)
     writer._clock_fn.set(1.0)
-    writer._spawn.calls[1][1].resolve(Response())            # dooms terrain_0_0_g0, attempt 1
-    assert 'terrain_0_0_g0' in writer._doomed
+    writer._spawn.calls[1][1].resolve(Response())            # dooms terrain_0_0_g0
 
+    writer._pump(now=1.1)                                     # attempt 1 dispatched
+    assert 'terrain_0_0_g0' in writer._doomed
     writer._delete.calls[0][1].resolve(Response(False, 'nope'))   # attempt 1 fails (1 < cap 2)
     assert 'terrain_0_0_g0' in writer._doomed
 
-    writer._clock_fn.set(2.0)
-    writer._pump(now=2.0)                                     # attempt 2 dispatched
+    writer._clock_fn.set(2.2)
+    writer._pump(now=2.2)                                     # attempt 2 dispatched
     writer._delete.calls[1][1].resolve(Response(False, 'nope'))   # attempt 2 fails (2 >= cap 2)
 
     assert 'terrain_0_0_g0' not in writer._doomed              # gave up
@@ -421,3 +493,119 @@ def test_giving_up_after_the_retry_cap_stops_tracking_and_retrying(writer):
     writer._clock_fn.set(10.0)
     writer._pump(now=10.0)
     assert len(writer._delete.calls) == 2                       # no further retries
+
+
+def test_no_more_than_four_factory_requests_are_outstanding_at_once_under_a_burst_of_ten_tiles(writer):
+    """Round 3's regression guard: spawns and deletes now share one budget.
+
+    Ten tiles are brought up to generation 0, then all ten are replaced at
+    once - which both dispatches new spawns (bounded by TileRespawnPolicy's
+    own cap) and, as each confirms, registers a delete of the superseded
+    generation. Those deletes must compete for the *same* budget as spawns,
+    not fire unboundedly - that unbounded firing was round 3's actual bug.
+    """
+    world = set()                              # models believed alive in the fake Gazebo
+
+    def resolve_pending():
+        for request, future in writer._spawn.calls:
+            if future.result() is None:
+                world.add(request.name)
+                future.resolve(Response())
+        for request, future in writer._delete.calls:
+            if future.result() is None:
+                world.discard(request.name)
+                future.resolve(Response(True))
+        for request, future in writer._model_list.calls:
+            if future.result() is None:
+                future.resolve(Response(model_names=sorted(world)))
+
+    def assert_budget_ok():
+        outstanding_spawns = sum(1 for _, f in writer._spawn.calls if f.result() is None)
+        outstanding_deletes = sum(1 for _, f in writer._delete.calls if f.result() is None)
+        assert outstanding_spawns + outstanding_deletes <= 4
+        assert outstanding_spawns + outstanding_deletes == writer._factory_in_flight
+        return outstanding_spawns, outstanding_deletes
+
+    t = 0.0
+    for i in range(10):
+        writer._on_tile(tile_message((i, 0), float(i)))
+
+    # Bring all ten tiles up to generation 0 first, respecting the 1 s/tile cap.
+    for _ in range(30):
+        writer._clock_fn.set(t)
+        writer._pump(now=t)
+        assert_budget_ok()
+        resolve_pending()
+        t += 1.1
+        if len(writer._current) == 10:
+            break
+    assert len(writer._current) == 10
+    assert writer._delete.calls == []
+
+    # Replace all ten tiles at once - spawns and the deletes of the
+    # superseded generation now compete for a single shared budget of 4.
+    for i in range(10):
+        writer._on_tile(tile_message((i, 0), float(i) + 100.0))
+
+    for _ in range(80):
+        writer._clock_fn.set(t)
+        writer._pump(now=t)
+        assert_budget_ok()
+        resolve_pending()
+        t += 1.1
+        if all(writer._generation.get((i, 0)) == 1 for i in range(10)) and not writer._doomed:
+            break
+
+    assert all(writer._generation.get((i, 0)) == 1 for i in range(10))
+    assert writer._doomed == {}
+
+
+def test_deletes_and_spawns_share_one_factory_budget_not_one_each(writer):
+    """Direct proof that a delete does not get its own separate budget on
+    top of spawns' four - round 3's actual bug was exactly that: a delete
+    fired the instant a spawn confirmed, uncapped, alongside spawns that
+    were already independently capped at four.
+
+    Three tiles are already doomed (as if their replacements just
+    confirmed) and three more tiles are offered for the first time - six
+    requests chasing one shared budget of four - all in a single `_pump`.
+    """
+    for i in range(3):
+        writer._doomed[f'terrain_{i}_0_g0'] = {
+            'mesh_name': None, 'attempts': 0, 'last_attempt': float('-inf'),
+            'in_flight': False, 'confirmed_at': None,
+        }
+    for i in range(3, 6):
+        writer._on_tile(tile_message((i, 0), float(i)))
+
+    writer._pump(now=0.0)
+
+    dispatched_deletes = len(writer._delete.calls)
+    dispatched_spawns = len(writer._spawn.calls)
+    assert dispatched_deletes + dispatched_spawns == 4          # the shared budget, not 3 + 4
+    assert dispatched_deletes == 3                               # all three doomed ones fit
+    assert dispatched_spawns == 1                                 # only one slot left for spawns
+    assert writer._factory_in_flight == 4
+
+
+def test_leftover_terrain_models_from_a_previous_run_are_deleted_through_the_bounded_path(tmp_path):
+    rclpy.init()
+    node = TerrainWriter(model_dir=str(tmp_path))
+    node._spawn = FakeService()
+    node._delete = FakeService()
+    node._model_list = FakeService()
+    node._clock_fn = FakeClock(0.0)
+    try:
+        node._pump(now=0.0)                    # triggers the start-up leftover scan
+        assert len(node._model_list.calls) == 1
+        node._model_list.calls[0][1].resolve(Response(model_names=[
+            'terrain_1_2_g3', 'terrain_5_5_g0', 'rover', 'ground_plane']))
+
+        assert set(node._doomed) == {'terrain_1_2_g3', 'terrain_5_5_g0'}
+        assert node._delete.calls == []             # registered, not dispatched yet
+
+        node._pump(now=1.0)                          # dispatches the bounded deletes
+        assert {r.name for r, _ in node._delete.calls} == {'terrain_1_2_g3', 'terrain_5_5_g0'}
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
