@@ -38,13 +38,21 @@ elevation grid is not clean ground:
 
   * Isolated-peak median: a flying pixel (a ZED depth outlier), a person or
     a rover wheel caught mid-frame, or a single misregistered cell all show
-    up as a one- or two-cell needle - height wildly different from its
-    surroundings, with no support from its neighbours. Each cell is
-    compared with the median of its 3x3 neighbourhood; if it disagrees by
-    more than `peak_threshold_m` and that neighbourhood had enough finite
-    cells to trust (>= 5 of 8), the cell is pulled down to the median. A
-    genuine rock or ridge spanning many cells has neighbours that agree
-    with it, so its median tracks it up and it survives untouched.
+    up as a one-cell needle - height wildly different from its
+    surroundings, with no support from its neighbours. A cell is pulled
+    down to the median of its 3x3 neighbourhood only when it is truly
+    isolated - not one neighbour (of the 8) agrees with it within
+    `peak_threshold_m` - and that neighbourhood had enough finite cells to
+    trust (>= 5 of 8). A genuine rock or ridge, even a 2-cell-wide one, has
+    at least one neighbour that agrees with it, so it is left untouched.
+    This runs on each tile at draw resolution (terrain_writer's
+    `_draw_resolution` stride), not on the raw per-frame cloud, and per
+    tile rather than per frame: a tile's outermost ring of samples (its
+    shared halo boundary with the +x/+y neighbour tile, see
+    navi_localization.tiles) is never replaced, so two tiles filtering the
+    same physical cell from their own, differently-cropped neighbourhoods
+    always agree - the median filter cannot re-open the seam the halo
+    exists to close.
   * Slope cutoff: a wall, doorway or other near-vertical surface the ZED
     caught face-on turns into a near-vertical spike of triangles in the
     mesh - correct height data, wrong thing to draw as ground. Triangles
@@ -91,17 +99,28 @@ def _stride(cells: int) -> int:
 
 
 def _flatten_isolated_peaks(elevation: np.ndarray, peak_threshold_m: float) -> np.ndarray:
-    """Pulls one- or two-cell height outliers down to their neighbourhood median.
+    """Pulls truly isolated height outliers down to their neighbourhood median.
 
     NaN-aware median over each cell's 3x3 neighbourhood (the eight cells
     around it, not the cell itself), computed with a padded sliding window -
-    no scipy. A cell is only ever replaced when at least 5 of those 8
-    neighbours are finite, so a cell near the edge of the mapped area (or
-    next to a hole) is left alone rather than judged from a handful of
-    neighbours. A genuine multi-cell feature has neighbours that agree with
-    it, so its median tracks it and the diff never crosses the threshold;
-    only a needle - a cell whose neighbourhood is overwhelmingly ordinary
-    ground - gets pulled down.
+    no scipy. A cell is replaced only when it is *isolated*: not one of its
+    up to 8 neighbours is within `peak_threshold_m` of the cell's own
+    height, and at least 5 of those 8 neighbours are finite (so a cell near
+    the edge of the mapped area, or next to a hole, is left alone rather
+    than judged from a handful of neighbours). A genuine multi-cell
+    feature - even a 2-cell-wide ridge - has at least one neighbour that
+    agrees with it and so is never touched; only a needle, whose entire
+    neighbourhood disagrees, gets pulled down.
+
+    This is called once per tile (see terrain_mesh_from_grid), and a tile's
+    outermost ring of samples - row/column 0 and the last row/column, the
+    halo it shares with its +x/+y neighbour tile (navi_localization.tiles)
+    - is never replaced. Two tiles filtering the same physical boundary
+    cell see different, tile-cropped neighbourhoods (one has real data
+    where the other has only the tile's own edge), so without this the
+    same cell could come out flattened to two different heights depending
+    on which tile computed it - reopening exactly the seam the halo exists
+    to hide.
     """
     rows, cols = elevation.shape
     padded = np.pad(elevation, 1, constant_values=np.nan)
@@ -109,15 +128,24 @@ def _flatten_isolated_peaks(elevation: np.ndarray, peak_threshold_m: float) -> n
     neighbours = np.delete(windows, 4, axis=-1)          # drop the centre cell
     finite = np.isfinite(neighbours)
     count = finite.sum(axis=-1)
+    own = elevation[..., np.newaxis]
     with np.errstate(invalid='ignore'), warnings.catch_warnings():
         # A window with zero finite neighbours (deep inside an unseen
         # region) makes nanmedian warn "All-NaN slice"; its NaN result is
-        # exactly right and `replace` below never selects it.
+        # exactly right and `replace` below never selects it. A NaN
+        # neighbour's comparison against `own` is simply False, so it
+        # never counts as agreement - no separate finite mask needed there.
         warnings.filterwarnings('ignore', message='All-NaN slice encountered')
         median = np.nanmedian(neighbours, axis=-1)
-        diff = np.abs(elevation - median)
+        agrees = np.abs(neighbours - own) <= peak_threshold_m
+    isolated = ~agrees.any(axis=-1)
+
+    interior = np.ones((rows, cols), dtype=bool)
+    interior[[0, -1], :] = False
+    interior[:, [0, -1]] = False
+
     replace = (np.isfinite(elevation) & np.isfinite(median)
-               & (count >= 5) & (diff > peak_threshold_m))
+               & (count >= 5) & isolated & interior)
     return np.where(replace, median, elevation)
 
 

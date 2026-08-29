@@ -1,17 +1,22 @@
 """The grid-to-Gazebo encoding.
 
 Run with the system python3 - this laptop's .venv has no numpy, and a ROS
-node runs under the system interpreter anyway:
+node runs under the system interpreter anyway. The seam test imports
+navi_localization.tiles (the rover's package, not installed in the sim
+workspace) just for its TILE_CELLS/TILE_SAMPLES constants, so it needs the
+rover source tree on the path too:
   bash -c 'source /opt/ros/humble/setup.bash &&
-    PYTHONPATH=$PWD/sim/src/navi_sim_bringup:$PYTHONPATH python3 -m pytest \
-    sim/src/navi_sim_bringup/test/test_terrain_mesh.py -q'
+    PYTHONPATH=$PWD/sim/src/navi_sim_bringup:$PWD/rover/src/navi_localization:$PYTHONPATH \
+    python3 -m pytest sim/src/navi_sim_bringup/test/test_terrain_mesh.py -q'
 """
 
 import numpy as np
 import pytest
 
+from navi_localization.tiles import TILE_CELLS, TILE_SAMPLES
 from navi_sim_bringup.terrain_mesh import (
-    MAX_SIDE, model_config_xml, obj_bytes, terrain_mesh_from_grid, terrain_sdf)
+    MAX_SIDE, _flatten_isolated_peaks, model_config_xml, obj_bytes,
+    terrain_mesh_from_grid, terrain_sdf)
 
 
 def faces_of(obj: bytes):
@@ -186,6 +191,53 @@ def test_a_nan_neighbourhood_does_not_create_fake_values():
     # and no NaN turned into a fabricated number.
     assert mesh.vertices[:, 2].max() == pytest.approx(1.0)
     assert np.isfinite(mesh.vertices[:, 2]).all()
+
+
+def test_a_two_cell_ridge_is_not_flattened():
+    # Two adjacent cells raised 0.30 m above flat ground: a real, if
+    # narrow, feature - not a flying pixel. Each of the two cells has the
+    # other as a neighbour that agrees with it, so neither is isolated and
+    # both must survive, unlike the single-cell needle above.
+    grid = np.zeros((7, 7))
+    grid[3, 3] = 0.30
+    grid[3, 4] = 0.30
+
+    mesh = terrain_mesh_from_grid(grid, 0.10, 0.0, 0.0)
+
+    assert mesh.vertices[:, 2].max() == pytest.approx(0.30)
+
+
+def test_flattening_leaves_the_tile_seam_identical_between_neighbours():
+    # Two tiles cut the way navi_localization.tiles cuts them: each
+    # TILE_SAMPLES (51) wide, its own TILE_CELLS (50) columns plus one
+    # halo column shared with the +x neighbour, so tile A's last column is
+    # the same physical samples as tile B's first column. A needle sits
+    # right on that shared column, with elevated terrain on tile B's side
+    # only - visible in tile B's neighbourhood window but not in tile A's,
+    # since tile A's array does not extend that far. Filtered
+    # independently, per-tile, the two tiles must still agree on the
+    # shared column: the outermost ring of a tile is never replaced.
+    size = TILE_SAMPLES + TILE_CELLS
+    global_grid = np.zeros((size, size))
+    needle_row = 25                          # interior for both tiles
+    boundary_col = TILE_CELLS                # tile A's last col == tile B's first col
+    global_grid[needle_row, boundary_col] = 1.0
+    # Terrain only tile B's neighbourhood window can see (one column past
+    # the seam): without the ring guard this pulls tile B's median up to
+    # 0.5 while tile A's median (seeing only flat ground) stays 0.0 -
+    # exactly the 0.0-vs-0.5 seam divergence this guards against.
+    global_grid[needle_row - 1:needle_row + 2, boundary_col + 1] = 0.5
+
+    tile_a = global_grid[:TILE_SAMPLES, :TILE_SAMPLES]
+    tile_b = global_grid[:TILE_SAMPLES, TILE_CELLS:TILE_CELLS + TILE_SAMPLES]
+
+    filtered_a = _flatten_isolated_peaks(tile_a, 0.10)
+    filtered_b = _flatten_isolated_peaks(tile_b, 0.10)
+
+    assert np.array_equal(filtered_a[:, -1], filtered_b[:, 0], equal_nan=True)
+    # The guard protects the seam by leaving it alone, not by disagreeing
+    # less: the needle itself must still be there, unflattened.
+    assert filtered_a[needle_row, -1] == pytest.approx(1.0)
 
 
 def _stepped_grid(step_m: float, resolution: float, run_before: int = 4,
