@@ -17,7 +17,7 @@ a message back to the rover, so the guarantee does not depend on anybody
 remembering it. The only spinning executor is the rover-side one.
 
 Types are resolved by name at runtime because grid_map_msgs (which
-/localization/map needs) arrives with sub-project 3 and is not installed on
+/localization/map_tile needs) arrives with sub-project 3 and is not installed on
 this laptop yet. A topic whose type will not import is skipped with a
 warning: a bridge that refused to start would take semi-autonomous mode with
 it, for a topic nothing is publishing yet anyway.
