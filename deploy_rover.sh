@@ -25,11 +25,19 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# --no-build --test used to sync and exit 0 without running anything, which
+# reads exactly like a passing test run.
+if [ "$BUILD" -eq 0 ] && [ "$TEST" -eq 1 ]; then
+    echo "error: --test needs a build; --no-build --test would run no tests at all" >&2
+    exit 2
+fi
+
 # --delete so a file removed here disappears there; the excludes keep the
 # Orin's build products and its own .git out of the deletion.
 rsync -az --delete \
     --exclude '.git' --exclude 'build/' --exclude 'install/' --exclude 'log/' \
     --exclude '__pycache__/' --exclude '.pytest_cache/' \
+    --exclude 'test_data/' \
     "$REPO_DIR/rover/" "$ROVER_SSH:$ROVER_DIR/"
 echo "synced rover/ -> $ROVER_SSH:$ROVER_DIR/"
 
@@ -49,6 +57,9 @@ for pkg in src/*/; do
     echo "== pytest $pkg"
     (cd "$pkg" && python3 -m pytest test -q)
 done
+# The readiness gate is bash, so it has no package to live in.
+echo "== bash test/test_start_navi_gate.sh"
+bash test/test_start_navi_gate.sh
 '
 fi
 ssh "$ROVER_SSH" "$REMOTE"
