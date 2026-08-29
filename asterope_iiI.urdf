@@ -395,6 +395,118 @@
     </link>
 
 
+    <!--
+      ZED 2i x2, frames only. Layout and offsets copied from
+      stereolabs/zed-ros2-wrapper : zed_wrapper/urdf/zed_macro.urdf.xacro
+        camera_link   = 1/4" mounting screw (NOT the optical centre)
+        camera_center = camera_link + (0, 0, 0.015)
+        left  frame   = camera_center + (-0.01, +0.06, 0)   baseline 0.12
+        right frame   = camera_center + (-0.01, -0.06, 0)
+        *_optical     = pure rotation (-pi/2, 0, -pi/2), z fwd / x right / y down
+      Image + camera_info topics carry the *_optical frame id.
+      mag/baro/temp links are gated to model 'zed2' upstream, so a 2i has none.
+
+      Placed from the measured LEFT optical centres:
+        front (0.335, +0.060, 0.154) facing +X
+        rear  (-0.335, -0.060, 0.154) facing -X
+      Launch with publish_tf:=false so robot_state_publisher owns these frames.
+    -->
+    <link name="zed_front_camera_link"/>
+
+    <joint name="zed_front_camera_joint" type="fixed">
+        <parent link="base_link"/>
+        <child link="zed_front_camera_link"/>
+        <origin xyz="0.345 0 0.139" rpy="0 0 0"/>
+    </joint>
+
+    <link name="zed_front_camera_center"/>
+
+    <joint name="zed_front_camera_center_joint" type="fixed">
+        <parent link="zed_front_camera_link"/>
+        <child link="zed_front_camera_center"/>
+        <origin xyz="0 0 0.015" rpy="0 0 0"/>
+    </joint>
+
+    <link name="zed_front_left_camera_frame"/>
+
+    <joint name="zed_front_left_camera_joint" type="fixed">
+        <parent link="zed_front_camera_center"/>
+        <child link="zed_front_left_camera_frame"/>
+        <origin xyz="-0.01 0.06 0" rpy="0 0 0"/>
+    </joint>
+
+    <link name="zed_front_left_camera_frame_optical"/>
+
+    <joint name="zed_front_left_camera_optical_joint" type="fixed">
+        <parent link="zed_front_left_camera_frame"/>
+        <child link="zed_front_left_camera_frame_optical"/>
+        <origin xyz="0 0 0" rpy="-1.570796327 0 -1.570796327"/>
+    </joint>
+
+    <link name="zed_front_right_camera_frame"/>
+
+    <joint name="zed_front_right_camera_joint" type="fixed">
+        <parent link="zed_front_camera_center"/>
+        <child link="zed_front_right_camera_frame"/>
+        <origin xyz="-0.01 -0.06 0" rpy="0 0 0"/>
+    </joint>
+
+    <link name="zed_front_right_camera_frame_optical"/>
+
+    <joint name="zed_front_right_camera_optical_joint" type="fixed">
+        <parent link="zed_front_right_camera_frame"/>
+        <child link="zed_front_right_camera_frame_optical"/>
+        <origin xyz="0 0 0" rpy="-1.570796327 0 -1.570796327"/>
+    </joint>
+
+    <link name="zed_rear_camera_link"/>
+
+    <joint name="zed_rear_camera_joint" type="fixed">
+        <parent link="base_link"/>
+        <child link="zed_rear_camera_link"/>
+        <origin xyz="-0.345 0 0.139" rpy="0 0 3.141592654"/>
+    </joint>
+
+    <link name="zed_rear_camera_center"/>
+
+    <joint name="zed_rear_camera_center_joint" type="fixed">
+        <parent link="zed_rear_camera_link"/>
+        <child link="zed_rear_camera_center"/>
+        <origin xyz="0 0 0.015" rpy="0 0 0"/>
+    </joint>
+
+    <link name="zed_rear_left_camera_frame"/>
+
+    <joint name="zed_rear_left_camera_joint" type="fixed">
+        <parent link="zed_rear_camera_center"/>
+        <child link="zed_rear_left_camera_frame"/>
+        <origin xyz="-0.01 0.06 0" rpy="0 0 0"/>
+    </joint>
+
+    <link name="zed_rear_left_camera_frame_optical"/>
+
+    <joint name="zed_rear_left_camera_optical_joint" type="fixed">
+        <parent link="zed_rear_left_camera_frame"/>
+        <child link="zed_rear_left_camera_frame_optical"/>
+        <origin xyz="0 0 0" rpy="-1.570796327 0 -1.570796327"/>
+    </joint>
+
+    <link name="zed_rear_right_camera_frame"/>
+
+    <joint name="zed_rear_right_camera_joint" type="fixed">
+        <parent link="zed_rear_camera_center"/>
+        <child link="zed_rear_right_camera_frame"/>
+        <origin xyz="-0.01 -0.06 0" rpy="0 0 0"/>
+    </joint>
+
+    <link name="zed_rear_right_camera_frame_optical"/>
+
+    <joint name="zed_rear_right_camera_optical_joint" type="fixed">
+        <parent link="zed_rear_right_camera_frame"/>
+        <child link="zed_rear_right_camera_frame_optical"/>
+        <origin xyz="0 0 0" rpy="-1.570796327 0 -1.570796327"/>
+    </joint>
+
     <!-- Pre-existing block, kept as found. Do not copy it as an example:
          <static> is a *model* property and has no meaning inside a
          link-reference block, so this line does nothing. Proof rather than
@@ -665,28 +777,5 @@
         <origin xyz="0 0 0" rpy="0 0 0"/>
         <axis xyz="0 1 0"/>
     </joint>
-
-    <!-- ZED 2i camera frames. zed_camera_link is the frame the ZED ROS 2
-         wrapper tracks (its tracking base frame is hard-coded to that name),
-         placed at the centre of the front camera body: the black
-         37 x 188 x 30 mm box on the front white block. The offset was read
-         off that visual, which was itself authored from photographs -
-         it is NOT a measurement. navi_localization reports it as unverified
-         until someone measures camera centre to the base_link origin.
-         The rear camera is not connected today; its frame is here so the
-         day it is, only one number changes. -->
-    <joint name="zed_camera_joint" type="fixed">
-        <parent link="base_link"/>
-        <child link="zed_camera_link"/>
-        <origin xyz="0.322 0 0.154" rpy="0 0 0"/>
-    </joint>
-    <link name="zed_camera_link"/>
-
-    <joint name="zed_rear_camera_joint" type="fixed">
-        <parent link="base_link"/>
-        <child link="zed_rear_camera_link"/>
-        <origin xyz="-0.322 0 0.154" rpy="0 0 3.14159265"/>
-    </joint>
-    <link name="zed_rear_camera_link"/>
 
 </robot>
