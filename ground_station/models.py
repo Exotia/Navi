@@ -1,5 +1,6 @@
 """Pure-Python state models for the ground station — no Qt or ROS imports."""
 
+import json
 import math
 from dataclasses import dataclass, field
 from time import monotonic
@@ -102,3 +103,39 @@ def pose_readout_from_odometry(message: dict) -> dict:
             float(orientation.get("x", 0.0)), float(orientation.get("y", 0.0)),
             float(orientation.get("z", 0.0)), float(orientation.get("w", 1.0))),
     }
+
+
+@dataclass
+class MapState:
+    """/localization/map_status as the Map row shows it."""
+    cells_seen: int
+    extent_m: tuple
+    tiles: int
+    loaded: str | None
+    maps: list
+    last_command: dict | None
+
+
+def parse_map_status(payload: str):
+    try:
+        status = json.loads(payload)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(status, dict):
+        return None
+    extent = status.get("extent_m") or [0.0, 0.0]
+    last = status.get("last_command")
+    return MapState(
+        cells_seen=int(status.get("cells_seen", 0) or 0),
+        extent_m=(float(extent[0]), float(extent[1])),
+        tiles=int(status.get("tiles", 0) or 0),
+        loaded=status.get("loaded") if isinstance(status.get("loaded"), str) else None,
+        maps=[str(name) for name in status.get("maps", []) or []],
+        last_command=last if isinstance(last, dict) else None)
+
+
+def map_command_json(action: str, name: str | None = None) -> str:
+    command = {"action": action}
+    if name is not None:
+        command["name"] = name
+    return json.dumps(command)

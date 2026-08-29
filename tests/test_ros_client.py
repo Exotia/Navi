@@ -315,3 +315,31 @@ def test_subscribe_localization_pose_emits_x_y_and_yaw(qtbot):
     assert blocker.args[0]["x"] == 1.5
     assert blocker.args[0]["y"] == 2.5
     assert abs(blocker.args[0]["yaw"] - math.pi / 2) < 1e-9
+
+
+def test_map_status_is_parsed_and_emitted(qtbot):
+    client = make_client(qtbot)
+    received = []
+    client.signals.map_status_received.connect(received.append)
+    client.subscribe_map_status()
+    topic = next(t for t in FakeTopic.instances if t.name == "/localization/map_status")
+    assert topic.msg_type == "std_msgs/String"
+    topic.callback({"data": '{"cells_seen": 3, "maps": ["x"]}'})
+    assert received[-1].cells_seen == 3 and received[-1].maps == ["x"]
+    topic.callback({"data": "garbage"})
+    assert received[-1] is None
+
+
+def test_send_map_command_publishes_a_string_on_the_command_topic(qtbot):
+    client = make_client(qtbot)
+    client.connect()
+    client.send_map_command("save", "yard")
+    topic = next(t for t in FakeTopic.instances if t.name == "/localization/map_command")
+    assert topic.msg_type == "std_msgs/String"
+    assert json.loads(topic.published_messages[-1]["data"]) == {"action": "save", "name": "yard"}
+
+
+def test_send_map_command_without_a_connection_publishes_nothing(qtbot):
+    client = make_client(qtbot)
+    client.send_map_command("clear")
+    assert not any(t.name == "/localization/map_command" for t in FakeTopic.instances)

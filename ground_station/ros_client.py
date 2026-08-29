@@ -3,11 +3,12 @@ signals so roslibpy's background-thread callbacks are safely marshaled to
 the Qt GUI thread by Qt's own queued-connection mechanism."""
 
 import json
+import sys
 
 import roslibpy
 from PySide6.QtCore import QObject, Signal
 
-from ground_station.models import pose_readout_from_odometry
+from ground_station.models import map_command_json, parse_map_status, pose_readout_from_odometry
 
 # /localization/pose is published at the ZED wrapper's ~30 Hz and is wanted
 # here for one header readout. rosbridge's own throttle_rate (milliseconds)
@@ -22,6 +23,7 @@ class RosSignals(QObject):
     video_status_received = Signal(dict)
     localization_status_received = Signal(dict)
     localization_pose_received = Signal(dict)
+    map_status_received = Signal(object)
 
 
 def _localization_status_failure(detail: str) -> dict:
@@ -45,6 +47,8 @@ class RosBridgeClient:
         self._video_status_topic = None
         self._localization_status_topic = None
         self._localization_pose_topic = None
+        self._map_status_topic = None
+        self._map_command_topic = None
 
     def connect(self) -> None:
         self._ros.on_ready(lambda: self.signals.connection_changed.emit(True))
@@ -175,3 +179,21 @@ class RosBridgeClient:
                 "height": height, "fps": fps, "bitrate_kbps": bitrate_kbps,
             }),
         }))
+
+    def subscribe_map_status(self, topic_name: str = "/localization/map_status") -> None:
+        """The rover's map: size, what is loaded, which maps are saved, and
+        the outcome of the last command. JSON in a std_msgs/String at 1 Hz."""
+        topic = self._topic_factory(self._ros, topic_name, "std_msgs/String")
+        topic.subscribe(lambda msg: self.signals.map_status_received.emit(
+            parse_map_status(msg.get("data", ""))))
+        self._map_status_topic = topic
+
+    def send_map_command(self, action: str, name: str | None = None,
+                         topic_name: str = "/localization/map_command") -> None:
+        """save / load / clear, as the JSON elevation_mapper reads."""
+        if not self.is_connected:
+            print("ground_station: not connected, map command dropped", file=sys.stderr)
+            return
+        if self._map_command_topic is None:
+            self._map_command_topic = self._topic_factory(self._ros, topic_name, "std_msgs/String")
+        self._map_command_topic.publish(self._message_factory({"data": map_command_json(action, name)}))

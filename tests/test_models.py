@@ -129,3 +129,27 @@ def test_pose_readout_of_a_truncated_message_reads_as_the_origin_not_a_crash():
     # not take the GUI thread down mid-drive; a readout at the origin is
     # visibly wrong and recoverable, an exception in a Qt slot is not.
     assert pose_readout_from_odometry({}) == {"x": 0.0, "y": 0.0, "yaw": 0.0}
+
+
+import json
+
+from ground_station.models import MapState, map_command_json, parse_map_status
+
+
+def test_map_status_parses_every_field_with_defaults():
+    state = parse_map_status('{"resolution": 0.05, "cells_seen": 12, "extent_m": [3.5, 2.0],'
+                             ' "tiles": 2, "loaded": null, "maps": ["b", "a"], "last_command": null}')
+    assert state == MapState(cells_seen=12, extent_m=(3.5, 2.0), tiles=2, loaded=None,
+                             maps=["b", "a"], last_command=None)
+    assert parse_map_status('{}') == MapState(cells_seen=0, extent_m=(0.0, 0.0), tiles=0,
+                                              loaded=None, maps=[], last_command=None)
+
+
+def test_map_status_that_is_not_json_is_none():
+    assert parse_map_status('nope') is None
+    assert parse_map_status('[1,2]') is None
+
+
+def test_map_commands_are_the_json_the_rover_reads():
+    assert json.loads(map_command_json("save", "yard")) == {"action": "save", "name": "yard"}
+    assert json.loads(map_command_json("clear")) == {"action": "clear"}
