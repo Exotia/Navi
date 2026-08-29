@@ -17,9 +17,11 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import PointCloud2, PointField
 
 from navi_localization.elevation_mapper import (
-    MAP_COMMAND_TOPIC, MAP_STATUS_TOPIC, MAP_TILE_TOPIC, POSE_TOPIC, ElevationMapper,
-    build_tile_message, points_from_cloud)
+    MAP_COMMAND_TOPIC, MAP_STATUS_TOPIC, MAP_TILE_TOPIC, OBSTACLE_TILE_TOPIC, POSE_TOPIC,
+    ElevationMapper, build_obstacle_message, build_tile_message, parse_obstacle_frame,
+    points_from_cloud)
 from navi_localization.tiles import TILE_SAMPLES, tile_center, tile_index_of
+from navi_localization.voxels import VOXEL
 from std_msgs.msg import String
 
 
@@ -112,6 +114,35 @@ def test_the_tile_layout_is_grid_maps_column_major_with_index_zero_at_max_x_max_
     assert data.data[-1] == 1.0
 
 
+def test_build_obstacle_message_carries_tile_identity_and_voxel_centres():
+    voxels = np.array([[2, 2, 10], [2, 3, 10]], dtype=np.int32)
+    message = build_obstacle_message((0, 1), voxels, Time())
+
+    assert message.header.frame_id == 'map|0|1'
+    assert parse_obstacle_frame(message.header.frame_id) == (0, 1)
+    assert message.height == 1 and message.width == 2
+    assert message.is_dense is True
+    assert message.point_step == 12
+    names = [field.name for field in message.fields]
+    offsets = [field.offset for field in message.fields]
+    assert names == ['x', 'y', 'z'] and offsets == [0, 4, 8]
+    points = np.frombuffer(bytes(message.data), dtype=np.float32).reshape(-1, 3)
+    expected = (voxels.astype(np.float64) + 0.5) * VOXEL
+    assert points == pytest.approx(expected, abs=1e-6)
+
+
+def test_build_obstacle_message_with_no_voxels_is_an_empty_but_valid_message():
+    message = build_obstacle_message((3, -2), np.zeros((0, 3), dtype=np.int32), Time())
+    assert message.width == 0
+    assert bytes(message.data) == b''
+    assert parse_obstacle_frame(message.header.frame_id) == (3, -2)
+
+
+def test_parse_obstacle_frame_refuses_a_plain_map_frame():
+    with pytest.raises(ValueError):
+        parse_obstacle_frame('map')
+
+
 # Node-level tests: the node is exercised with messages fed straight into its
 # callbacks and its publishers replaced with recorders, the same pattern
 # test_localization_status.py uses. No spinning, no executor - the timer is
@@ -137,6 +168,7 @@ def ros():
 def node(ros, tmp_path):
     node = ElevationMapper(map_directory=str(tmp_path))
     node._tile_publisher = Recorder()
+    node._obstacle_publisher = Recorder()
     node._status_publisher = Recorder()
     yield node
     node.destroy_node()
@@ -144,6 +176,16 @@ def node(ros, tmp_path):
 
 def points_at(x0, y0, n=60, z=1.0):
     return [[x0 + 0.05 * i, y0 + 0.05 * j, z] for i in range(n) for j in range(2)]
+
+
+def wall_cloud(n=4):
+    """A small ground patch plus a two-point wall voxel directly above its
+    first cell (2, 2 in grid indices, tile (0, 0)) - enough ground for
+    ground_height() to answer for that cell, and enough points in one voxel
+    (MIN_POINTS_PER_VOXEL) for the wall to register as an obstacle."""
+    ground = points_at(0.1, 0.1, n=n, z=0.0)
+    wall = [[0.1, 0.1, 0.5], [0.1, 0.1, 0.5]]
+    return cloud(ground + wall)
 
 
 def test_a_cloud_then_a_tick_publishes_the_tiles_it_touched(node):
@@ -254,9 +296,9 @@ def test_clear_empties_the_grid_and_sends_every_published_tile_once_more_as_nan(
     assert status['cells_seen'] == 0 and status['tiles'] == 0
 
 
-def test_the_node_talks_on_exactly_the_three_map_topics(node):
+def test_the_node_talks_on_the_map_and_obstacle_topics(node):
     names = {name for name, _ in node.get_topic_names_and_types()}
-    assert {MAP_TILE_TOPIC, MAP_COMMAND_TOPIC, MAP_STATUS_TOPIC} <= names
+    assert {MAP_TILE_TOPIC, OBSTACLE_TILE_TOPIC, MAP_COMMAND_TOPIC, MAP_STATUS_TOPIC} <= names
     assert '/localization/map' not in names
 
 
@@ -364,7 +406,7 @@ class ExplodingStore:
     def list_names(self):
         return self._real.list_names()
 
-    def save(self, name, state, overwrite=False):
+    def save(self, name, state, voxels=None, overwrite=False):
         raise OSError('[Errno 28] No space left on device')
 
     def load(self, name):
@@ -440,6 +482,7 @@ def test_the_tile_publisher_is_deep_enough_for_a_blanking_burst(ros, tmp_path):
     node = ElevationMapper(map_directory=str(tmp_path))
     try:
         assert node._tile_publisher.qos_profile.depth >= 64
+        assert node._obstacle_publisher.qos_profile.depth >= 64
     finally:
         node.destroy_node()
 
@@ -487,3 +530,88 @@ def test_a_tile_that_comes_back_before_its_blank_went_out_is_not_blanked(node):
                for m in node._tile_publisher.messages
                if np.isnan(np.asarray(m.data[0].data)).all()}
     assert (0, 0) not in blanked and (1, 0) not in blanked
+
+
+# Obstacle voxel tiles: publish, save/load, clear, and the one case terrain
+# tiles never hit - a tile touched by a live update that loses every voxel.
+
+
+def test_a_wall_publishes_an_obstacle_tile_with_the_right_frame_id_and_centres(node):
+    node._on_cloud(wall_cloud())
+    node._tick(now=0.0)
+
+    non_empty = [m for m in node._obstacle_publisher.messages if m.width > 0]
+    assert len(non_empty) == 1
+    message = non_empty[0]
+    assert parse_obstacle_frame(message.header.frame_id) == (0, 0)     # cell (2, 2) -> tile (0, 0)
+    assert message.point_step == 12 and message.is_dense is True
+
+    points = np.frombuffer(bytes(message.data), dtype=np.float32).reshape(-1, 3)
+    assert points.shape == (1, 3)
+    wall_voxel = np.array([2, 2, int(np.floor(0.5 / VOXEL))])
+    expected_centre = (wall_voxel.astype(np.float64) + 0.5) * VOXEL
+    assert points[0] == pytest.approx(expected_centre, abs=1e-5)
+
+
+def test_terrain_tiles_are_unaffected_by_obstacle_voxels(node):
+    # The same cloud that raises an obstacle also still maps the ground
+    # underneath it as ordinary terrain.
+    node._on_cloud(wall_cloud())
+    node._tick(now=0.0)
+
+    assert node._tile_publisher.messages          # terrain still publishes
+    assert any(np.isfinite(np.asarray(m.data[0].data)).any()
+               for m in node._tile_publisher.messages)
+
+
+def test_save_load_round_trips_the_obstacle_voxels_and_the_status_count(node):
+    node._on_cloud(wall_cloud())
+    node._publish_status()
+    assert json.loads(node._status_publisher.messages[-1].data)['voxels'] == 1
+
+    node._on_command(String(data='{"action":"save","name":"yard"}'))
+    node._on_command(String(data='{"action":"clear"}'))
+    node._publish_status()
+    assert json.loads(node._status_publisher.messages[-1].data)['voxels'] == 0
+
+    node._on_command(String(data='{"action":"load","name":"yard"}'))
+    node._publish_status()
+    status = json.loads(node._status_publisher.messages[-1].data)
+    assert status['voxels'] == 1 and status['loaded'] == 'yard'
+
+    node._tick(now=1.0)
+    non_empty = [m for m in node._obstacle_publisher.messages if m.width > 0]
+    assert any(parse_obstacle_frame(m.header.frame_id) == (0, 0) for m in non_empty)
+
+
+def test_clear_sends_an_empty_obstacle_tile_for_every_published_one(node):
+    node._on_cloud(wall_cloud())
+    node._tick(now=0.0)
+    published_keys = {parse_obstacle_frame(m.header.frame_id)
+                       for m in node._obstacle_publisher.messages if m.width > 0}
+    assert published_keys                      # sanity: the wall did publish
+
+    node._obstacle_publisher.messages.clear()
+    node._on_command(String(data='{"action":"clear"}'))
+    assert node._obstacle_publisher.messages == []      # paced by _tick, not bursted
+
+    node._tick(now=1.0)
+    keys = {parse_obstacle_frame(m.header.frame_id) for m in node._obstacle_publisher.messages}
+    assert keys == published_keys
+    assert all(m.width == 0 for m in node._obstacle_publisher.messages)
+
+
+def test_an_obstacle_tile_that_loses_all_voxels_is_republished_empty(node):
+    node._on_cloud(wall_cloud())
+    node._tick(now=0.0)
+    node._obstacle_publisher.messages.clear()
+
+    # Same cell touched again, but this time with only ground-height
+    # points: no obstacle candidate there any more, so the tile ObstacleMap
+    # touched loses every voxel and becomes empty.
+    node._on_cloud(cloud(points_at(0.1, 0.1, n=4, z=0.0)))
+    node._tick(now=2.0)
+
+    empty = [m for m in node._obstacle_publisher.messages if m.width == 0]
+    assert empty
+    assert parse_obstacle_frame(empty[0].header.frame_id) == (0, 0)

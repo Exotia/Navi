@@ -2,9 +2,12 @@
 
 Opt-in and one-shot: nothing is written unless the operator asks for a
 save. A map file is the grid whole (height, top, count, lattice origin,
-resolution), compressed - the yard at 5 cm is under a megabyte. `top` is a
-newer field: a map saved before it existed has no `top` key, and loading
-one falls back to a copy of `elevation` rather than refusing the file.
+resolution) plus the obstacle voxels, compressed - the yard at 5 cm is
+under a megabyte. `top` is a newer field: a map saved before it existed
+has no `top` key, and loading one falls back to a copy of `elevation`
+rather than refusing the file. `voxels` is newer still: a map saved
+before obstacle voxels existed has no `voxels` key, and loading one falls
+back to an empty `(0, 3)` array rather than refusing the file.
 """
 
 import os
@@ -43,12 +46,15 @@ class MapStore:
         return sorted(entry[:-4] for entry in os.listdir(self.directory)
                       if entry.endswith('.npz') and NAME_PATTERN.match(entry[:-4]))
 
-    def save(self, name: str, state: GridState, overwrite: bool = False) -> str:
+    def save(self, name: str, state: GridState, voxels: np.ndarray = None,
+             overwrite: bool = False) -> str:
         self.validate_name(name)
         path = self._path(name)
         if os.path.exists(path) and not overwrite:
             raise MapStoreError(f"a map named {name!r} already exists")
         os.makedirs(self.directory, exist_ok=True)
+        voxels = (np.zeros((0, 3), dtype=np.int32) if voxels is None
+                  else np.asarray(voxels, dtype=np.int32).reshape(-1, 3))
         # Write beside, then rename: a save interrupted half way must not
         # leave a truncated file under the real name.
         temporary = path + '.tmp'
@@ -61,6 +67,7 @@ class MapStore:
                     count=state.count.astype(np.int32),
                     origin_ix=np.int64(state.origin_ix), origin_iy=np.int64(state.origin_iy),
                     resolution=np.float64(state.resolution),
+                    voxels=voxels,
                     saved_at=np.str_(datetime.now(timezone.utc).isoformat(timespec='seconds')))
             written = True
         finally:
@@ -72,8 +79,10 @@ class MapStore:
         os.replace(temporary, path)
         return path
 
-    def load(self, name: str) -> GridState:
-        """The saved grid, or MapStoreError - never a raw numpy/zip error.
+    def load(self, name: str) -> tuple:
+        """`(GridState, voxels)`, or MapStoreError - never a raw numpy/zip
+        error. `voxels` is `(K, 3) int32`, empty `(0, 3)` for a map saved
+        before obstacle voxels existed.
 
         A map file on the rover can be truncated (the Orin lost power
         mid-save on an older build), be something else entirely that got
@@ -102,6 +111,8 @@ class MapStore:
                 # lets an older map still load rather than being refused.
                 top = (data['top'].astype(np.float32) if 'top' in data.files
                        else elevation.copy())
+                voxels = (data['voxels'].astype(np.int32).reshape(-1, 3)
+                          if 'voxels' in data.files else np.zeros((0, 3), dtype=np.int32))
                 count = data['count'].astype(np.int32)
                 origin_ix, origin_iy = int(data['origin_ix']), int(data['origin_iy'])
                 resolution = float(data['resolution'])
@@ -120,4 +131,4 @@ class MapStore:
                 f"map {name!r} is inconsistent: top {top.shape} does not "
                 f"match elevation {elevation.shape}")
         return GridState(elevation=elevation, top=top, count=count, origin_ix=origin_ix,
-                         origin_iy=origin_iy, resolution=resolution)
+                         origin_iy=origin_iy, resolution=resolution), voxels

@@ -23,12 +23,36 @@ def test_save_then_list_then_load_round_trips(tmp_path):
     assert path.endswith('yard-day1.npz')
     assert store.list_names() == ['yard-day1']
 
-    loaded = store.load('yard-day1')
+    loaded, voxels = store.load('yard-day1')
     assert np.array_equal(loaded.elevation, saved.elevation, equal_nan=True)
     assert np.array_equal(loaded.top, saved.top, equal_nan=True)
     assert loaded.top.dtype == np.float32
     assert loaded.count.dtype == np.int32 and loaded.count.sum() == 24
     assert (loaded.origin_ix, loaded.origin_iy, loaded.resolution) == (-3, 7, 0.05)
+    assert voxels.shape == (0, 3) and voxels.dtype == np.int32
+
+
+def test_save_then_load_round_trips_the_obstacle_voxels(tmp_path):
+    store = MapStore(str(tmp_path))
+    saved_voxels = np.array([[1, 2, 3], [4, 5, 6]], dtype=np.int32)
+    store.save('yard-day1', state(), saved_voxels)
+
+    _, voxels = store.load('yard-day1')
+    assert voxels.dtype == np.int32
+    assert np.array_equal(voxels, saved_voxels)
+
+
+def test_loading_a_map_saved_before_voxels_existed_falls_back_to_empty(tmp_path):
+    store = MapStore(str(tmp_path))
+    elevation = np.full((4, 6), 2.0, dtype=np.float32)
+    elevation[0, 0] = np.nan
+    np.savez_compressed(str(tmp_path / 'old.npz'),
+                        elevation=elevation, count=np.ones((4, 6), dtype=np.int32),
+                        origin_ix=np.int64(0), origin_iy=np.int64(0),
+                        resolution=np.float64(0.05))
+
+    _, voxels = store.load('old')
+    assert voxels.shape == (0, 3) and voxels.dtype == np.int32
 
 
 def test_loading_a_map_saved_before_top_existed_falls_back_to_elevation(tmp_path):
@@ -40,7 +64,7 @@ def test_loading_a_map_saved_before_top_existed_falls_back_to_elevation(tmp_path
                         origin_ix=np.int64(0), origin_iy=np.int64(0),
                         resolution=np.float64(0.05))
 
-    loaded = store.load('old')
+    loaded, _ = store.load('old')
     assert np.array_equal(loaded.top, elevation, equal_nan=True)
 
 
@@ -50,7 +74,8 @@ def test_saving_over_an_existing_name_is_refused_unless_asked(tmp_path):
     with pytest.raises(MapStoreError, match='exists'):
         store.save('a', state(2.0))
     store.save('a', state(2.0), overwrite=True)
-    assert store.load('a').elevation[1, 1] == 2.0
+    loaded, _ = store.load('a')
+    assert loaded.elevation[1, 1] == 2.0
 
 
 @pytest.mark.parametrize('bad', ['', 'has space', 'a/b', '../x', 'ü', 'x' * 65])

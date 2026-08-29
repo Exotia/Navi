@@ -104,10 +104,16 @@ def _bucket_by_tile(sorted_voxels: np.ndarray) -> dict:
             for s, e in zip(starts, ends)}
 
 
-def _touched_and_voxels(points, ground_height, rover_z):
+def _touched_and_voxels(points, ground_height, rover_z, already_filtered=False):
     """The tile keys any finite point landed in (by x/y cell, regardless of
-    candidacy) and the occupied voxels per tile, each already sorted."""
-    pts = finite_points(points)
+    candidacy) and the occupied voxels per tile, each already sorted.
+
+    `already_filtered=True`: `points` is already `finite_points`' output -
+    the elevation grid needs the same filtered array for the same cloud,
+    and filtering twice would double a ~40 ms cost for 200k points with
+    nothing gained (elevation_mapper._on_cloud filters once and hands the
+    result to both)."""
+    pts = points if already_filtered else finite_points(points)
     if pts.shape[0] == 0:
         return set(), {}
 
@@ -147,13 +153,13 @@ def _touched_and_voxels(points, ground_height, rover_z):
     return touched, _bucket_by_tile(_lexsort_rows(occupied))
 
 
-def occupied_voxels(points, ground_height, rover_z) -> dict:
+def occupied_voxels(points, ground_height, rover_z, already_filtered=False) -> dict:
     """`points`: (N, 3) float64. `ground_height(ix, iy)`: cell indices ->
     float array, NaN where the cell has no ground yet. `rover_z`: the
     rover's footprint z, or None before the first pose. Returns
     `{(tile_ix, tile_iy): (M, 3) int32}`, sorted, for tiles with at least
-    one occupied voxel."""
-    _, voxels = _touched_and_voxels(points, ground_height, rover_z)
+    one occupied voxel. `already_filtered`: see `_touched_and_voxels`."""
+    _, voxels = _touched_and_voxels(points, ground_height, rover_z, already_filtered)
     return voxels
 
 
@@ -165,8 +171,9 @@ class ObstacleMap:
     def __init__(self):
         self._tiles = {}   # key -> (M, 3) int32, sorted; only non-empty tiles
 
-    def update(self, points, ground_height, rover_z) -> None:
-        touched, new_voxels = _touched_and_voxels(points, ground_height, rover_z)
+    def update(self, points, ground_height, rover_z, already_filtered=False) -> None:
+        touched, new_voxels = _touched_and_voxels(
+            points, ground_height, rover_z, already_filtered)
         for key in touched:
             voxels = new_voxels.get(key)
             if voxels is None or voxels.shape[0] == 0:

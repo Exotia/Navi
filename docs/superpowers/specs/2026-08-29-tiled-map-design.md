@@ -160,11 +160,16 @@ uncompressed, `np.savez_compressed` makes it far smaller.
 
 ```json
 {"resolution": 0.05, "cells_seen": 48210, "extent_m": [21.4, 17.9],
- "tiles": 71, "loaded": "yard-day1" | null,
+ "tiles": 71, "voxels": 3820, "loaded": "yard-day1" | null,
  "maps": ["yard-day1", "test"],
  "last_command": {"action": "save", "name": "yard-day1", "ok": true,
                   "error": null, "at": "2026-08-29T15:02:11"} | null}
 ```
+
+`voxels` is the obstacle-voxel count (`ObstacleMap.voxel_count`, from the
+`2026-08-30-obstacle-voxels-design.md` extension) - everything the ZED sees
+that is not ground, published per tile on `/localization/obstacle_tile`
+next to the elevation tiles.
 
 `maps` is the directory listing of `~/navi_maps/*.npz`, refreshed every
 status message (cheap). The ground station's dropdown is this list.

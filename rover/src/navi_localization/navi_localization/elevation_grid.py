@@ -122,8 +122,13 @@ class ElevationGrid:
         self._top = np.zeros((0, 0), dtype=np.float64)
         self._count = np.zeros((0, 0), dtype=np.int64)
 
-    def update(self, points) -> None:
-        kept = finite_points(points)
+    def update(self, points, already_filtered: bool = False) -> None:
+        """`already_filtered=True`: `points` is already the output of
+        `finite_points` (the obstacle voxeliser needs the same filtered
+        array, and `finite_points` + index flooring cost ~40 ms per 200k
+        points - see elevation_mapper._on_cloud, which calls it once and
+        hands the result to both this and `ObstacleMap.update`)."""
+        kept = points if already_filtered else finite_points(points)
         if kept.size == 0:
             return
         ix = np.floor(kept[:, 0] / self.resolution).astype(np.int64)
@@ -165,6 +170,32 @@ class ElevationGrid:
         self._height.flat[unique_flat] = z_sorted[percentile_rank]
         self._top.flat[unique_flat] = z_sorted[max_rank]
         self._count.flat[unique_flat] = counts
+
+    def height_at(self, ix_cells: np.ndarray, iy_cells: np.ndarray) -> np.ndarray:
+        """The 20th-percentile height already stored for these absolute
+        grid cells (same index convention as `update()`: `floor(x /
+        resolution)`) - NaN where the cell is outside the grid's current
+        window or has never been seen. This reads whatever `update()` last
+        wrote, so a caller after `update()` in the same cloud sees *this*
+        update's heights, which is what the obstacle voxeliser needs as its
+        ground reference."""
+        ix_cells = np.asarray(ix_cells, dtype=np.int64)
+        iy_cells = np.asarray(iy_cells, dtype=np.int64)
+        out = np.full(ix_cells.shape, np.nan, dtype=np.float64)
+        if self._origin_ix is None:
+            return out
+        rows, cols = self._height.shape
+        inside = ((ix_cells >= self._origin_ix) & (ix_cells < self._origin_ix + cols)
+                  & (iy_cells >= self._origin_iy) & (iy_cells < self._origin_iy + rows))
+        if not inside.any():
+            return out
+        flat = ((iy_cells[inside] - self._origin_iy) * cols
+                + (ix_cells[inside] - self._origin_ix))
+        seen = self._count.flat[flat] > 0
+        values = np.full(flat.shape, np.nan, dtype=np.float64)
+        values[seen] = self._height.flat[flat[seen]]
+        out[inside] = values
+        return out
 
     def _fit_window(self, ix: np.ndarray, iy: np.ndarray) -> None:
         low_x, high_x = int(ix.min()), int(ix.max())

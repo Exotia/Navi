@@ -4,8 +4,11 @@ Input is the ZED SDK's fused point cloud, which the wrapper publishes in the
 map frame - the same frame and the same tracking as /localization/pose, so
 the map and the pose cannot drift apart relative to each other. Output is a
 stream of grid_map_msgs/GridMap tiles, one `elevation` layer each, on
-/localization/map_tile, plus JSON status on /localization/map_status and
-JSON commands accepted on /localization/map_command.
+/localization/map_tile; a stream of sensor_msgs/PointCloud2 obstacle-voxel
+tiles (everything the ZED sees that is not ground, from the same cloud
+update - see navi_localization.voxels) on /localization/obstacle_tile;
+plus JSON status on /localization/map_status and JSON commands accepted
+on /localization/map_command.
 
 The cloud is read with numpy rather than sensor_msgs_py.point_cloud2:
 ZedCamera::callback_pubFusedPc lays every point out as four float32s
@@ -47,14 +50,16 @@ from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2, PointField
 from std_msgs.msg import Float32MultiArray, MultiArrayDimension, String
 
-from navi_localization.elevation_grid import RESOLUTION, ElevationGrid
+from navi_localization.elevation_grid import RESOLUTION, ElevationGrid, finite_points
 from navi_localization.map_store import DEFAULT_DIRECTORY, MapStore
 from navi_localization.tiles import (
-    TILE_SAMPLES, TileScheduler, tile_center, tiles_of_snapshot)
+    TILE_SAMPLES, PayloadScheduler, TileScheduler, tile_center, tiles_of_snapshot)
+from navi_localization.voxels import VOXEL, ObstacleMap
 
 FUSED_CLOUD_TOPIC = '/zed_front/zed_node/mapping/fused_cloud'
 POSE_TOPIC = '/localization/pose'
 MAP_TILE_TOPIC = '/localization/map_tile'
+OBSTACLE_TILE_TOPIC = '/localization/obstacle_tile'
 MAP_COMMAND_TOPIC = '/localization/map_command'
 MAP_STATUS_TOPIC = '/localization/map_status'
 LAYER = 'elevation'
@@ -136,6 +141,47 @@ def build_tile_message(key, tile: np.ndarray, frame_id: str, stamp) -> GridMap:
     return message
 
 
+def build_obstacle_message(key, voxels: np.ndarray, stamp) -> PointCloud2:
+    """One obstacle tile's occupied voxels as a PointCloud2 of their
+    centres, `(index + 0.5) * VOXEL` in the map frame.
+
+    A GridMap's own fields have nowhere to carry a tile's identity for an
+    *empty* obstacle tile (all its voxels gone), which still has to be
+    publishable so a consumer can remove whatever it drew there - so, like
+    the design's `map|<ix>|<iy>`, that identity travels in `header.frame_id`
+    instead of the usual bare `"map"`. `parse_obstacle_frame` is the
+    inverse.
+    """
+    ix, iy = key
+    voxels = np.asarray(voxels, dtype=np.int32).reshape(-1, 3)
+    centres = ((voxels.astype(np.float64) + 0.5) * VOXEL).astype(np.float32)
+    message = PointCloud2()
+    message.header.frame_id = f"map|{ix}|{iy}"
+    message.header.stamp = stamp
+    message.height = 1
+    message.width = int(centres.shape[0])
+    message.fields = [
+        PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
+        PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
+        PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
+    ]
+    message.is_bigendian = False
+    message.point_step = 12
+    message.row_step = message.point_step * message.width
+    message.is_dense = True
+    message.data = centres.tobytes()
+    return message
+
+
+def parse_obstacle_frame(frame_id: str) -> tuple:
+    """`"map|<ix>|<iy>"` -> `(ix, iy)`: the inverse of the frame_id
+    `build_obstacle_message` writes."""
+    parts = frame_id.split('|')
+    if len(parts) != 3 or parts[0] != 'map':
+        raise ValueError(f"not an obstacle tile frame_id: {frame_id!r}")
+    return int(parts[1]), int(parts[2])
+
+
 class ElevationMapper(Node):
 
     def __init__(self, map_directory: str = None) -> None:
@@ -154,6 +200,8 @@ class ElevationMapper(Node):
         self._frame_id = str(self.get_parameter('frame_id').value)
         self._grid = ElevationGrid()
         self._scheduler = TileScheduler()
+        self._obstacles = ObstacleMap()
+        self._obstacle_scheduler = PayloadScheduler()
         self._store = MapStore(str(self.get_parameter('map_directory').value))
         self._loaded = None
         self._last_command = None
@@ -164,11 +212,23 @@ class ElevationMapper(Node):
         # None until /localization/pose's first message: no rover height to
         # clamp relative to yet, so _offer applies no clamp at all.
         self._rover_z = None
-        # Tiles a clear or a load has orphaned, waiting to go out as
-        # all-NaN, `NAN_TILES_PER_TICK` a tick. The set is the queue's
-        # membership: a key is dropped from it (not from the deque) when
-        # the tile comes back to life before its blank was sent, so a
-        # freshly mapped tile is never blanked behind the sim's back.
+        # Tiles a clear, a load, or (obstacles only) a later update that
+        # fused an obstacle away has orphaned, waiting to go out as an
+        # empty terrain or obstacle tile, `NAN_TILES_PER_TICK` a tick.
+        # Entries are `(kind, key)` - `kind in {"terrain", "obstacle"}` -
+        # because both share one budget and one deque: a clear or a load
+        # can orphan tens to hundreds of tiles of *either* kind at once
+        # (about 196 terrain tiles over the yard, and however many obstacle
+        # tiles were touched), and bursting all of those into a depth-64
+        # RELIABLE KEEP_LAST writer (twice over, once per kind, if they had
+        # separate deques) would still overrun it exactly as a single-kind
+        # burst used to - see TILE_QUEUE_DEPTH's comment. One shared,
+        # tick-paced deque keeps both kinds under the same budget instead
+        # of each separately bursting up to NAN_TILES_PER_TICK. The set is
+        # the queue's membership: an entry is dropped from it (not from the
+        # deque) when its tile comes back to life before its blank was
+        # sent, so a freshly mapped tile is never blanked behind the sim's
+        # back.
         self._pending_nan = deque()
         self._pending_nan_keys = set()
 
@@ -177,6 +237,8 @@ class ElevationMapper(Node):
         # would mean no data at all. Late joiners get the keepalive.
         self._tile_publisher = self.create_publisher(
             GridMap, MAP_TILE_TOPIC, TILE_QUEUE_DEPTH)
+        self._obstacle_publisher = self.create_publisher(
+            PointCloud2, OBSTACLE_TILE_TOPIC, TILE_QUEUE_DEPTH)
         self._status_publisher = self.create_publisher(String, MAP_STATUS_TOPIC, 1)
         self.create_subscription(
             PointCloud2, str(self.get_parameter('cloud_topic').value), self._on_cloud, 1)
@@ -196,17 +258,36 @@ class ElevationMapper(Node):
 
     def _on_cloud(self, message: PointCloud2) -> None:
         try:
-            points = points_from_cloud(message)
+            raw_points = points_from_cloud(message)
         except ValueError as error:
             self.get_logger().error(str(error))
             return
-        self._grid.update(points)
+        # finite_points + index flooring cost ~40 ms per 200k points
+        # (task 1's measurement) - filtered once here and handed to both
+        # the grid and the obstacle voxeliser, rather than each filtering
+        # its own copy of the same cloud.
+        points = finite_points(raw_points)
+        self._grid.update(points, already_filtered=True)
         if self._grid.points_outside_cap and not self._warned_about_cap:
             self._warned_about_cap = True
             self.get_logger().warn(
                 f"{self._grid.points_outside_cap} points fell outside the "
                 "60 x 60 m map and were dropped; the map stays where it "
                 "started rather than sliding and forgetting ground")
+        # The grid was just updated with these points, so height_at reads
+        # *this* update's ground heights - the voxeliser's own reference,
+        # per the spec.
+        before = set(self._obstacles.tiles())
+        self._obstacles.update(
+            points, self._grid.height_at, self._rover_z, already_filtered=True)
+        after = set(self._obstacles.tiles())
+        # A tile this update touched but which lost every occupied voxel
+        # (ObstacleMap.update only replaces touched tiles) is not in
+        # `after`; it also will not be re-offered through the obstacle
+        # scheduler below, since tiles() no longer mentions it - so it is
+        # queued as a one-shot empty tile, paced exactly like a clear's or
+        # a load's blanks.
+        self._queue_nan('obstacle', before - after)
         self._offer(self._now())
 
     def _on_pose(self, message: Odometry) -> None:
@@ -245,41 +326,58 @@ class ElevationMapper(Node):
         snapshot = self._grid.snapshot()
         if snapshot is None:
             self._tile_count = 0
-            return
-        keys = tiles_of_snapshot(self._clamped_for_tiles(snapshot))
-        # Remembered rather than recomputed in _publish_status: cutting the
-        # snapshot into tiles costs ~32 ms over a full 60 m map on the
-        # Jetson, and the status timer runs once a second whether or not
-        # anything changed. Here it is computed anyway.
-        self._tile_count = len(keys)
-        for key in keys:
-            # Live again before its blank went out: sending the blank now
-            # would erase terrain the map does believe in.
-            self._pending_nan_keys.discard(key)
-        self._scheduler.offer(keys, now)
+        else:
+            keys = tiles_of_snapshot(self._clamped_for_tiles(snapshot))
+            # Remembered rather than recomputed in _publish_status: cutting
+            # the snapshot into tiles costs ~32 ms over a full 60 m map on
+            # the Jetson, and the status timer runs once a second whether
+            # or not anything changed. Here it is computed anyway.
+            self._tile_count = len(keys)
+            for key in keys:
+                # Live again before its blank went out: sending the blank
+                # now would erase terrain the map does believe in.
+                self._pending_nan_keys.discard(('terrain', key))
+            self._scheduler.offer(keys, now)
 
-    def _queue_nan(self, keys) -> None:
+        obstacle_tiles = self._obstacles.tiles()
+        for key in obstacle_tiles:
+            self._pending_nan_keys.discard(('obstacle', key))
+        self._obstacle_scheduler.offer(obstacle_tiles, now)
+
+    def _queue_nan(self, kind: str, keys) -> None:
         for key in keys:
-            if key not in self._pending_nan_keys:
-                self._pending_nan_keys.add(key)
-                self._pending_nan.append(key)
+            entry = (kind, key)
+            if entry not in self._pending_nan_keys:
+                self._pending_nan_keys.add(entry)
+                self._pending_nan.append(entry)
 
     def _tick(self, now: float = None) -> None:
         now = self._now() if now is None else now
         stamp = self.get_clock().now().to_msg()
-        empty = np.full((TILE_SAMPLES, TILE_SAMPLES), np.nan, dtype=np.float32)
+        empty_terrain = np.full((TILE_SAMPLES, TILE_SAMPLES), np.nan, dtype=np.float32)
+        empty_voxels = np.zeros((0, 3), dtype=np.int32)
         sent = 0
         while self._pending_nan and sent < NAN_TILES_PER_TICK:
-            key = self._pending_nan.popleft()
-            if key not in self._pending_nan_keys:
+            entry = self._pending_nan.popleft()
+            if entry not in self._pending_nan_keys:
                 continue                # came back to life; costs no budget
-            self._pending_nan_keys.discard(key)
-            self._tile_publisher.publish(
-                build_tile_message(key, empty, self._frame_id, stamp))
+            self._pending_nan_keys.discard(entry)
+            kind, key = entry
+            if kind == 'terrain':
+                self._tile_publisher.publish(
+                    build_tile_message(key, empty_terrain, self._frame_id, stamp))
+            else:
+                self._obstacle_publisher.publish(build_obstacle_message(key, empty_voxels, stamp))
             sent += 1
         for key, tile in self._scheduler.due(now):
             self._tile_publisher.publish(build_tile_message(key, tile, self._frame_id, stamp))
             self._scheduler.published(key, tile, now)
+        # Obstacle tiles go out after the terrain tiles - the operator's
+        # ground, which the rover can drive on, matters more than the
+        # blocky obstacles drawn on top of it.
+        for key, voxels in self._obstacle_scheduler.due(now):
+            self._obstacle_publisher.publish(build_obstacle_message(key, voxels, stamp))
+            self._obstacle_scheduler.published(key, voxels, now)
 
     # -- commands ---------------------------------------------------------
 
@@ -322,19 +420,23 @@ class ElevationMapper(Node):
         state = self._grid.state()
         if state is None:
             raise ValueError("nothing to save: the map is empty")
-        path = self._store.save(name, state, overwrite=overwrite)
+        voxels = self._obstacles.state()
+        path = self._store.save(name, state, voxels, overwrite=overwrite)
         self.get_logger().info(f"map saved to {path}")
 
     def _load(self, name) -> None:
-        state = self._store.load(name)
+        state, voxels = self._store.load(name)
         self._grid.replace(state)
+        self._obstacles.replace(voxels)
         self._loaded = name
-        # A load replaces the grid outright, so the scheduler's memory of
-        # the previous grid is dropped too: without this, a tile the live
-        # map had touched but the loaded map does not cover would stay in
-        # _latest/_round_robin and be marked dirty below, republishing a
-        # tile that no longer belongs to the map at all.
+        # A load replaces the grid and the obstacle map outright, so each
+        # scheduler's memory of the previous one is dropped too: without
+        # this, a tile the live map had touched but the loaded map does not
+        # cover would stay in _latest/_round_robin and be marked dirty
+        # below, republishing a tile that no longer belongs to the map at
+        # all.
         old_keys = self._scheduler.forget_all()
+        old_obstacle_keys = self._obstacle_scheduler.forget_all()
         self._offer(self._now())
         new_snapshot = self._grid.snapshot()
         new_keys = set(tiles_of_snapshot(new_snapshot)) if new_snapshot is not None else set()
@@ -343,15 +445,24 @@ class ElevationMapper(Node):
         # the sim would keep its stale terrain forever - so every such tile
         # goes out once more as all-NaN, exactly as _clear does, paced by
         # _tick rather than burst out of this callback.
-        self._queue_nan(key for key in old_keys if key not in new_keys)
+        self._queue_nan('terrain', (key for key in old_keys if key not in new_keys))
+        # Same reasoning for obstacle tiles: one that was published before
+        # the load but the loaded voxels do not cover would otherwise never
+        # be mentioned again either.
+        new_obstacle_keys = set(self._obstacles.tiles())
+        self._queue_nan(
+            'obstacle', (key for key in old_obstacle_keys if key not in new_obstacle_keys))
         self._scheduler.mark_all_dirty()
+        self._obstacle_scheduler.mark_all_dirty()
         self.get_logger().info(f"map {name!r} loaded; republishing every tile")
 
     def _clear(self) -> None:
         self._grid.clear()
+        self._obstacles.clear()
         self._loaded = None
         self._tile_count = 0
-        self._queue_nan(self._scheduler.forget_all())
+        self._queue_nan('terrain', self._scheduler.forget_all())
+        self._queue_nan('obstacle', self._obstacle_scheduler.forget_all())
         self.get_logger().info("map cleared")
 
     # -- status -----------------------------------------------------------
@@ -367,8 +478,8 @@ class ElevationMapper(Node):
             extent = [round(cols * RESOLUTION, 2), round(rows * RESOLUTION, 2)]
         self._status_publisher.publish(String(data=json.dumps({
             'resolution': RESOLUTION, 'cells_seen': cells, 'extent_m': extent,
-            'tiles': self._tile_count, 'loaded': self._loaded,
-            'maps': self._store.list_names(),
+            'tiles': self._tile_count, 'voxels': self._obstacles.voxel_count,
+            'loaded': self._loaded, 'maps': self._store.list_names(),
             'last_command': self._last_command})))
 
 
