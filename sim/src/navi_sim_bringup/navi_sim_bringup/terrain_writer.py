@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
 """Shows the ground the rover has mapped as terrain in the Gazebo view.
 
-Gazebo Classic cannot change a model's mesh in place, so a changed map means
-deleting the terrain model and spawning a new one. That is expensive and
-visible, which is where the design's two rules come from: at most one
-respawn every five seconds, and only when the map actually changed.
+One Gazebo model per 2.5 m tile. Gazebo Classic cannot change a model's
+mesh in place, so a changed tile means spawning a new model and deleting
+the old one - the replacement is spawned before the old one is deleted so
+the ground never blinks. Per tile, at most one replacement a second; at
+most 4 spawns in flight globally so a keepalive burst cannot stall Gazebo.
 
 The terrain is a mesh, not a heightmap - see terrain_mesh.py for the
 gzserver crash that decided it.
 
 Nothing else in the world is touched. The rover model is never deleted, and
-the world's ground plane at z = 0 stays, so the rover is never in the void
-and never blinks while the terrain is replaced.
+the world's ground plane at z = 0 stays, so the rover is never in the void.
 
-Runs on the simulation's ROS domain. /localization/map reaches that domain
-from the rover's domain 0 through sim_bridge (sub-project 2); this node
-knows nothing about domains and simply subscribes.
+Runs on the simulation's ROS domain. /localization/map_tile reaches that
+domain from the rover's domain 0 through sim_bridge (sub-project 2); this
+node knows nothing about domains and simply subscribes.
 
-Each version gets its own mesh file name. Gazebo's MeshManager caches
+Each replacement gets its own mesh file name. Gazebo's MeshManager caches
 meshes by file name, so respawning with the same name would put the
-*previous* terrain back on the screen while every log line says the new one
-was loaded. A new name every time sidesteps that entirely; the old file is
-deleted once the new one is up.
+*previous* terrain back on the screen while every log line says the new
+one was loaded. A new name every time sidesteps that entirely; the old
+file is deleted once the new one is up.
 """
 
 import os
@@ -35,19 +35,37 @@ from grid_map_msgs.msg import GridMap
 from rclpy.node import Node
 
 from navi_sim_bringup.terrain_mesh import (
-    GAZEBO_MODEL_NAME, MODEL_NAME, model_config_xml, obj_bytes, terrain_sdf,
+    GAZEBO_MODEL_NAME, model_config_xml, obj_bytes, terrain_sdf,
     terrain_mesh_from_grid)
 
 LAYER = 'elevation'
-MAP_TOPIC = '/localization/map'
+TILE_CELLS = 50
+TILE_SAMPLES = 51
+TILE_M = 2.5
+_CENTER_OFFSET = 1.275
+
+
+def tile_center(ix: int, iy: int):
+    return (TILE_M * ix + _CENTER_OFFSET, TILE_M * iy + _CENTER_OFFSET)
+
+
+def tile_index_of(pose_x: float, pose_y: float):
+    """Copied verbatim from navi_localization.tiles - the sim package must
+    not depend on the rover package, and the round-trip test pins them."""
+    return (int(round((pose_x - _CENTER_OFFSET) / TILE_M)),
+            int(round((pose_y - _CENTER_OFFSET) / TILE_M)))
+
+
+def model_name(key, generation: int) -> str:
+    return f"terrain_{key[0]}_{key[1]}_{'ab'[generation % 2]}"
 
 
 def elevation_from_message(message: GridMap):
     """(elevation, resolution, center_x, center_y) from a GridMap.
 
-    The inverse of elevation_mapper.build_grid_map_message: grid_map's
-    matrix has its index (0, 0) at the largest x and largest y, rows running
-    in -x and columns in -y, stored column-major. The array returned here is
+    The inverse of elevation_mapper.build_tile_message: grid_map's matrix
+    has its index (0, 0) at the largest x and largest y, rows running in
+    -x and columns in -y, stored column-major. The array returned here is
     the ordinary one - row 0 at the smallest y, column 0 at the smallest x -
     which is what terrain_mesh_from_grid expects.
     """
@@ -71,68 +89,67 @@ def elevation_from_message(message: GridMap):
             float(message.info.pose.position.y))
 
 
-class RespawnPolicy:
-    """At most one respawn per interval, and only when the terrain changed."""
+class TileRespawnPolicy:
+    """Per tile at most one replacement a second, the newest payload wins,
+    at most `max_in_flight` spawns outstanding, a failed spawn is retried."""
 
-    def __init__(self, interval_seconds: float = 5.0):
-        self.interval = float(interval_seconds)
-        self._spawned = None
-        self._pending = None
-        self._last_respawn = None
+    def __init__(self, min_interval_s: float = 1.0, max_in_flight: int = 4):
+        self.min_interval = float(min_interval_s)
+        self.max_in_flight = int(max_in_flight)
+        self._pending = {}        # key -> payload
+        self._shown = {}          # key -> payload on screen
+        self._finished_at = {}    # key -> time
+        self._in_flight = set()
 
-    def offer(self, payload, now: float) -> bool:
-        """Records a candidate terrain. True if it should be spawned now."""
-        if payload == self._spawned:
-            return False
-        self._pending = payload
-        return self.due(now)
+    def offer(self, key, payload, now: float) -> None:
+        if payload == self._shown.get(key):
+            self._pending.pop(key, None)
+            return
+        self._pending[key] = payload
 
-    def due(self, now: float) -> bool:
-        if self._pending is None:
-            return False
-        if self._last_respawn is None:
-            return True
-        return now - self._last_respawn >= self.interval
+    def next_due(self, now: float) -> list:
+        out = []
+        for key, payload in list(self._pending.items()):
+            if len(self._in_flight) + len(out) >= self.max_in_flight:
+                break
+            if key in self._in_flight:
+                continue
+            last = self._finished_at.get(key)
+            if last is not None and now - last < self.min_interval:
+                continue
+            out.append((key, payload))
+        return out
 
-    @property
-    def pending(self):
-        return self._pending
+    def started(self, key) -> None:
+        self._in_flight.add(key)
 
-    def respawned(self, payload, now: float) -> None:
-        """Called once Gazebo has confirmed `payload` is on the screen.
-
-        `payload` rather than whatever is pending: a newer map can arrive
-        while the spawn service call is in flight, and marking that newer
-        one as spawned would drop it for good.
-        """
-        self._spawned = payload
-        if self._pending == payload:
-            self._pending = None
-        self._last_respawn = now
+    def finished(self, key, payload, now: float, ok: bool) -> None:
+        self._in_flight.discard(key)
+        self._finished_at[key] = now
+        if ok:
+            self._shown[key] = payload
+            if self._pending.get(key) == payload:
+                del self._pending[key]
 
 
 class TerrainWriter(Node):
 
-    def __init__(self) -> None:
+    def __init__(self, model_dir: str = None) -> None:
         super().__init__('terrain_writer')
-        self.declare_parameter('map_topic', MAP_TOPIC)
-        self.declare_parameter('entity_name', MODEL_NAME)
-        self.declare_parameter('respawn_interval_seconds', 5.0)
+        self.declare_parameter('tile_topic', '/localization/map_tile')
+        self.declare_parameter('draw_resolution', 0.05)
         self.declare_parameter(
-            'model_dir',
-            os.path.join(os.path.expanduser('~'), '.gazebo', 'models',
-                         GAZEBO_MODEL_NAME))
+            'model_dir', model_dir or os.path.join(
+                os.path.expanduser('~'), '.gazebo', 'models', GAZEBO_MODEL_NAME))
 
-        self._entity_name = str(self.get_parameter('entity_name').value)
         self._model_dir = str(self.get_parameter('model_dir').value)
         self._mesh_dir = os.path.join(self._model_dir, 'meshes')
-        self._policy = RespawnPolicy(
-            float(self.get_parameter('respawn_interval_seconds').value))
+        self._draw_resolution = float(self.get_parameter('draw_resolution').value)
+        self._policy = TileRespawnPolicy()
+        self._generation = {}     # key -> int, flips on every replacement
+        self._current = {}        # key -> model name on screen
+        self._mesh_file = {}      # key -> mesh file name on screen
         self._version = 0
-        self._mesh = None
-        self._mesh_name = None
-        self._busy = False
-        self._spawned_once = False
         self._warned_no_service = False
 
         os.makedirs(self._mesh_dir, exist_ok=True)
@@ -142,98 +159,93 @@ class TerrainWriter(Node):
         self._delete = self.create_client(DeleteEntity, '/delete_entity')
         self._spawn = self.create_client(SpawnEntity, '/spawn_entity')
         self.create_subscription(
-            GridMap, str(self.get_parameter('map_topic').value), self._on_map, 1)
-        # The cap is a wall-clock rate limit protecting Gazebo from a
-        # respawn storm, so it is measured in wall-clock seconds
-        # (time.monotonic) and not on /clock.
-        self.create_timer(1.0, self._tick)
-
+            GridMap, str(self.get_parameter('tile_topic').value), self._on_tile, 16)
+        self.create_timer(0.25, self._pump)
         self.get_logger().info(
-            f"terrain model files under {self._model_dir}; respawning "
-            f"'{self._entity_name}' at most every "
-            f"{self._policy.interval:.0f} s and only when the map changes")
+            f"terrain tiles under {self._model_dir}; one model per 2.5 m tile, "
+            "replaced at most once a second, spawned before the old one is deleted")
 
-    def _on_map(self, message: GridMap) -> None:
+    def _on_tile(self, message: GridMap) -> None:
         try:
             elevation, resolution, center_x, center_y = elevation_from_message(message)
         except ValueError as error:
             self.get_logger().error(str(error))
             return
-        mesh = terrain_mesh_from_grid(elevation, resolution, center_x, center_y)
-        if mesh is None:
-            return
-        self._mesh = mesh
-        if self._policy.offer(obj_bytes(mesh), time.monotonic()):
-            self._respawn()
+        key = tile_index_of(center_x, center_y)
+        if not np.isfinite(elevation).any():
+            payload = b''                       # the tile is gone
+        else:
+            stride = max(1, int(round(self._draw_resolution / resolution)))
+            mesh = terrain_mesh_from_grid(elevation[::stride, ::stride], resolution * stride,
+                                          center_x, center_y)
+            payload = obj_bytes(mesh) if mesh is not None else b''
+        self._policy.offer(key, payload, time.monotonic())
 
-    def _tick(self) -> None:
-        if self._policy.due(time.monotonic()):
-            self._respawn()
-
-    def _respawn(self) -> None:
-        if self._busy:
-            return
-        if not (self._spawn.service_is_ready()
-                and (self._delete.service_is_ready() or not self._spawned_once)):
+    def _pump(self, now: float = None) -> None:
+        now = time.monotonic() if now is None else now
+        if not self._spawn.service_is_ready() or not self._delete.service_is_ready():
             if not self._warned_no_service:
                 self._warned_no_service = True
-                self.get_logger().warn(
-                    "/spawn_entity is not up yet - is gazebo running with "
-                    "libgazebo_ros_factory.so? Retrying every second.")
+                self.get_logger().warn("/spawn_entity is not up yet - is gazebo running "
+                                       "with libgazebo_ros_factory.so? Retrying.")
             return
         self._warned_no_service = False
-        self._busy = True
+        for key, payload in self._policy.next_due(now):
+            self._policy.started(key)
+            if payload == b'':
+                self._remove(key, payload, now)
+            else:
+                self._replace(key, payload, now)
 
-        payload = self._policy.pending
+    def _replace(self, key, payload: bytes, now: float) -> None:
         self._version += 1
-        name = f"terrain_{self._version:04d}.obj"
+        name = f"tile_{key[0]}_{key[1]}_v{self._version:05d}.obj"
         with open(os.path.join(self._mesh_dir, name), 'wb') as handle:
             handle.write(payload)
-        uri = f"model://{GAZEBO_MODEL_NAME}/meshes/{name}"
-        sdf = terrain_sdf(uri, self._entity_name)
-        with open(os.path.join(self._model_dir, 'model.sdf'), 'w') as handle:
-            handle.write(sdf)
-
-        previous, self._mesh_name = self._mesh_name, name
-        if self._spawned_once:
-            future = self._delete.call_async(
-                DeleteEntity.Request(name=self._entity_name))
-            future.add_done_callback(
-                lambda _future: self._send_spawn(sdf, payload, previous))
-        else:
-            self._send_spawn(sdf, payload, previous)
-
-    def _send_spawn(self, sdf: str, payload: bytes, previous) -> None:
+        generation = self._generation.get(key, -1) + 1
+        model = model_name(key, generation)
+        sdf = terrain_sdf(f"model://{GAZEBO_MODEL_NAME}/meshes/{name}", model)
         request = SpawnEntity.Request()
-        request.name = self._entity_name
+        request.name = model
         request.xml = sdf
         future = self._spawn.call_async(request)
         future.add_done_callback(
-            lambda done: self._on_spawned(done, payload, previous))
+            lambda done: self._on_spawned(done, key, payload, model, name, generation, now))
 
-    def _on_spawned(self, future, payload: bytes, previous) -> None:
-        self._busy = False
+    def _on_spawned(self, future, key, payload, model, mesh_name, generation, now) -> None:
         try:
             response = future.result()
-        except Exception as error:                      # noqa: BLE001
-            self.get_logger().error(f"spawning the terrain failed: {error}")
+            ok = bool(response.success)
+            error = response.status_message
+        except Exception as exc:                        # noqa: BLE001
+            ok, error = False, str(exc)
+        if not ok:
+            self.get_logger().error(f"spawning {model} failed: {error}")
+            self._unlink(mesh_name)
+            self._policy.finished(key, payload, now, ok=False)
             return
-        if not response.success:
-            self.get_logger().error(
-                f"Gazebo refused the terrain: {response.status_message}")
-            return
-        self._spawned_once = True
-        self._policy.respawned(payload, time.monotonic())
-        if previous:
+        previous_model, previous_mesh = self._current.get(key), self._mesh_file.get(key)
+        self._current[key], self._mesh_file[key], self._generation[key] = model, mesh_name, generation
+        self._policy.finished(key, payload, now, ok=True)
+        if previous_model:
+            self._delete_model(previous_model, previous_mesh)
+
+    def _remove(self, key, payload, now: float) -> None:
+        model, mesh = self._current.pop(key, None), self._mesh_file.pop(key, None)
+        if model:
+            self._delete_model(model, mesh)
+        self._policy.finished(key, payload, now, ok=True)
+
+    def _delete_model(self, model: str, mesh_name) -> None:
+        future = self._delete.call_async(DeleteEntity.Request(name=model))
+        future.add_done_callback(lambda _done: self._unlink(mesh_name))
+
+    def _unlink(self, mesh_name) -> None:
+        if mesh_name:
             try:
-                os.remove(os.path.join(self._mesh_dir, previous))
+                os.remove(os.path.join(self._mesh_dir, mesh_name))
             except OSError:
                 pass
-        self.get_logger().info(
-            f"terrain version {self._version}: "
-            f"{self._mesh.cols} x {self._mesh.rows} samples, "
-            f"{self._mesh.size_x:.1f} x {self._mesh.size_y:.1f} m, "
-            f"{len(self._mesh.faces)} triangles")
 
 
 def main(args=None) -> None:

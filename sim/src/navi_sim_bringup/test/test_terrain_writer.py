@@ -1,4 +1,4 @@
-"""Reading the map message back, and the two rules on respawning.
+"""Reading the tile message back, and the rate/ordering policy on respawning.
 
   bash -c 'source /opt/ros/humble/setup.bash &&
     PYTHONPATH=$PWD/sim/src/navi_sim_bringup:$PYTHONPATH python3 -m pytest \
@@ -7,11 +7,12 @@
 
 import numpy as np
 import pytest
+import rclpy
 from grid_map_msgs.msg import GridMap
 from std_msgs.msg import Float32MultiArray, MultiArrayDimension
 
 from navi_sim_bringup.terrain_writer import (
-    LAYER, RespawnPolicy, elevation_from_message)
+    LAYER, TileRespawnPolicy, elevation_from_message, model_name, tile_index_of)
 
 
 def message(grid_rows, grid_cols, values, resolution=0.10,
@@ -74,45 +75,154 @@ def test_a_circular_buffer_message_is_refused_rather_than_read_wrongly():
         elevation_from_message(grid_map)
 
 
-def test_a_map_that_did_not_change_never_asks_for_a_respawn():
-    policy = RespawnPolicy(interval_seconds=5.0)
-    assert policy.offer(b'first', now=0.0) is True
-    policy.respawned(b'first', now=0.0)
-
-    assert policy.offer(b'first', now=100.0) is False
-    assert policy.due(now=100.0) is False
+def test_model_names_alternate_per_tile():
+    assert model_name((3, -2), 0) == 'terrain_3_-2_a'
+    assert model_name((3, -2), 1) == 'terrain_3_-2_b'
+    assert model_name((3, -2), 2) == 'terrain_3_-2_a'
 
 
-def test_the_first_terrain_appears_at_once():
-    assert RespawnPolicy().offer(b'first', now=0.0) is True
+def test_tile_index_of_matches_the_rovers_convention():
+    assert tile_index_of(1.275, 1.275) == (0, 0)
+    assert tile_index_of(2.5 * 4 + 1.275, 2.5 * -3 + 1.275) == (4, -3)
 
 
-def test_a_change_inside_five_seconds_waits_for_the_cap():
-    policy = RespawnPolicy(interval_seconds=5.0)
-    policy.offer(b'first', now=0.0)
-    policy.respawned(b'first', now=0.0)
-
-    assert policy.offer(b'second', now=2.0) is False
-    assert policy.due(now=4.9) is False
-    assert policy.due(now=5.0) is True
+def test_a_new_tile_is_due_at_once():
+    policy = TileRespawnPolicy()
+    policy.offer((0, 0), b'a', now=0.0)
+    assert policy.next_due(now=0.0) == [((0, 0), b'a')]
 
 
-def test_changes_inside_the_window_collapse_into_one_respawn_of_the_newest():
-    policy = RespawnPolicy(interval_seconds=5.0)
-    policy.offer(b'first', now=0.0)
-    policy.respawned(b'first', now=0.0)
-    policy.offer(b'second', now=1.0)
-    policy.offer(b'third', now=2.0)
-
-    assert policy.due(now=5.0) is True
-    assert policy.pending == b'third'
+def test_an_unchanged_payload_is_not_due_again():
+    policy = TileRespawnPolicy()
+    policy.offer((0, 0), b'a', now=0.0)
+    policy.started((0, 0))
+    policy.finished((0, 0), b'a', now=0.0, ok=True)
+    policy.offer((0, 0), b'a', now=5.0)
+    assert policy.next_due(now=5.0) == []
 
 
-def test_a_map_that_arrives_while_a_respawn_is_in_flight_is_not_lost():
-    policy = RespawnPolicy(interval_seconds=5.0)
-    policy.offer(b'first', now=0.0)
-    policy.offer(b'second', now=0.1)          # arrived before 'first' spawned
-    policy.respawned(b'first', now=0.2)       # Gazebo confirmed the older one
+def test_a_tile_replaces_at_most_once_per_second_and_the_newest_wins():
+    policy = TileRespawnPolicy()
+    policy.offer((0, 0), b'a', now=0.0)
+    policy.started((0, 0))
+    policy.finished((0, 0), b'a', now=0.0, ok=True)
+    policy.offer((0, 0), b'b', now=0.3)
+    policy.offer((0, 0), b'c', now=0.6)
+    assert policy.next_due(now=0.9) == []
+    assert policy.next_due(now=1.0) == [((0, 0), b'c')]
 
-    assert policy.pending == b'second'
-    assert policy.due(now=5.2) is True
+
+def test_at_most_four_spawns_in_flight():
+    policy = TileRespawnPolicy()
+    for i in range(6):
+        policy.offer((i, 0), bytes([i]), now=0.0)
+    due = policy.next_due(now=0.0)
+    assert len(due) == 4
+    for key, _ in due:
+        policy.started(key)
+    assert policy.next_due(now=0.0) == []
+    policy.finished((0, 0), b'\x00', now=0.1, ok=True)
+    assert len(policy.next_due(now=0.1)) == 1
+
+
+def test_a_failed_spawn_keeps_the_tile_pending_for_a_retry():
+    policy = TileRespawnPolicy()
+    policy.offer((0, 0), b'a', now=0.0)
+    policy.started((0, 0))
+    policy.finished((0, 0), b'a', now=0.0, ok=False)
+    assert policy.next_due(now=1.0) == [((0, 0), b'a')]
+
+
+from navi_sim_bringup.terrain_writer import TerrainWriter
+
+
+class FakeFuture:
+    def __init__(self):
+        self._callbacks = []
+        self._result = None
+
+    def add_done_callback(self, callback):
+        self._callbacks.append(callback)
+
+    def result(self):
+        return self._result
+
+    def resolve(self, result):
+        self._result = result
+        for callback in self._callbacks:
+            callback(self)
+
+
+class FakeService:
+    def __init__(self):
+        self.calls = []
+
+    def service_is_ready(self):
+        return True
+
+    def call_async(self, request):
+        future = FakeFuture()
+        self.calls.append((request, future))
+        return future
+
+
+class Response:
+    def __init__(self, success=True, status_message=''):
+        self.success = success
+        self.status_message = status_message
+
+
+@pytest.fixture
+def writer(tmp_path):
+    rclpy.init()
+    node = TerrainWriter(model_dir=str(tmp_path))
+    node._spawn = FakeService()
+    node._delete = FakeService()
+    yield node
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+def tile_message(key, value=1.0):
+    from navi_sim_bringup.terrain_writer import TILE_SAMPLES, tile_center
+    cx, cy = tile_center(*key)
+    values = [value] * (TILE_SAMPLES * TILE_SAMPLES)
+    return message(TILE_SAMPLES, TILE_SAMPLES, values, resolution=0.05, center=(cx, cy))
+
+
+def test_the_replacement_is_spawned_before_the_old_tile_is_deleted(writer):
+    writer._on_tile(tile_message((0, 0), 1.0))
+    writer._pump(now=0.0)
+    request, future = writer._spawn.calls[0]
+    assert request.name == 'terrain_0_0_a'
+    future.resolve(Response())
+    assert writer._delete.calls == []                    # nothing to delete yet
+
+    writer._on_tile(tile_message((0, 0), 2.0))
+    writer._pump(now=2.0)
+    request, future = writer._spawn.calls[1]
+    assert request.name == 'terrain_0_0_b'
+    assert writer._delete.calls == []                    # old one still standing
+    future.resolve(Response())
+    assert [r.name for r, _ in writer._delete.calls] == ['terrain_0_0_a']
+
+
+def test_a_failed_spawn_leaves_the_old_tile_and_deletes_nothing(writer):
+    writer._on_tile(tile_message((0, 0), 1.0))
+    writer._pump(now=0.0)
+    writer._spawn.calls[0][1].resolve(Response())
+    writer._on_tile(tile_message((0, 0), 2.0))
+    writer._pump(now=2.0)
+    writer._spawn.calls[1][1].resolve(Response(False, 'nope'))
+    assert writer._delete.calls == []
+    assert writer._current[(0, 0)] == 'terrain_0_0_a'
+
+
+def test_an_all_nan_tile_deletes_the_model(writer):
+    writer._on_tile(tile_message((0, 0), 1.0))
+    writer._pump(now=0.0)
+    writer._spawn.calls[0][1].resolve(Response())
+    writer._on_tile(tile_message((0, 0), float('nan')))
+    writer._pump(now=2.0)
+    assert [r.name for r, _ in writer._delete.calls] == ['terrain_0_0_a']
+    assert len(writer._spawn.calls) == 1

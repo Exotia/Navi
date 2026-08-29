@@ -24,21 +24,21 @@ import numpy as np
 import pytest
 from builtin_interfaces.msg import Time
 
-from navi_localization.elevation_grid import GridSnapshot
-from navi_localization.elevation_mapper import build_grid_map_message
-from navi_sim_bringup.terrain_writer import elevation_from_message
+from navi_localization.elevation_mapper import build_tile_message
+from navi_sim_bringup.terrain_writer import elevation_from_message, tile_index_of
 
 
 def test_what_the_rover_publishes_is_what_the_simulation_reads():
-    elevation = np.array([[1.0, 2.0, 3.0],
-                          [4.0, np.nan, 6.0]], dtype=np.float32)
-    snapshot = GridSnapshot(elevation=elevation, center_x=3.25, center_y=-7.5,
-                            resolution=0.10)
+    tile = np.full((51, 51), np.nan, dtype=np.float32)
+    tile[0, 0] = 1.0
+    tile[0, 1] = 2.0
+    tile[1, 0] = 4.0
+    tile[50, 50] = 6.0
+    tile[25, 25] = 3.0
 
-    message = build_grid_map_message(snapshot, 'map', Time())
-    read_back, resolution, center_x, center_y = elevation_from_message(message)
+    message = build_tile_message((1, -1), tile, 'map', Time())
+    elevation, resolution, center_x, center_y = elevation_from_message(message)
 
-    assert np.array_equal(read_back, elevation, equal_nan=True)
-    assert resolution == pytest.approx(0.10)
-    assert center_x == pytest.approx(3.25)
-    assert center_y == pytest.approx(-7.5)
+    assert np.array_equal(elevation, tile, equal_nan=True)
+    assert resolution == pytest.approx(0.05)
+    assert tile_index_of(center_x, center_y) == (1, -1)
