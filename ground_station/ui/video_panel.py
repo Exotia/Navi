@@ -42,6 +42,8 @@ class VideoPanel(QWidget):
         self._rover_detail = ""
         self._source_name = "zed front left"
         self._dead_reckoning = False
+        self._show_localization = False
+        self._localization_status: dict | None = None
         # The rover has a remote self-report (/video_status); the
         # simulation does not. When False, _refresh_status shows only the
         # local fact instead of a rover claim that has nothing to do with
@@ -112,7 +114,8 @@ class VideoPanel(QWidget):
         return self._streaming
 
     def set_source(self, name: str, port: int, *, dead_reckoning: bool = False,
-                   reports_remote_status: bool = True) -> None:
+                   reports_remote_status: bool = True,
+                   show_localization: bool = False) -> None:
         """Points the panel at a different sender.
 
         The receiver is stopped and re-pointed rather than a second one
@@ -130,9 +133,18 @@ class VideoPanel(QWidget):
         self._source_name = name
         self._dead_reckoning = dead_reckoning
         self._reports_remote_status = reports_remote_status
+        self._show_localization = show_localization
         self._refresh_title()
         if was_streaming:
             self.set_streaming(True)
+
+    def set_localization_status(self, status: dict | None) -> None:
+        """The rover's localisation health, as parsed from
+        /localization/status. Stored whatever the mode: the panel decides
+        whether it is on screen (set_source's show_localization), so the
+        window can forward every message without knowing the mode."""
+        self._localization_status = status
+        self._refresh_title()
 
     def _refresh_title(self) -> None:
         title = f"CAMERA / {self._source_name.upper()}"

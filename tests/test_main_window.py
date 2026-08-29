@@ -504,11 +504,12 @@ def test_local_address_is_the_interface_that_reaches_the_rover(qtbot):
     assert address == "" or address.count(".") == 3
 
 
-def test_entering_semi_auto_stops_rover_video_and_switches_port(qtbot):
+def test_entering_simulation_stops_rover_video_and_switches_port(qtbot):
     window, _ = make_window(qtbot)
 
-    window.dashboard_page.mode_changed.emit("semi_auto")
+    window.dashboard_page.mode_changed.emit("simulation")
 
+    assert window._mode == "simulation"
     assert window.dashboard_page.video_panel.receiver.port == 5601
     assert window.dashboard_page.video_panel.dead_reckoning is True
     # The rover keeps being driven - only its camera is turned off, to spare
@@ -517,18 +518,15 @@ def test_entering_semi_auto_stops_rover_video_and_switches_port(qtbot):
     assert request["enable"] is False
 
 
-def test_leaving_semi_auto_returns_to_the_rover_camera(qtbot, monkeypatch):
-    # Strengthened after the final review: asserting the port and the marker
-    # alone passed for as long as the resume request was missing entirely.
-    # Entering semi-auto asks the rover to stop streaming; the local
-    # receiver comes back on 5600 by itself, so the port flipping back
-    # proves only that this laptop is listening - not that anything is
-    # sending. Without the enable request the rover stays off and the panel
-    # sits on a dim, permanent STOPPED over a black picture.
+def test_leaving_simulation_returns_to_the_rover_camera(qtbot, monkeypatch):
+    # Asserting the port and the marker alone passed for as long as the
+    # resume request was missing entirely: the local receiver comes back on
+    # 5600 by itself, so the port flipping back proves only that this laptop
+    # is listening - not that anything is sending.
     window, _ = make_window(qtbot)
     monkeypatch.setattr(window, "local_address_for", lambda host, port: "10.20.30.40")
     window._on_stream_requested(True)
-    window.dashboard_page.mode_changed.emit("semi_auto")
+    window.dashboard_page.mode_changed.emit("simulation")
 
     window.dashboard_page.mode_changed.emit("manual")
 
@@ -540,15 +538,43 @@ def test_leaving_semi_auto_returns_to_the_rover_camera(qtbot, monkeypatch):
     assert request["host"] == "10.20.30.40"
 
 
-def test_the_video_toggle_does_not_command_the_rover_in_semi_auto(qtbot, monkeypatch):
-    # The toggle acts on the source on screen. In semi-auto that is the
+def test_semi_auto_shows_the_simulation_without_the_dead_reckoning_marker(qtbot):
+    # Semi-autonomous shows the same Gazebo stream on the same port, but the
+    # rover in it is placed by localisation, so the DEAD RECKONING warning
+    # would be a lie. What replaces it is the localisation marker (Task 3).
+    window, _ = make_window(qtbot)
+
+    window.dashboard_page.mode_changed.emit("semi_auto")
+
+    assert window._mode == "semi_auto"
+    assert window.dashboard_page.video_panel.receiver.port == 5601
+    assert window.dashboard_page.video_panel.dead_reckoning is False
+    assert _last_video_request()["enable"] is False
+
+
+def test_autonomous_changes_nothing_because_nothing_is_built(qtbot):
+    # The radio is disabled so this cannot happen from the UI. If the signal
+    # is emitted anyway (a test, a future caller), the window must not put
+    # the panel into a half-configured state - it leaves the view alone and
+    # says so on stderr.
+    window, _ = make_window(qtbot)
+    port_before = window.dashboard_page.video_panel.receiver.port
+
+    window.dashboard_page.mode_changed.emit("autonomous")
+
+    assert window._mode == "autonomous"
+    assert window.dashboard_page.video_panel.receiver.port == port_before
+
+
+def test_the_video_toggle_does_not_command_the_rover_in_simulation(qtbot, monkeypatch):
+    # The toggle acts on the source on screen. In simulation that is the
     # simulation, which has no control plane; sending enable=True to the
     # rover here would push 800 kbps over the field link to port 5600 with
     # nothing listening, for as long as the mode lasts - undoing the reason
     # the mode stops the rover's camera at all.
     window, _ = make_window(qtbot)
     monkeypatch.setattr(window, "local_address_for", lambda host, port: "10.20.30.40")
-    window.dashboard_page.mode_changed.emit("semi_auto")
+    window.dashboard_page.mode_changed.emit("simulation")
     topic = next(t for t in FakeTopic.instances if t.name == "/video_request")
     requests_before = len(topic.published_messages)
 
@@ -568,7 +594,7 @@ def test_a_rosbridge_drop_does_not_tear_down_the_simulation_view(qtbot, monkeypa
     window, _ = make_window(qtbot, video_receiver=FakeReceiver(frame=bytes(4 * 2 * 3)))
     monkeypatch.setattr(window, "local_address_for", lambda host, port: "10.20.30.40")
     window._on_stream_requested(True)
-    window.dashboard_page.mode_changed.emit("semi_auto")
+    window.dashboard_page.mode_changed.emit("simulation")
     panel = window.dashboard_page.video_panel
     assert panel.streaming is True
 
@@ -579,7 +605,7 @@ def test_a_rosbridge_drop_does_not_tear_down_the_simulation_view(qtbot, monkeypa
     assert "OFF" not in panel.status_label.text().upper()
 
 
-def test_entering_semi_auto_shows_receiving_not_a_stale_rover_word(qtbot):
+def test_entering_simulation_shows_receiving_not_a_stale_rover_word(qtbot):
     # Regression for the bug the reviewer found: set_source's
     # stop_receiver() resets _rover_state to "stopped" on the way in, and
     # the sim has no /video_status of its own to overwrite it afterwards -
@@ -589,7 +615,7 @@ def test_entering_semi_auto_shows_receiving_not_a_stale_rover_word(qtbot):
     window, _ = make_window(qtbot, video_receiver=receiver)
     window._on_stream_requested(True)
 
-    window.dashboard_page.mode_changed.emit("semi_auto")
+    window.dashboard_page.mode_changed.emit("simulation")
     window.dashboard_page.video_panel._poll_frame(now=100.0)
 
     text = window.dashboard_page.video_panel.status_label.text().upper()
@@ -604,6 +630,20 @@ def test_the_twist_still_reaches_the_rover_in_semi_auto(qtbot):
     window, _ = make_window(qtbot, initial_host="localhost", gamepad_reader=gamepad)
 
     window.dashboard_page.mode_changed.emit("semi_auto")
+    window._poll_gamepad()
+
+    topic = next(t for t in FakeTopic.instances if t.name == "/manual_twist")
+    assert topic.published_messages[-1] == {
+        "linear": {"x": 0.4, "y": 0.0, "z": 0.0},
+        "angular": {"x": 0.0, "y": 0.0, "z": 0.2},
+    }
+
+
+def test_the_twist_still_reaches_the_rover_in_simulation(qtbot):
+    gamepad = FakeGamepadReader(connected=True, twist=(0.4, 0.0, 0.2))
+    window, _ = make_window(qtbot, initial_host="localhost", gamepad_reader=gamepad)
+
+    window.dashboard_page.mode_changed.emit("simulation")
     window._poll_gamepad()
 
     topic = next(t for t in FakeTopic.instances if t.name == "/manual_twist")

@@ -41,6 +41,11 @@ class MainWindow(QMainWindow):
         # rosbridge. Kept here rather than read back off the radio buttons
         # so the window does not depend on the dashboard's widget layout.
         self._mode = "manual"
+        # The last /localization/status seen, or None if none has arrived.
+        # Kept here as well as on the panel so entering semi-autonomous can
+        # show the current state immediately instead of a blank marker until
+        # the next 2 Hz status message.
+        self._localization_status: dict | None = None
 
         input_style = (
             f"background-color: {theme.PANEL}; color: {theme.TEXT}; "
@@ -238,7 +243,7 @@ class MainWindow(QMainWindow):
             # that on its own: /manual_twist stops arriving and the IK node
             # zeroes the command, so the picture stops moving while frames
             # keep coming.
-            if self._mode != "semi_auto":
+            if self._mode not in ("semi_auto", "simulation"):
                 self.dashboard_page.video_panel.stop_receiver(keep_failed_reason=True)
 
     def closeEvent(self, event) -> None:
@@ -305,14 +310,14 @@ class MainWindow(QMainWindow):
 
     def _on_stream_requested(self, enable: bool) -> None:
         panel = self.dashboard_page.video_panel
-        if self._mode == "semi_auto":
+        if self._mode in ("simulation", "semi_auto"):
             # The toggle acts on whichever source the panel is actually
-            # showing, and in semi-auto that is the simulation - a local
-            # process with no control plane at all, which streams whenever
-            # it runs (by design: it is on this same laptop, so there is
-            # nothing to ask). Commanding the rover's camera from here
-            # would push 800 kbps of H.264 across the field link to port
-            # 5600 where nothing is listening, for as long as semi-auto
+            # showing, and in both simulation modes that is the simulation -
+            # a local process with no control plane at all, which streams
+            # whenever it runs (by design: it is on this same laptop, so
+            # there is nothing to ask). Commanding the rover's camera from
+            # here would push 800 kbps of H.264 across the field link to
+            # port 5600 where nothing is listening, for as long as the mode
             # lasts, undoing the only reason this mode stops it - and say
             # nothing about it.
             panel.set_streaming(enable)
@@ -330,36 +335,58 @@ class MainWindow(QMainWindow):
 
     def _on_mode_changed(self, mode: str) -> None:
         """Switches the panel's view source only. The twist keeps reaching
-        the rover in both modes - driving stays on the gamepad/rosbridge
+        the rover in every mode - driving stays on the gamepad/rosbridge
         path (_poll_gamepad), untouched here - because a mode switch that
         quietly changed what is being driven would be a control change
-        wearing a view change's clothes."""
+        wearing a view change's clothes.
+
+        The two simulation modes show the same stream on the same port and
+        differ in one thing: where the rover in the picture comes from.
+        `simulation` integrates the commanded twist and says so in orange;
+        `semi_auto` is placed by the rover's own /localization/pose, so the
+        DEAD RECKONING warning would be false and the localisation marker
+        takes its place.
+        """
         panel = self.dashboard_page.video_panel
         self._mode = mode
-        if mode == "semi_auto":
+
+        if mode == "autonomous":
+            # Unreachable from the UI (the radio is disabled). Reached only
+            # if something emits the signal directly, and then the honest
+            # thing is to leave the view exactly as it is rather than
+            # half-configure a panel for a mode with nothing behind it.
+            print("ground_station: autonomous mode is not implemented",
+                  file=sys.stderr)
+            return
+
+        if mode in ("simulation", "semi_auto"):
             # Stop the rover's camera: nobody is looking at it, and the
             # field link is the scarce resource. The rover keeps being
             # driven.
             self._request_rover_video(False)
-            panel.set_source("simulation", SIM_VIDEO_PORT, dead_reckoning=True,
-                              reports_remote_status=False)
-        else:
-            panel.set_source("zed front left", self.video_port)
-            # Entering semi-auto told the rover to stop streaming. Leaving
-            # must tell it to start again, or the mode is a one-way door for
-            # the live camera: set_source restarts the local receiver on
-            # 5600 so this laptop listens, but the rover was told to stop
-            # and never told otherwise, so no frames ever come. What the
-            # operator then sees is worse than nothing - stop_receiver has
-            # reset the rover state to "stopped", so the panel shows a dim,
-            # permanent STOPPED over a black picture, and the "rover says
-            # streaming but nothing arrives" branch cannot fire to explain
-            # it. Recovery was guessing to press Stop then Start.
-            #
-            # Only when the panel is actually receiving: asking the rover to
-            # start streaming to a port nothing is listening on is the same
-            # waste of the field link that _on_stream_requested guards
-            # against above. A failed request reports itself on the panel
-            # via _request_rover_video rather than doing nothing quietly.
-            if panel.streaming:
-                self._request_rover_video(True)
+            panel.set_source("simulation", SIM_VIDEO_PORT,
+                             dead_reckoning=(mode == "simulation"),
+                             reports_remote_status=False,
+                             show_localization=(mode == "semi_auto"))
+            if mode == "semi_auto":
+                panel.set_localization_status(self._localization_status)
+            return
+
+        panel.set_source("zed front left", self.video_port)
+        # Entering a simulation mode told the rover to stop streaming.
+        # Leaving must tell it to start again, or the mode is a one-way door
+        # for the live camera: set_source restarts the local receiver on 5600
+        # so this laptop listens, but the rover was told to stop and never
+        # told otherwise, so no frames ever come. What the operator then sees
+        # is worse than nothing - stop_receiver has reset the rover state to
+        # "stopped", so the panel shows a dim, permanent STOPPED over a black
+        # picture, and the "rover says streaming but nothing arrives" branch
+        # cannot fire to explain it.
+        #
+        # Only when the panel is actually receiving: asking the rover to
+        # start streaming to a port nothing is listening on is the same waste
+        # of the field link that _on_stream_requested guards against. A
+        # failed request reports itself on the panel via _request_rover_video
+        # rather than doing nothing quietly.
+        if panel.streaming:
+            self._request_rover_video(True)
