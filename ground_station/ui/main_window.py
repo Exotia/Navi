@@ -1,5 +1,7 @@
+import math
 import socket
 import sys
+from time import monotonic
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -17,8 +19,21 @@ from ground_station.ui.drive_detail_page import DriveDetailPage
 # packets as garbage.
 SIM_VIDEO_PORT = 5601
 
+# The exact words the panel shows when the operator asks for the rover's
+# camera in semi-autonomous mode. One constant, because the test asserts on
+# it and the spec fixes the wording.
+SEMI_AUTO_REFUSAL = "no camera stream in semi-autonomous mode"
+
+# /localization/status arrives at 2 Hz, so three seconds is six missed
+# messages: the rover is gone, not hiccuping. After that the marker stops
+# asserting a health nobody has confirmed since - it reads NO LOCALISATION
+# STATUS, which is what is actually true.
+LOCALIZATION_STATUS_STALE_AFTER_SECONDS = 3.0
+
 
 class MainWindow(QMainWindow):
+    SEMI_AUTO_REFUSAL = SEMI_AUTO_REFUSAL
+
     def __init__(self, ros_client_factory=RosBridgeClient, initial_host: str | None = None,
                  initial_port: int = 9090, node_poll_interval_ms: int = 2000,
                  staleness_check_interval_ms: int = 500, stale_after_seconds: float = 1.0,
@@ -41,6 +56,13 @@ class MainWindow(QMainWindow):
         # rosbridge. Kept here rather than read back off the radio buttons
         # so the window does not depend on the dashboard's widget layout.
         self._mode = "manual"
+        # The last /localization/status seen, or None if none has arrived.
+        # Kept here as well as on the panel so entering semi-autonomous can
+        # show the current state immediately instead of a blank marker until
+        # the next 2 Hz status message.
+        self._localization_status: dict | None = None
+        # monotonic() when that status arrived, or None if none has.
+        self._localization_status_at: float | None = None
 
         input_style = (
             f"background-color: {theme.PANEL}; color: {theme.TEXT}; "
@@ -56,6 +78,13 @@ class MainWindow(QMainWindow):
 
         self.connection_label = QLabel("ROSBRIDGE: DISCONNECTED")
         self.connection_label.setStyleSheet(
+            f"color: {theme.TEXT_DIM}; background-color: {theme.PANEL}; "
+            f"border: 1px solid {theme.BORDER}; border-radius: 4px; padding: 6px 12px; "
+            f"font-family: {theme.MONO_FONT_FAMILY};"
+        )
+
+        self.localization_label = QLabel("LOC: NO POSE")
+        self.localization_label.setStyleSheet(
             f"color: {theme.TEXT_DIM}; background-color: {theme.PANEL}; "
             f"border: 1px solid {theme.BORDER}; border-radius: 4px; padding: 6px 12px; "
             f"font-family: {theme.MONO_FONT_FAMILY};"
@@ -83,6 +112,7 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.port_input)
         header_layout.addWidget(self.connect_button)
         header_layout.addWidget(self.connection_label)
+        header_layout.addWidget(self.localization_label)
 
         self.dashboard_page = DashboardPage(video_receiver=video_receiver)
         self.drive_detail_page = DriveDetailPage()
@@ -178,11 +208,17 @@ class MainWindow(QMainWindow):
         self.ros_client.signals.nodes_received.connect(self._on_nodes)
         self.ros_client.signals.connection_changed.connect(self._on_connection_changed)
         self.ros_client.signals.video_status_received.connect(self._on_video_status)
+        self.ros_client.signals.localization_status_received.connect(
+            self._on_localization_status)
+        self.ros_client.signals.localization_pose_received.connect(
+            self._on_localization_pose)
 
         try:
             self.ros_client.connect()
             self.ros_client.subscribe_manual_twist()
             self.ros_client.subscribe_video_status()
+            self.ros_client.subscribe_localization_status()
+            self.ros_client.subscribe_localization_pose()
         except Exception as exc:
             print(f"ground_station: failed to connect to rosbridge: {exc}", file=sys.stderr)
 
@@ -238,7 +274,7 @@ class MainWindow(QMainWindow):
             # that on its own: /manual_twist stops arriving and the IK node
             # zeroes the command, so the picture stops moving while frames
             # keep coming.
-            if self._mode != "semi_auto":
+            if self._mode not in ("semi_auto", "simulation"):
                 self.dashboard_page.video_panel.stop_receiver(keep_failed_reason=True)
 
     def closeEvent(self, event) -> None:
@@ -248,11 +284,23 @@ class MainWindow(QMainWindow):
         self.dashboard_page.video_panel.stop_receiver(keep_failed_reason=True)
         super().closeEvent(event)
 
-    def _check_staleness(self) -> None:
-        elapsed = self.drive_state.seconds_since_last()
+    def _check_staleness(self, now: float | None = None) -> None:
+        now = monotonic() if now is None else now
+        elapsed = self.drive_state.seconds_since_last(now)
         if elapsed is not None and elapsed > self.stale_after_seconds:
             self.dashboard_page.drive_card.mark_stale()
             self.drive_detail_page.mark_stale()
+
+        # The rover unreachable is the case this catches: sim_bridge stops
+        # receiving, the Gazebo rover holds still on its own, and this is
+        # the panel saying so rather than leaving LOCALISED on screen
+        # because that is what the rover said before the link died.
+        if (self._localization_status_at is not None
+                and now - self._localization_status_at
+                > LOCALIZATION_STATUS_STALE_AFTER_SECONDS):
+            self._localization_status = None
+            self._localization_status_at = None
+            self.dashboard_page.video_panel.set_localization_status(None)
 
     def local_address_for(self, host: str, port: int) -> str:
         """Our own address on the interface that reaches the rover. The
@@ -305,16 +353,25 @@ class MainWindow(QMainWindow):
 
     def _on_stream_requested(self, enable: bool) -> None:
         panel = self.dashboard_page.video_panel
+
         if self._mode == "semi_auto":
+            # The whole point of this mode is that the field link carries no
+            # video: the operator drives on the Gazebo view, placed by
+            # localisation. Commanding the rover's camera would undo that;
+            # toggling the local simulation receiver would blank the only
+            # picture the operator has. So: nothing moves, and the panel
+            # says why rather than swallowing the press.
+            panel.refuse_stream(SEMI_AUTO_REFUSAL)
+            return
+
+        if self._mode == "simulation":
             # The toggle acts on whichever source the panel is actually
-            # showing, and in semi-auto that is the simulation - a local
-            # process with no control plane at all, which streams whenever
-            # it runs (by design: it is on this same laptop, so there is
-            # nothing to ask). Commanding the rover's camera from here
-            # would push 800 kbps of H.264 across the field link to port
-            # 5600 where nothing is listening, for as long as semi-auto
-            # lasts, undoing the only reason this mode stops it - and say
-            # nothing about it.
+            # showing, and here that is the simulation - a local process
+            # with no control plane at all, which streams whenever it runs
+            # (by design: it is on this same laptop, so there is nothing to
+            # ask). Commanding the rover's camera from here would push
+            # 800 kbps of H.264 across the field link to port 5600 where
+            # nothing is listening, for as long as the mode lasts.
             panel.set_streaming(enable)
             return
 
@@ -328,38 +385,77 @@ class MainWindow(QMainWindow):
     def _on_video_status(self, status: dict) -> None:
         self.dashboard_page.video_panel.apply_status(status)
 
+    def _on_localization_status(self, status: dict) -> None:
+        """Kept here as well as handed to the panel: entering semi-autonomous
+        must show the current state at once rather than a blank marker until
+        the next 2 Hz message."""
+        self._localization_status = status
+        self._localization_status_at = monotonic()
+        self.dashboard_page.video_panel.set_localization_status(status)
+
+    def _on_localization_pose(self, pose: dict) -> None:
+        """Three numbers in the header, at 5 Hz. This is the whole of what
+        the ground station does with the pose - the rover in the Gazebo view
+        is placed over DDS by sim_ik_node, not from here, because this
+        process has no ROS and is not in that path."""
+        self.localization_label.setText(
+            f"LOC: x {pose['x']:.2f}  y {pose['y']:.2f}  "
+            f"yaw {math.degrees(pose['yaw']):.1f}°")
+
     def _on_mode_changed(self, mode: str) -> None:
         """Switches the panel's view source only. The twist keeps reaching
-        the rover in both modes - driving stays on the gamepad/rosbridge
+        the rover in every mode - driving stays on the gamepad/rosbridge
         path (_poll_gamepad), untouched here - because a mode switch that
         quietly changed what is being driven would be a control change
-        wearing a view change's clothes."""
+        wearing a view change's clothes.
+
+        The two simulation modes show the same stream on the same port and
+        differ in one thing: where the rover in the picture comes from.
+        `simulation` integrates the commanded twist and says so in orange;
+        `semi_auto` is placed by the rover's own /localization/pose, so the
+        DEAD RECKONING warning would be false and the localisation marker
+        takes its place.
+        """
         panel = self.dashboard_page.video_panel
         self._mode = mode
-        if mode == "semi_auto":
+
+        if mode == "autonomous":
+            # Unreachable from the UI (the radio is disabled). Reached only
+            # if something emits the signal directly, and then the honest
+            # thing is to leave the view exactly as it is rather than
+            # half-configure a panel for a mode with nothing behind it.
+            print("ground_station: autonomous mode is not implemented",
+                  file=sys.stderr)
+            return
+
+        if mode in ("simulation", "semi_auto"):
             # Stop the rover's camera: nobody is looking at it, and the
             # field link is the scarce resource. The rover keeps being
             # driven.
             self._request_rover_video(False)
-            panel.set_source("simulation", SIM_VIDEO_PORT, dead_reckoning=True,
-                              reports_remote_status=False)
-        else:
-            panel.set_source("zed front left", self.video_port)
-            # Entering semi-auto told the rover to stop streaming. Leaving
-            # must tell it to start again, or the mode is a one-way door for
-            # the live camera: set_source restarts the local receiver on
-            # 5600 so this laptop listens, but the rover was told to stop
-            # and never told otherwise, so no frames ever come. What the
-            # operator then sees is worse than nothing - stop_receiver has
-            # reset the rover state to "stopped", so the panel shows a dim,
-            # permanent STOPPED over a black picture, and the "rover says
-            # streaming but nothing arrives" branch cannot fire to explain
-            # it. Recovery was guessing to press Stop then Start.
-            #
-            # Only when the panel is actually receiving: asking the rover to
-            # start streaming to a port nothing is listening on is the same
-            # waste of the field link that _on_stream_requested guards
-            # against above. A failed request reports itself on the panel
-            # via _request_rover_video rather than doing nothing quietly.
-            if panel.streaming:
-                self._request_rover_video(True)
+            panel.set_source("simulation", SIM_VIDEO_PORT,
+                             dead_reckoning=(mode == "simulation"),
+                             reports_remote_status=False,
+                             show_localization=(mode == "semi_auto"))
+            if mode == "semi_auto":
+                panel.set_localization_status(self._localization_status)
+            return
+
+        panel.set_source("zed front left", self.video_port)
+        # Entering a simulation mode told the rover to stop streaming.
+        # Leaving must tell it to start again, or the mode is a one-way door
+        # for the live camera: set_source restarts the local receiver on 5600
+        # so this laptop listens, but the rover was told to stop and never
+        # told otherwise, so no frames ever come. What the operator then sees
+        # is worse than nothing - stop_receiver has reset the rover state to
+        # "stopped", so the panel shows a dim, permanent STOPPED over a black
+        # picture, and the "rover says streaming but nothing arrives" branch
+        # cannot fire to explain it.
+        #
+        # Only when the panel is actually receiving: asking the rover to
+        # start streaming to a port nothing is listening on is the same waste
+        # of the field link that _on_stream_requested guards against. A
+        # failed request reports itself on the panel via _request_rover_video
+        # rather than doing nothing quietly.
+        if panel.streaming:
+            self._request_rover_video(True)

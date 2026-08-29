@@ -21,17 +21,57 @@ from PySide6.QtWidgets import (QLabel, QPushButton, QSizePolicy, QVBoxLayout,
                                QHBoxLayout, QWidget)
 
 from ground_station import theme
-from ground_station.video_receiver import VideoReceiver
+from ground_station.video_receiver import VideoReceiver, parse_geometry
+
+
+def localization_marker(status: dict | None) -> tuple[str, str]:
+    """The marker text and colour for a /localization/status payload.
+
+    Colours are the panel's existing two: theme.OK for the one state that
+    means the picture can be trusted, theme.ACCENT for every state that
+    should stop the operator - which is the same colour FAILED, NO FRAMES
+    and the DEAD RECKONING title marker already use, for the same reason.
+
+    None is not the same as OFF and is not shown as OFF: "the rover says
+    localisation is off" and "we have heard nothing from the rover" point at
+    different machines, and the second one is usually rosbridge.
+    """
+    if status is None:
+        return "NO LOCALISATION STATUS", theme.ACCENT
+
+    state = str(status.get("state", ""))
+    if state == "OK":
+        return "LOCALISED", theme.OK
+    if state == "SEARCHING":
+        seconds = status.get("seconds_since_ok")
+        if isinstance(seconds, (int, float)):
+            # The count is the content: "searching" alone does not say
+            # whether this is a blip over a rut or the rover being lost.
+            return f"SEARCHING … {seconds:.0f} s", theme.ACCENT
+        return "SEARCHING", theme.ACCENT
+    if state == "OFF":
+        return "LOCALISATION OFF", theme.ACCENT
+    # An unrecognised state is shown, not swallowed: a status this panel
+    # cannot interpret is itself worth seeing.
+    return f"LOCALISATION {state.upper()}", theme.ACCENT
 
 
 class VideoPanel(QWidget):
     stream_requested = Signal(bool)
 
     def __init__(self, receiver=None, parent=None, poll_interval_ms: int = 33,
-                 no_frame_after_seconds: float = 2.0):
+                 no_frame_after_seconds: float = 2.0,
+                 refusal_seconds: float = 5.0):
         super().__init__(parent)
         self.receiver = receiver if receiver is not None else VideoReceiver()
         self.no_frame_after_seconds = no_frame_after_seconds
+        self.refusal_seconds = refusal_seconds
+        # A refusal is neither a rover claim nor a local fact, so it does not
+        # fit either status path - it is an answer to a button press. Held
+        # for refusal_seconds and then dropped, so the ordinary status line
+        # comes back on its own.
+        self._refusal: str | None = None
+        self._refusal_until = 0.0
         self._streaming = False
         self._last_frame_at: float | None = None
         # Kept as bytes rather than a QImage: QImage does not copy the
@@ -42,6 +82,8 @@ class VideoPanel(QWidget):
         self._rover_detail = ""
         self._source_name = "zed front left"
         self._dead_reckoning = False
+        self._show_localization = False
+        self._localization_status: dict | None = None
         # The rover has a remote self-report (/video_status); the
         # simulation does not. When False, _refresh_status shows only the
         # local fact instead of a rover claim that has nothing to do with
@@ -112,7 +154,8 @@ class VideoPanel(QWidget):
         return self._streaming
 
     def set_source(self, name: str, port: int, *, dead_reckoning: bool = False,
-                   reports_remote_status: bool = True) -> None:
+                   reports_remote_status: bool = True,
+                   show_localization: bool = False) -> None:
         """Points the panel at a different sender.
 
         The receiver is stopped and re-pointed rather than a second one
@@ -130,25 +173,39 @@ class VideoPanel(QWidget):
         self._source_name = name
         self._dead_reckoning = dead_reckoning
         self._reports_remote_status = reports_remote_status
+        self._show_localization = show_localization
+        self._refusal = None
         self._refresh_title()
         if was_streaming:
             self.set_streaming(True)
 
+    def set_localization_status(self, status: dict | None) -> None:
+        """The rover's localisation health, as parsed from
+        /localization/status. Stored whatever the mode: the panel decides
+        whether it is on screen (set_source's show_localization), so the
+        window can forward every message without knowing the mode."""
+        self._localization_status = status
+        self._refresh_title()
+
     def _refresh_title(self) -> None:
         title = f"CAMERA / {self._source_name.upper()}"
+        colour = theme.TEXT_DIM
         if self._dead_reckoning:
             # The simulated pose is integrated from commanded twist, so it
             # drifts from the real rover and the picture cannot show it.
             title += "  -  DEAD RECKONING, NO LOCALISATION"
+            colour = theme.ACCENT
+        elif self._show_localization:
+            marker, colour = localization_marker(self._localization_status)
+            title += f"  -  {marker}"
         self.title_label.setText(title)
-        # This marker is the only defence an operator has against trusting
-        # a synthetic view of the real machine they are driving - sitting
-        # in the same muted colour as ordinary chrome ("CAMERA / ZED FRONT
+        # This marker is the only defence an operator has against trusting a
+        # synthetic view of the real machine they are driving - sitting in
+        # the same muted colour as ordinary chrome ("CAMERA / ZED FRONT
         # LEFT") above a moving picture would never win the operator's
-        # attention. theme.ACCENT is the same colour FAILED and the
-        # blocked-port warning use, for the same reason: this is a warning.
-        color = theme.ACCENT if self._dead_reckoning else theme.TEXT_DIM
-        self.title_label.setStyleSheet(f"color: {color}; font-weight: 600; border: none;")
+        # attention. The failure colours are the same ones FAILED and the
+        # blocked-port warning use, for the same reason: these are warnings.
+        self.title_label.setStyleSheet(f"color: {colour}; font-weight: 600; border: none;")
 
     def _on_toggle_clicked(self) -> None:
         self._toggle_requested = not self._toggle_requested
@@ -201,9 +258,30 @@ class VideoPanel(QWidget):
             self._rover_detail = ""
         self._refresh_status()
 
+    def _follow_reported_geometry(self) -> None:
+        """Restarts the local receiver at the size the rover says it is
+        streaming. The rover's zed_topic source sends whatever the ZED
+        wrapper publishes (640x360 today, not the 672x376 the UVC path
+        produced) and names it in the status detail; a decode pipeline
+        pinned to the wrong size fails caps negotiation and never emits a
+        frame, which looks exactly like a blocked UDP port. Only while the
+        operator has the stream on: a stale detail from before a stop must
+        not start a receiver that was switched off."""
+        if self._rover_state != "streaming" or not self._streaming:
+            return
+        geometry = parse_geometry(self._rover_detail)
+        if geometry is None or geometry == (self.receiver.width, self.receiver.height):
+            return
+        self.receiver.stop()
+        self.receiver.width, self.receiver.height = geometry
+        self._last_frame_at = None
+        self._last_frame = None
+        self.receiver.start()
+
     def apply_status(self, status: dict) -> None:
         self._rover_state = status.get("state", "failed")
         self._rover_detail = status.get("detail", "")
+        self._follow_reported_geometry()
         if self._rover_state == "failed" and not self._streaming:
             # A rejection (e.g. "not connected to rosbridge", "no route to
             # the rover") happens before set_streaming is ever called, so
@@ -213,6 +291,22 @@ class VideoPanel(QWidget):
             # again, not its opposite.
             self._toggle_requested = False
         self._refresh_status()
+
+    def refuse_stream(self, reason: str, now: float | None = None) -> None:
+        """Answers a stream request that will not be honoured.
+
+        Nothing about the view changes: the source on screen was not what
+        was requested, and stopping it would punish the operator for
+        asking. Only the button is put back where reality is - the click
+        already flipped _toggle_requested, and leaving it flipped would make
+        the next click send the opposite of what the operator means.
+        """
+        now = monotonic() if now is None else now
+        self._refusal = reason
+        self._refusal_until = now + self.refusal_seconds
+        self._toggle_requested = self._streaming
+        self.toggle_button.setText("Stop video" if self._streaming else "Start video")
+        self._refresh_status(now)
 
     def _poll_frame(self, now: float | None = None) -> None:
         now = monotonic() if now is None else now
@@ -263,6 +357,16 @@ class VideoPanel(QWidget):
         self._render_frame()
 
     def _refresh_status(self, now: float | None = None) -> None:
+        now = monotonic() if now is None else now
+
+        if self._refusal is not None:
+            if now < self._refusal_until:
+                self.status_label.setText(self._refusal)
+                self.status_label.setStyleSheet(
+                    f"color: {theme.ACCENT}; font-family: {theme.MONO_FONT_FAMILY}; border: none;")
+                return
+            self._refusal = None
+
         if not self._reports_remote_status:
             self._refresh_local_only_status(now)
             return
@@ -313,7 +417,6 @@ class VideoPanel(QWidget):
                 f"color: {theme.ACCENT}; font-family: {theme.MONO_FONT_FAMILY}; border: none;")
             return
 
-        now = monotonic() if now is None else now
         starving = (self._last_frame_at is not None
                     and now - self._last_frame_at > self.no_frame_after_seconds)
         if starving and self._rover_state in ("streaming", "starting"):
@@ -329,7 +432,7 @@ class VideoPanel(QWidget):
         self.status_label.setStyleSheet(
             f"color: {color}; font-family: {theme.MONO_FONT_FAMILY}; border: none;")
 
-    def _refresh_local_only_status(self, now: float | None = None) -> None:
+    def _refresh_local_only_status(self, now: float) -> None:
         """The status line for a source with no remote self-report (the
         simulation). There is only one fact available - whether frames are
         actually arriving here - so this shows that alone, rather than
@@ -348,7 +451,6 @@ class VideoPanel(QWidget):
                 f"color: {theme.ACCENT}; font-family: {theme.MONO_FONT_FAMILY}; border: none;")
             return
 
-        now = monotonic() if now is None else now
         starving = (self._last_frame_at is not None
                     and now - self._last_frame_at > self.no_frame_after_seconds)
         if starving:

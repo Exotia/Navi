@@ -4,6 +4,25 @@
   <world name="site">
     <include><uri>model://sun</uri></include>
 
+    <!-- Lets a ROS node move a model and ask where one is:
+         /gazebo/set_entity_state (how sim_ik_node places the rover from the
+         rover's own localisation in semi-autonomous mode) and
+         /gazebo/model_states (the only honest way to ask Gazebo where the
+         model actually ended up, which is what the end-to-end check reads).
+
+         Loaded in both modes: it adds services and a topic and moves
+         nothing by itself, and having model_states only in one mode would
+         mean the check that Gazebo agrees with its own odometry could only
+         be run in that mode.
+
+         The namespace is what makes the names /gazebo/... rather than
+         /set_entity_state; sim_ik_node's kSetEntityStateService and the
+         end-to-end check both spell them out in full. -->
+    <plugin name="gazebo_ros_state" filename="libgazebo_ros_state.so">
+      <ros><namespace>/gazebo</namespace></ros>
+      <update_rate>30.0</update_rate>
+    </plugin>
+
     <!-- The rover drives on this, not on the scan. The scan is scenery:
          with no physics there is nothing to stand on, and its 1.68 M faces
          would be a punishing collision mesh for no benefit. -->

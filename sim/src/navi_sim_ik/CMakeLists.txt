@@ -8,6 +8,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(gazebo_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(trajectory_msgs REQUIRED)
@@ -27,10 +28,17 @@ target_link_libraries(navi_sim_ik_stepper navi_sim_ik_model)
 target_include_directories(navi_sim_ik_stepper PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 
+# Pure: no rclcpp, no Gazebo. Everything the pose-override path decides is
+# decidable from a status string and a clock reading, so it is decided here
+# and tested exhaustively without a node harness.
+add_library(navi_sim_ik_external_pose STATIC src/external_pose.cpp)
+target_include_directories(navi_sim_ik_external_pose PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+
 add_executable(sim_ik_node src/sim_ik_node.cpp)
-target_link_libraries(sim_ik_node navi_sim_ik_stepper)
+target_link_libraries(sim_ik_node navi_sim_ik_stepper navi_sim_ik_external_pose)
 ament_target_dependencies(sim_ik_node
-  rclcpp geometry_msgs nav_msgs std_msgs trajectory_msgs)
+  rclcpp geometry_msgs gazebo_msgs nav_msgs std_msgs trajectory_msgs)
 install(TARGETS sim_ik_node DESTINATION lib/${PROJECT_NAME})
 
 if(BUILD_TESTING)
@@ -40,6 +48,9 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_sim_ik_stepper test/test_sim_ik_stepper.cpp)
   target_link_libraries(test_sim_ik_stepper navi_sim_ik_stepper)
+
+  ament_add_gtest(test_external_pose test/test_external_pose.cpp)
+  target_link_libraries(test_external_pose navi_sim_ik_external_pose)
 endif()
 
 ament_package()

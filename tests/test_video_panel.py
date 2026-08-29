@@ -1,5 +1,5 @@
 from ground_station import theme
-from ground_station.ui.video_panel import VideoPanel
+from ground_station.ui.video_panel import VideoPanel, localization_marker
 
 
 class FakeReceiver:
@@ -411,3 +411,211 @@ def test_the_label_does_not_impose_the_streams_own_size_as_a_minimum(qtbot):
 
     assert panel.image_label.minimumWidth() < 672
     assert panel.image_label.minimumHeight() < 376
+
+
+def test_refuse_stream_says_why_on_the_status_line(qtbot):
+    panel = VideoPanel(receiver=FakeReceiver())
+    qtbot.addWidget(panel)
+    panel.set_source("simulation", 5601, reports_remote_status=False,
+                     show_localization=True)
+
+    panel.refuse_stream("no camera stream in semi-autonomous mode", now=100.0)
+
+    assert panel.status_label.text() == "no camera stream in semi-autonomous mode"
+    assert theme.ACCENT in panel.status_label.styleSheet()
+
+
+def test_a_refusal_leaves_the_view_exactly_as_it_was(qtbot):
+    # "Does nothing but say so": the simulation stream on screen is not the
+    # rover's camera and has nothing to do with the request being refused.
+    # Stopping it here would punish the operator for asking a question.
+    receiver = FakeReceiver(frame=bytes(4 * 2 * 3))
+    panel = VideoPanel(receiver=receiver)
+    qtbot.addWidget(panel)
+    panel.set_streaming(True)
+
+    panel.refuse_stream("no camera stream in semi-autonomous mode", now=100.0)
+
+    assert panel.streaming is True
+    assert receiver.stopped is False
+    # The click flipped the button to "Stop video" on the way in; a refused
+    # request must put it back where reality is, or the next click sends the
+    # opposite of what the operator means.
+    assert panel.toggle_button.text() == "Stop video"
+
+
+def test_a_refusal_is_shown_for_a_while_and_then_gets_out_of_the_way(qtbot):
+    # Sticky forever would bury the one fact this mode's operator needs -
+    # whether frames are still arriving. Cleared on the next 33 ms poll it
+    # would never be read. Time-boxed is the only honest option.
+    receiver = FakeReceiver(frame=bytes(4 * 2 * 3))
+    panel = VideoPanel(receiver=receiver, refusal_seconds=5.0)
+    qtbot.addWidget(panel)
+    panel.set_source("simulation", 5601, reports_remote_status=False)
+    panel.set_streaming(True)
+    panel.refuse_stream("no camera stream in semi-autonomous mode", now=100.0)
+
+    panel._poll_frame(now=104.9)
+    assert panel.status_label.text() == "no camera stream in semi-autonomous mode"
+
+    panel._poll_frame(now=105.1)
+    assert panel.status_label.text() == "RECEIVING"
+
+
+def test_a_mode_change_clears_a_standing_refusal(qtbot):
+    # The refusal belongs to the mode that issued it. Carrying it into the
+    # manual view, where the rover's camera is exactly what is on screen,
+    # would be a lie with a five-second fuse.
+    panel = VideoPanel(receiver=FakeReceiver())
+    qtbot.addWidget(panel)
+    panel.set_source("simulation", 5601, reports_remote_status=False)
+    panel.refuse_stream("no camera stream in semi-autonomous mode", now=100.0)
+
+    panel.set_source("zed front left", 5600)
+
+    assert panel.status_label.text() == "VIDEO OFF"
+
+
+def test_the_marker_reads_localised_when_the_rover_knows_where_it_is():
+    text, colour = localization_marker(
+        {"state": "OK", "seconds_since_ok": 0.0, "source": "zed_vio",
+         "distance_travelled": 12.5, "mount_offset_verified": True, "detail": ""})
+
+    assert text == "LOCALISED"
+    assert colour == theme.OK
+
+
+def test_the_marker_counts_the_seconds_while_searching():
+    # The count is the whole content of this state: "searching" alone does
+    # not say whether it is a half-second blip over a rut or forty seconds
+    # of the rover being lost.
+    text, colour = localization_marker(
+        {"state": "SEARCHING", "seconds_since_ok": 4.2, "source": "zed_vio",
+         "distance_travelled": 12.5, "mount_offset_verified": True, "detail": ""})
+
+    assert text == "SEARCHING … 4 s"
+    assert colour == theme.ACCENT
+
+
+def test_searching_without_a_count_still_says_searching():
+    text, _ = localization_marker(
+        {"state": "SEARCHING", "seconds_since_ok": None, "source": "zed_vio",
+         "distance_travelled": 0.0, "mount_offset_verified": True, "detail": ""})
+
+    assert text == "SEARCHING"
+
+
+def test_the_marker_says_localisation_is_off():
+    text, colour = localization_marker(
+        {"state": "OFF", "seconds_since_ok": None, "source": "zed_vio",
+         "distance_travelled": 0.0, "mount_offset_verified": True, "detail": ""})
+
+    assert text == "LOCALISATION OFF"
+    assert colour == theme.ACCENT
+
+
+def test_no_status_at_all_is_not_reported_as_localisation_being_off():
+    # "The rover told us it is off" and "the rover has told us nothing" are
+    # different facts. The second one usually means rosbridge, not the ZED,
+    # and sending the operator to the wrong machine costs a rover day.
+    text, colour = localization_marker(None)
+
+    assert text == "NO LOCALISATION STATUS"
+    assert colour == theme.ACCENT
+
+
+def test_an_unknown_state_is_shown_rather_than_swallowed():
+    text, colour = localization_marker(
+        {"state": "wedged", "seconds_since_ok": None, "source": "zed_vio",
+         "distance_travelled": 0.0, "mount_offset_verified": False, "detail": ""})
+
+    assert text == "LOCALISATION WEDGED"
+    assert colour == theme.ACCENT
+
+
+def test_the_marker_is_on_the_title_in_semi_auto(qtbot):
+    panel = VideoPanel(receiver=FakeReceiver())
+    qtbot.addWidget(panel)
+    panel.set_source("simulation", 5601, reports_remote_status=False,
+                     show_localization=True)
+
+    panel.set_localization_status(
+        {"state": "OK", "seconds_since_ok": 0.0, "source": "zed_vio",
+         "distance_travelled": 1.0, "mount_offset_verified": True, "detail": ""})
+
+    assert panel.title_label.text() == "CAMERA / SIMULATION  -  LOCALISED"
+    assert theme.OK in panel.title_label.styleSheet()
+
+
+def test_the_marker_is_not_shown_for_a_source_that_is_not_localised(qtbot):
+    # The dead-reckoned Simulation mode and the rover's own camera have no
+    # localisation to report; a marker there would be a claim about a topic
+    # that has nothing to do with what is on screen.
+    panel = VideoPanel(receiver=FakeReceiver())
+    qtbot.addWidget(panel)
+    panel.set_source("simulation", 5601, dead_reckoning=True,
+                     reports_remote_status=False)
+
+    panel.set_localization_status(
+        {"state": "OK", "seconds_since_ok": 0.0, "source": "zed_vio",
+         "distance_travelled": 1.0, "mount_offset_verified": True, "detail": ""})
+
+    assert panel.title_label.text() == (
+        "CAMERA / SIMULATION  -  DEAD RECKONING, NO LOCALISATION")
+
+
+def test_entering_semi_auto_before_any_status_says_so_rather_than_nothing(qtbot):
+    panel = VideoPanel(receiver=FakeReceiver())
+    qtbot.addWidget(panel)
+
+    panel.set_source("simulation", 5601, reports_remote_status=False,
+                     show_localization=True)
+
+    assert panel.title_label.text() == "CAMERA / SIMULATION  -  NO LOCALISATION STATUS"
+
+
+def test_a_streaming_status_with_a_new_size_restarts_the_receiver_at_that_size(qtbot):
+    # The rover's zed_topic source streams whatever the wrapper publishes
+    # (640x360 today) and says so in its status detail. A receiver pinned
+    # to another size never frames a single picture, so the panel must
+    # follow the reported size, restarting the decode pipeline once.
+    receiver = FakeReceiver()
+    receiver.width, receiver.height = 672, 376
+    panel = VideoPanel(receiver=receiver)
+    qtbot.addWidget(panel)
+    panel.set_streaming(True)
+    assert receiver.start_count == 1
+
+    panel.apply_status({"state": "streaming", "detail": "192.168.178.101:5600 640x360"})
+
+    assert (receiver.width, receiver.height) == (640, 360)
+    assert receiver.stopped is True
+    assert receiver.start_count == 2
+
+
+def test_a_streaming_status_with_the_same_size_does_not_restart_the_receiver(qtbot):
+    receiver = FakeReceiver()
+    receiver.width, receiver.height = 640, 360
+    panel = VideoPanel(receiver=receiver)
+    qtbot.addWidget(panel)
+    panel.set_streaming(True)
+
+    panel.apply_status({"state": "streaming", "detail": "192.168.178.101:5600 640x360"})
+    panel.apply_status({"state": "streaming", "detail": "192.168.178.101:5600 640x360"})
+
+    assert receiver.start_count == 1
+    assert receiver.stopped is False
+
+
+def test_a_size_in_the_status_is_ignored_while_the_panel_is_not_streaming(qtbot):
+    # A stale "streaming 640x360" from before a stop must not start a
+    # receiver the operator has switched off.
+    receiver = FakeReceiver()
+    receiver.width, receiver.height = 672, 376
+    panel = VideoPanel(receiver=receiver)
+    qtbot.addWidget(panel)
+
+    panel.apply_status({"state": "streaming", "detail": "192.168.178.101:5600 640x360"})
+
+    assert receiver.start_count == 0
+    assert (receiver.width, receiver.height) == (672, 376)

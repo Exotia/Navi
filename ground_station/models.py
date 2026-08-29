@@ -1,5 +1,6 @@
 """Pure-Python state models for the ground station — no Qt or ROS imports."""
 
+import math
 from dataclasses import dataclass, field
 from time import monotonic
 
@@ -70,3 +71,34 @@ class NodeRegistry:
 
     def snapshot(self) -> list[NodeStatus]:
         return sorted(self._nodes.values(), key=lambda s: s.name)
+
+
+def yaw_from_quaternion(x: float, y: float, z: float, w: float) -> float:
+    """Heading in radians, from a quaternion.
+
+    The standard ZYX extraction, written out rather than pulled from a
+    library: this file is deliberately dependency-free (no Qt, no ROS, no
+    numpy), and the alternative is a transforms3d dependency for four
+    multiplications.
+    """
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def pose_readout_from_odometry(message: dict) -> dict:
+    """x, y and yaw out of a nav_msgs/Odometry as rosbridge delivers it.
+
+    Every level is defended with a default because the message comes off the
+    wire as whatever JSON arrived: a truncated one must produce a visibly
+    wrong readout at the origin, not an exception inside a Qt slot while the
+    operator is driving.
+    """
+    pose = (message.get("pose") or {}).get("pose") or {}
+    position = pose.get("position") or {}
+    orientation = pose.get("orientation") or {}
+    return {
+        "x": float(position.get("x", 0.0)),
+        "y": float(position.get("y", 0.0)),
+        "yaw": yaw_from_quaternion(
+            float(orientation.get("x", 0.0)), float(orientation.get("y", 0.0)),
+            float(orientation.get("z", 0.0)), float(orientation.get("w", 1.0))),
+    }

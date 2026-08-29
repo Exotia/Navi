@@ -10,9 +10,10 @@ from ground_station.ui.video_panel import VideoPanel
 
 class DashboardPage(QWidget):
     drive_details_requested = Signal()
-    # Emits "manual" or "semi_auto". The switch selects a view source and
-    # nothing else - the twist keeps reaching the rover in both modes, so
-    # this is never a control-path change wearing a view-change's clothes.
+    # Emits "manual", "semi_auto", "autonomous" or "simulation". The switch
+    # selects a view source and nothing else - the twist keeps reaching the
+    # rover in every mode, so this is never a control-path change wearing a
+    # view-change's clothes.
     mode_changed = Signal(str)
 
     def __init__(self, video_receiver=None, parent=None):
@@ -28,20 +29,33 @@ class DashboardPage(QWidget):
         mode_label.setStyleSheet(f"color: {theme.TEXT_DIM}; font-weight: 600;")
         self.manual_radio = QRadioButton("Manual")
         self.semi_auto_radio = QRadioButton("Semi-autonomous")
-        for radio in (self.manual_radio, self.semi_auto_radio):
-            radio.setStyleSheet(f"color: {theme.TEXT};")
-        self.manual_radio.setChecked(True)
-        self._mode_group = QButtonGroup(self)
-        self._mode_group.addButton(self.manual_radio)
-        self._mode_group.addButton(self.semi_auto_radio)
-        self.manual_radio.toggled.connect(self._on_mode_toggled)
-        self.semi_auto_radio.toggled.connect(self._on_mode_toggled)
+        self.autonomous_radio = QRadioButton("Autonomous")
+        self.simulation_radio = QRadioButton("Simulation")
+        # One list, in display order, rather than four scattered checks: the
+        # emitted name and the button are declared together, so adding a
+        # mode cannot leave a button that emits nothing.
+        self._modes = [
+            (self.manual_radio, "manual"),
+            (self.semi_auto_radio, "semi_auto"),
+            (self.autonomous_radio, "autonomous"),
+            (self.simulation_radio, "simulation"),
+        ]
+        # Shown, not hidden: the operator should be able to see that a fourth
+        # mode exists and is not built. Disabled and labelled, so nobody
+        # discovers that by clicking it mid-drive.
+        self.autonomous_radio.setEnabled(False)
+        self.autonomous_radio.setToolTip("not implemented")
 
+        self._mode_group = QButtonGroup(self)
         mode_row = QHBoxLayout()
         mode_row.addWidget(mode_label)
-        mode_row.addWidget(self.manual_radio)
-        mode_row.addWidget(self.semi_auto_radio)
+        for radio, _ in self._modes:
+            radio.setStyleSheet(f"color: {theme.TEXT};")
+            self._mode_group.addButton(radio)
+            radio.toggled.connect(self._on_mode_toggled)
+            mode_row.addWidget(radio)
         mode_row.addStretch()
+        self.manual_radio.setChecked(True)
 
         # Video goes above the drive card in its own column, so the drive
         # readouts stay visible alongside the camera while driving.
@@ -60,4 +74,7 @@ class DashboardPage(QWidget):
             # off, then the one turning on) - only the "turning on" edge
             # names the mode we are entering.
             return
-        self.mode_changed.emit("semi_auto" if self.semi_auto_radio.isChecked() else "manual")
+        for radio, mode in self._modes:
+            if radio.isChecked():
+                self.mode_changed.emit(mode)
+                return
