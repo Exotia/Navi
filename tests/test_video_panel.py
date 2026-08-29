@@ -572,3 +572,50 @@ def test_entering_semi_auto_before_any_status_says_so_rather_than_nothing(qtbot)
                      show_localization=True)
 
     assert panel.title_label.text() == "CAMERA / SIMULATION  -  NO LOCALISATION STATUS"
+
+
+def test_a_streaming_status_with_a_new_size_restarts_the_receiver_at_that_size(qtbot):
+    # The rover's zed_topic source streams whatever the wrapper publishes
+    # (640x360 today) and says so in its status detail. A receiver pinned
+    # to another size never frames a single picture, so the panel must
+    # follow the reported size, restarting the decode pipeline once.
+    receiver = FakeReceiver()
+    receiver.width, receiver.height = 672, 376
+    panel = VideoPanel(receiver=receiver)
+    qtbot.addWidget(panel)
+    panel.set_streaming(True)
+    assert receiver.start_count == 1
+
+    panel.apply_status({"state": "streaming", "detail": "192.168.178.101:5600 640x360"})
+
+    assert (receiver.width, receiver.height) == (640, 360)
+    assert receiver.stopped is True
+    assert receiver.start_count == 2
+
+
+def test_a_streaming_status_with_the_same_size_does_not_restart_the_receiver(qtbot):
+    receiver = FakeReceiver()
+    receiver.width, receiver.height = 640, 360
+    panel = VideoPanel(receiver=receiver)
+    qtbot.addWidget(panel)
+    panel.set_streaming(True)
+
+    panel.apply_status({"state": "streaming", "detail": "192.168.178.101:5600 640x360"})
+    panel.apply_status({"state": "streaming", "detail": "192.168.178.101:5600 640x360"})
+
+    assert receiver.start_count == 1
+    assert receiver.stopped is False
+
+
+def test_a_size_in_the_status_is_ignored_while_the_panel_is_not_streaming(qtbot):
+    # A stale "streaming 640x360" from before a stop must not start a
+    # receiver the operator has switched off.
+    receiver = FakeReceiver()
+    receiver.width, receiver.height = 672, 376
+    panel = VideoPanel(receiver=receiver)
+    qtbot.addWidget(panel)
+
+    panel.apply_status({"state": "streaming", "detail": "192.168.178.101:5600 640x360"})
+
+    assert receiver.start_count == 0
+    assert (receiver.width, receiver.height) == (672, 376)

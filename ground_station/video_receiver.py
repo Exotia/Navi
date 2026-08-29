@@ -33,11 +33,28 @@ a UDP port.
 """
 
 import argparse
+import re
 import subprocess
 import tempfile
 import threading
 import time
 from pathlib import Path
+
+
+_GEOMETRY = re.compile(r"(?<![0-9])(\d{2,5})x(\d{2,5})(?![0-9])")
+
+
+def parse_geometry(detail: str) -> tuple[int, int] | None:
+    """The width and height the rover names in its /video_status detail,
+    e.g. "192.168.178.101:5600 640x360" -> (640, 360), or None when the
+    detail carries no size. The rover's zed_topic source streams whatever
+    the ZED wrapper publishes and reports that size here, and a receiver
+    pinned to any other size never frames a single picture - so this is
+    the one place the ground station learns what to decode."""
+    match = _GEOMETRY.search(detail or "")
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2))
 
 
 def build_receive_pipeline(port: int, width: int, height: int) -> list[str]:

@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (QLabel, QPushButton, QSizePolicy, QVBoxLayout,
                                QHBoxLayout, QWidget)
 
 from ground_station import theme
-from ground_station.video_receiver import VideoReceiver
+from ground_station.video_receiver import VideoReceiver, parse_geometry
 
 
 def localization_marker(status: dict | None) -> tuple[str, str]:
@@ -258,9 +258,30 @@ class VideoPanel(QWidget):
             self._rover_detail = ""
         self._refresh_status()
 
+    def _follow_reported_geometry(self) -> None:
+        """Restarts the local receiver at the size the rover says it is
+        streaming. The rover's zed_topic source sends whatever the ZED
+        wrapper publishes (640x360 today, not the 672x376 the UVC path
+        produced) and names it in the status detail; a decode pipeline
+        pinned to the wrong size fails caps negotiation and never emits a
+        frame, which looks exactly like a blocked UDP port. Only while the
+        operator has the stream on: a stale detail from before a stop must
+        not start a receiver that was switched off."""
+        if self._rover_state != "streaming" or not self._streaming:
+            return
+        geometry = parse_geometry(self._rover_detail)
+        if geometry is None or geometry == (self.receiver.width, self.receiver.height):
+            return
+        self.receiver.stop()
+        self.receiver.width, self.receiver.height = geometry
+        self._last_frame_at = None
+        self._last_frame = None
+        self.receiver.start()
+
     def apply_status(self, status: dict) -> None:
         self._rover_state = status.get("state", "failed")
         self._rover_detail = status.get("detail", "")
+        self._follow_reported_geometry()
         if self._rover_state == "failed" and not self._streaming:
             # A rejection (e.g. "not connected to rosbridge", "no route to
             # the rover") happens before set_streaming is ever called, so

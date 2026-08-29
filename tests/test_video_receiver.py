@@ -336,3 +336,18 @@ def test_stop_joins_the_reader_thread():
     receiver.stop()
 
     assert receiver._reader is None or not receiver._reader.is_alive()
+
+
+def test_parse_geometry_reads_the_size_the_rover_reports():
+    from ground_station.video_receiver import parse_geometry
+
+    assert parse_geometry("192.168.178.101:5600 640x360") == (640, 360)
+    assert parse_geometry("640x360") == (640, 360)
+
+
+def test_parse_geometry_is_none_when_the_detail_carries_no_size():
+    from ground_station.video_receiver import parse_geometry
+
+    assert parse_geometry("") is None
+    assert parse_geometry("192.168.178.101:5600") is None
+    assert parse_geometry("not connected to rosbridge") is None
