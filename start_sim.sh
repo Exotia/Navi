@@ -157,6 +157,15 @@ if [ "$CLEAN_STALE" -eq 1 ]; then
     # A stale bridge holds two DDS contexts and would keep republishing the
     # rover's topics onto the sim domain alongside the new one's.
     kill_stale "simulation domain bridges" pattern "sim_bridge\.py"
+    # Both outlived their launch for hours, found live: a second
+    # terrain_writer respawns the same 'terrain' model against the new
+    # one, and a second robot_state_publisher publishes a second
+    # /robot_description. robot_state_publisher's comm field truncates to
+    # robot_state_pub, so that is the exact name to match; terrain_writer
+    # is a python3 script, so its comm is "python3" and only the command
+    # line identifies it.
+    kill_stale "terrain writers" pattern "navi_sim_bringup/terrain_writer"
+    kill_stale "robot state publishers" exact "robot_state_pub"
     # Matched on the elements this project's send pipeline always has, so
     # an unrelated gst-launch on this machine is left alone.
     kill_stale "simulation send pipelines" pattern "gst-launch-1\.0.*fdsrc.*udpsink"

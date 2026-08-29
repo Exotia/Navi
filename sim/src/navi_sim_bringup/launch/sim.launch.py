@@ -12,7 +12,8 @@ import tempfile
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction
+from launch.actions import (DeclareLaunchArgument, ExecuteProcess, OpaqueFunction,
+                            Shutdown)
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -137,7 +138,15 @@ def _world_with_mesh(context, *args, **kwargs):
                  "-s", "libgazebo_ros_init.so",
                  "-s", "libgazebo_ros_factory.so",
                  "--ros-args", "--param", "publish_rate:=100.0"],
-            output="screen"),
+            output="screen",
+            # Without Gazebo there is no camera, no rover and nothing to
+            # bridge into, yet by default the launch keeps every other
+            # process alive: the video sender then sits for hours feeding
+            # an encoder no frames, start_sim.sh never returns, and the
+            # ground station's "NO FRAMES - nothing arriving" has no
+            # matching error anywhere. Gazebo going away ends the launch,
+            # so it is one exit code in one terminal instead.
+            on_exit=Shutdown(reason="Gazebo exited - the simulation is over")),
         Node(package="robot_state_publisher", executable="robot_state_publisher",
              parameters=[{"robot_description": description, "use_sim_time": True}],
              output="screen"),

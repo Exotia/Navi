@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 
@@ -101,11 +102,15 @@ def main() -> None:
     node = SimVideoSender()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
+        # ExternalShutdownException is how ros2 launch's SIGINT reaches a
+        # spinning node; uncaught, every launch teardown logged this node
+        # as "process has died, exit code 1" - a real crash looked the same.
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

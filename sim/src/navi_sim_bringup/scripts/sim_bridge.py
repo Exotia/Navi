@@ -26,11 +26,13 @@ it, for a topic nothing is publishing yet anyway.
 """
 
 import argparse
+import signal
 import sys
+import threading
 
 import rclpy
 from rclpy.context import Context
-from rclpy.executors import SingleThreadedExecutor
+from rclpy.executors import ShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
 from rosidl_runtime_py.utilities import get_message
 
@@ -116,8 +118,22 @@ class SimBridge:
         self.executor = SingleThreadedExecutor(context=self.rover_context)
         self.executor.add_node(self.rover_node)
 
-    def spin(self) -> None:
-        self.executor.spin()
+    def spin(self, stop: threading.Event = None) -> None:
+        """Relays until `stop` is set or the bridge is shut down.
+
+        Not executor.spin(): with two hand-made contexts, rclpy's own SIGINT
+        handling never wakes that blocking wait - confirmed by sending the
+        process SIGINT and watching it run on until ros2 launch escalated
+        to SIGTERM five seconds later, every teardown. A timed spin_once
+        returns to Python often enough for a signal handler to be seen.
+        """
+        try:
+            while (stop is None or not stop.is_set()) and self.rover_context.ok():
+                self.executor.spin_once(timeout_sec=0.2)
+        except ShutdownException:
+            # shutdown() was called from another thread, which is how the
+            # tests end a spin; not an error.
+            pass
 
     def shutdown(self) -> None:
         self.executor.shutdown()
@@ -151,8 +167,14 @@ def main(argv=None) -> int:
           f"one way: {', '.join(bridge.bridged) or '(nothing)'}", flush=True)
     if bridge.skipped:
         print(f"[sim_bridge] not carried: {', '.join(bridge.skipped)}", flush=True)
+    # Installed after SimBridge(), whose rclpy.init calls put rclpy's own
+    # handlers in place; these replace them. SIGTERM too, so a launch
+    # teardown ends with exit code 0 rather than a "process has died".
+    stop = threading.Event()
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, lambda *_: stop.set())
     try:
-        bridge.spin()
+        bridge.spin(stop)
     except KeyboardInterrupt:
         pass
     finally:
