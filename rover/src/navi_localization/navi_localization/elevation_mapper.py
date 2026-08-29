@@ -192,6 +192,11 @@ def parse_obstacle_frame(frame_id: str) -> tuple:
     return ix, iy, voxel_m
 
 
+# A rover-height change beyond this since the last full cut moves the clamp
+# band enough to matter for every tile, so the next offer cuts them all.
+CLAMP_RECUT_M = 0.05
+
+
 class ElevationMapper(Node):
 
     def __init__(self, map_directory: str = None) -> None:
@@ -215,6 +220,7 @@ class ElevationMapper(Node):
         self._grid = ElevationGrid()
         self._scheduler = TileScheduler()
         self._obstacles = ObstacleMap(voxel_m=float(self.get_parameter('obstacle_voxel_m').value))
+        self._clamp_rover_z = None      # rover z the last full cut was clamped at
         self._obstacle_scheduler = PayloadScheduler()
         self._store = MapStore(str(self.get_parameter('map_directory').value))
         self._loaded = None
@@ -302,7 +308,7 @@ class ElevationMapper(Node):
         # queued as a one-shot empty tile, paced exactly like a clear's or
         # a load's blanks.
         self._queue_nan('obstacle', before - after)
-        self._offer(self._now())
+        self._offer(self._now(), full=False)
 
     def _on_pose(self, message: Odometry) -> None:
         # Only remembers the rover's height. It does not re-offer: cutting
@@ -336,31 +342,50 @@ class ElevationMapper(Node):
             elevation = np.maximum(elevation, low)
         return dataclasses.replace(snapshot, elevation=elevation)
 
-    def _offer(self, now: float) -> None:
+    def _offer(self, now: float, full: bool = True) -> None:
+        """Offers the terrain and obstacle tiles to their schedulers.
+
+        `full=False` (a cloud): only the tiles this update touched are cut
+        and compared - the grid remembers them - unless the rover's height
+        has moved by more than CLAMP_RECUT_M since the last full pass,
+        which changes the clamp band for every tile. Cutting a full 60 m
+        map is ~576 tiles and ~32 ms on the Jetson, on every cloud, in the
+        same executor as pose and command callbacks; the touched set is
+        usually a handful. `full=True` (load, clear, first offer): every
+        tile, so the scheduler's view is complete."""
         snapshot = self._grid.snapshot()
+        touched = self._grid.take_touched_tiles()
         if snapshot is None:
             self._tile_count = 0
-            keys = {}
+            self._forget_vanished(self._scheduler, 'terrain', {})
         else:
-            keys = tiles_of_snapshot(self._clamped_for_tiles(snapshot))
-            # Remembered rather than recomputed in _publish_status: cutting
-            # the snapshot into tiles costs ~32 ms over a full 60 m map on
-            # the Jetson, and the status timer runs once a second whether
-            # or not anything changed. Here it is computed anyway.
-            self._tile_count = len(keys)
+            band_moved = (self._rover_z is not None
+                          and (self._clamp_rover_z is None
+                               or abs(self._rover_z - self._clamp_rover_z) > CLAMP_RECUT_M))
+            if full or band_moved:
+                self._clamp_rover_z = self._rover_z
+                keys = tiles_of_snapshot(self._clamped_for_tiles(snapshot))
+                self._tile_count = len(keys)
+                candidates = self._scheduler.known_keys() | set(keys)
+            else:
+                keys = tiles_of_snapshot(self._clamped_for_tiles(snapshot), only=touched)
+                candidates = touched
             for key in keys:
                 # Live again before its blank went out: sending the blank
                 # now would erase terrain the map does believe in.
                 self._pending_nan_keys.discard(('terrain', key))
             self._scheduler.offer(keys, now)
-        # A tile the scheduler knows but this offer no longer contains has
-        # vanished from the map as published: every cell of it fell out of
-        # the rover's band once the first pose arrived (a desk top that
-        # was "ground" before the clamp could apply), or a load replaced
-        # the grid. Left in the scheduler it would keep going out as a
-        # keepalive forever, so it is forgotten - and blanked once if the
-        # sim ever saw it.
-        self._forget_vanished(self._scheduler, 'terrain', keys)
+            # A candidate tile that this offer no longer contains has
+            # vanished from the map as published: every cell of it fell
+            # out of the rover's band once the first pose arrived (a desk
+            # top that was "ground" before the clamp could apply), or a
+            # load replaced the grid. Left in the scheduler it would keep
+            # going out as a keepalive forever, so it is forgotten - and
+            # blanked once if the sim ever saw it.
+            for key in candidates - set(keys):
+                if self._scheduler.forget(key):
+                    self._queue_nan('terrain', [key])
+            self._tile_count = len(self._scheduler.known_keys())
 
         obstacle_tiles = self._obstacles.tiles()
         for key in obstacle_tiles:

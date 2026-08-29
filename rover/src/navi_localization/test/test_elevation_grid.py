@@ -319,3 +319,16 @@ def test_replace_refuses_a_state_bigger_than_the_cap():
 
     with pytest.raises(ValueError):
         grid.replace(state)
+
+
+def test_update_remembers_the_tiles_it_touched_including_the_halo():
+    from navi_localization.elevation_grid import ElevationGrid
+    grid = ElevationGrid()
+    # Cell (52, 3) is inside tile (1, 0); cell (50, 3) is tile (1, 0)'s
+    # first column, which tile (0, 0) publishes as its halo sample too.
+    grid.update(np.array([[52 * 0.05 + 0.01, 3 * 0.05 + 0.01, 0.0],
+                          [50 * 0.05 + 0.01, 3 * 0.05 + 0.01, 0.0]]))
+    assert grid.take_touched_tiles() == {(1, 0), (0, 0)}
+    assert grid.take_touched_tiles() == set()          # reset by the take
+    grid.update(np.array([[-0.01, -0.01, 0.0]]))       # cell (-1, -1): tile (-1, -1)
+    assert grid.take_touched_tiles() == {(-1, -1)}

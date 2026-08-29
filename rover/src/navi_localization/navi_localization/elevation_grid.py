@@ -31,6 +31,7 @@ import numpy as np
 RESOLUTION = 0.05
 MAX_EXTENT_M = 60.0
 MAX_CELLS = int(round(MAX_EXTENT_M / RESOLUTION))   # 1200
+TILE_CELLS = 50            # cells per 2.5 m tile; tiles.py builds on this
 
 # The percentile a cell's drawn height is taken at, and how it is turned
 # into a rank within a sorted cell (see update()'s docstring for why this
@@ -110,6 +111,7 @@ class ElevationGrid:
         self.resolution = float(resolution)
         self.max_cells = int(max_cells)
         self.points_outside_cap = 0
+        self._touched_tiles = set()
         # Lattice index of column 0 / row 0. None until the first point.
         self._origin_ix = None
         self._origin_iy = None
@@ -170,6 +172,28 @@ class ElevationGrid:
         self._height.flat[unique_flat] = z_sorted[percentile_rank]
         self._top.flat[unique_flat] = z_sorted[max_rank]
         self._count.flat[unique_flat] = counts
+        self._note_touched(ix[inside], iy[inside])
+
+    def _note_touched(self, ix: np.ndarray, iy: np.ndarray) -> None:
+        """Remembers the 2.5 m tiles whose published 51x51 samples include
+        any of these absolute cells: a cell belongs to tile `c // 50` and,
+        on a tile's first row/column (`c % 50 == 0`), to the previous
+        tile's halo too. Read and reset with `take_touched_tiles()`."""
+        tx, ty = np.unique(ix // TILE_CELLS), np.unique(iy // TILE_CELLS)
+        halo_x = np.unique(ix[ix % TILE_CELLS == 0] // TILE_CELLS - 1)
+        halo_y = np.unique(iy[iy % TILE_CELLS == 0] // TILE_CELLS - 1)
+        xs = np.union1d(tx, halo_x).tolist()
+        ys = np.union1d(ty, halo_y).tolist()
+        # The cross product over-approximates (a halo column touches only
+        # the tiles whose rows were hit) - harmless: a tile cut and found
+        # unchanged costs one comparison, a tile missed costs a stale
+        # picture.
+        self._touched_tiles.update((int(x), int(y)) for x in xs for y in ys)
+
+    def take_touched_tiles(self) -> set:
+        """The tiles touched by update()s since the last call, then none."""
+        touched, self._touched_tiles = self._touched_tiles, set()
+        return touched
 
     def height_at(self, ix_cells: np.ndarray, iy_cells: np.ndarray) -> np.ndarray:
         """The 20th-percentile height already stored for these absolute

@@ -39,30 +39,37 @@ def tile_index_of(pose_x: float, pose_y: float) -> tuple[int, int]:
             int(round((pose_y - _CENTER_OFFSET) / TILE_M)))
 
 
-def tiles_of_snapshot(snapshot) -> dict:
-    """Every tile with at least one seen cell of its own, as (51, 51) arrays."""
+def tiles_of_snapshot(snapshot, only=None) -> dict:
+    """Every tile with at least one seen cell of its own, as (51, 51)
+    arrays - or, with `only` (an iterable of (tx, ty)), just those tiles:
+    the incremental path, where the caller knows which tiles an update
+    touched and cutting all ~576 of a full map would be wasted work."""
     elevation = np.asarray(snapshot.elevation, dtype=np.float32)
     rows, cols = elevation.shape
     ox, oy = int(snapshot.origin_ix), int(snapshot.origin_iy)
     # Floor division works for negative lattice indices too.
     first_tx, last_tx = ox // TILE_CELLS, (ox + cols - 1) // TILE_CELLS
     first_ty, last_ty = oy // TILE_CELLS, (oy + rows - 1) // TILE_CELLS
+    if only is None:
+        wanted = ((tx, ty) for ty in range(first_ty, last_ty + 1)
+                  for tx in range(first_tx, last_tx + 1))
+    else:
+        wanted = sorted(only)
 
     out = {}
-    for ty in range(first_ty, last_ty + 1):
-        for tx in range(first_tx, last_tx + 1):
-            # Lattice indices of the tile's 51 samples.
-            xs = np.arange(tx * TILE_CELLS, tx * TILE_CELLS + TILE_SAMPLES) - ox
-            ys = np.arange(ty * TILE_CELLS, ty * TILE_CELLS + TILE_SAMPLES) - oy
-            tile = np.full((TILE_SAMPLES, TILE_SAMPLES), np.nan, dtype=np.float32)
-            in_x = (xs >= 0) & (xs < cols)
-            in_y = (ys >= 0) & (ys < rows)
-            if not (in_x.any() and in_y.any()):
-                continue
-            tile[np.ix_(in_y, in_x)] = elevation[np.ix_(ys[in_y], xs[in_x])]
-            own = tile[:TILE_CELLS, :TILE_CELLS]
-            if np.isfinite(own).any():
-                out[(tx, ty)] = tile
+    for tx, ty in wanted:
+        # Lattice indices of the tile's 51 samples.
+        xs = np.arange(tx * TILE_CELLS, tx * TILE_CELLS + TILE_SAMPLES) - ox
+        ys = np.arange(ty * TILE_CELLS, ty * TILE_CELLS + TILE_SAMPLES) - oy
+        tile = np.full((TILE_SAMPLES, TILE_SAMPLES), np.nan, dtype=np.float32)
+        in_x = (xs >= 0) & (xs < cols)
+        in_y = (ys >= 0) & (ys < rows)
+        if not (in_x.any() and in_y.any()):
+            continue
+        tile[np.ix_(in_y, in_x)] = elevation[np.ix_(ys[in_y], xs[in_x])]
+        own = tile[:TILE_CELLS, :TILE_CELLS]
+        if np.isfinite(own).any():
+            out[(tx, ty)] = tile
     return out
 
 

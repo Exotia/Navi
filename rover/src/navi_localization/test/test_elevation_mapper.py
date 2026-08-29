@@ -792,3 +792,39 @@ def test_obstacle_tiles_carry_the_frame_id_parameter_like_terrain_tiles(ros, tmp
         assert parse_obstacle_frame(node._obstacle_publisher.messages[0].header.frame_id)[:2] == (0, 0)
     finally:
         node.destroy_node()
+
+
+def _count_cuts(monkeypatch):
+    import navi_localization.elevation_mapper as module
+    real = module.tiles_of_snapshot
+    calls = []
+
+    def counting(snapshot, only=None):
+        calls.append(None if only is None else set(only))
+        return real(snapshot, only=only)
+    monkeypatch.setattr(module, 'tiles_of_snapshot', counting)
+    return calls
+
+
+def test_a_cloud_cuts_only_the_tiles_it_touched(node, monkeypatch):
+    calls = _count_cuts(monkeypatch)
+    node._on_cloud(cloud(points_at(0.1, 0.1)))         # tiles (0,0), (1,0)
+    node._on_cloud(cloud([[10.1, 10.1, 0.0]]))          # tile (4, 4) only
+    assert calls[-1] == {(4, 4)}
+    node._tick(now=0.0)
+    keys = sorted(_tile_keys(node._tile_publisher.messages))
+    assert keys == [(0, 0), (1, 0), (4, 4)]            # the earlier tiles are still scheduled
+
+
+def test_a_rover_height_change_recuts_every_tile_for_the_clamp(node, monkeypatch):
+    calls = _count_cuts(monkeypatch)
+    odometry = Odometry()
+    odometry.pose.pose.position.z = 0.0
+    node._on_pose(odometry)
+    node._on_cloud(cloud(points_at(0.1, 0.1)))
+    node._on_cloud(cloud([[10.1, 10.1, 0.0]]))
+    assert calls[-1] == {(4, 4)}                       # incremental while z is steady
+    odometry.pose.pose.position.z = 0.3                # more than CLAMP_RECUT_M
+    node._on_pose(odometry)
+    node._on_cloud(cloud([[10.1, 10.1, 0.0]]))
+    assert calls[-1] is None                           # a full cut
