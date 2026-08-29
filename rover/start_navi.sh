@@ -67,7 +67,10 @@ own_pids() {
     local pid=$$
     while [ -n "$pid" ] && [ "$pid" -gt 1 ]; do
         echo "$pid"
-        pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+        # `|| true`: under set -e -o pipefail a parent that vanished mid-walk
+        # (an ssh session's intermediate shell) would otherwise abort the
+        # launcher silently before any node starts (see start_sim.sh).
+        pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)
     done
 }
 

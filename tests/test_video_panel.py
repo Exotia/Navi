@@ -635,3 +635,43 @@ def test_switching_source_forgets_the_size_the_previous_source_reported(qtbot):
     panel.set_source("simulation", 5601, reports_remote_status=False)
 
     assert (receiver.width, receiver.height) == (672, 376)
+
+
+def test_a_late_rover_size_after_switching_to_the_simulation_is_ignored(qtbot):
+    # The rover publishes its status at 1 Hz; one sent before it processed
+    # the stop can land after the operator switched to the simulation. It
+    # must not re-point the receiver at 640x360 - the 672x376 sim stream
+    # would then fail caps negotiation and show NO FRAMES all session.
+    receiver = FakeReceiver()
+    receiver.width, receiver.height = 672, 376
+    panel = VideoPanel(receiver=receiver)
+    qtbot.addWidget(panel)
+    panel.set_streaming(True)
+    panel.set_source("simulation", 5601, reports_remote_status=False)
+    panel.set_streaming(True)
+    starts_before = receiver.start_count
+
+    panel.apply_status({"state": "streaming", "detail": "192.168.178.101:5600 640x360"})
+
+    assert (receiver.width, receiver.height) == (672, 376)
+    assert receiver.start_count == starts_before
+
+
+def test_a_receiver_that_fails_to_restart_at_the_new_size_reports_the_cause(qtbot):
+    class FailingOnSecondStart(FakeReceiver):
+        def start(self):
+            super().start()
+            if self.start_count > 1:
+                raise RuntimeError("gst-launch-1.0 not found")
+
+    receiver = FailingOnSecondStart()
+    receiver.width, receiver.height = 672, 376
+    panel = VideoPanel(receiver=receiver)
+    qtbot.addWidget(panel)
+    panel.set_streaming(True)
+
+    panel.apply_status({"state": "streaming", "detail": "192.168.178.101:5600 640x360"})
+
+    assert panel._streaming is False
+    assert panel.toggle_button.text() == "Start video"
+    assert "gst-launch-1.0 not found" in panel._rover_detail

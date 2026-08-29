@@ -93,7 +93,14 @@ class SimVideoSender(Node):
     def destroy_node(self):
         if self._process.poll() is None:
             self._process.terminate()
-            self._process.wait(timeout=3)
+            try:
+                self._process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                # A pipeline stuck in a blocking write ignores SIGTERM;
+                # raising here would skip rclpy's shutdown and leave the
+                # encoder bound to the port.
+                self._process.kill()
+                self._process.wait(timeout=3)
         super().destroy_node()
 
 

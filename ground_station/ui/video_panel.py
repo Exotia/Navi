@@ -273,6 +273,12 @@ class VideoPanel(QWidget):
         frame, which looks exactly like a blocked UDP port. Only while the
         operator has the stream on: a stale detail from before a stop must
         not start a receiver that was switched off."""
+        # The simulation source reports no remote status: a late rover
+        # status (published before the rover processed its stop) landing
+        # after the switch must not re-point the receiver at the rover's
+        # 640x360 and break the 672x376 sim stream.
+        if not self._reports_remote_status:
+            return
         if self._rover_state != "streaming" or not self._streaming:
             return
         geometry = parse_geometry(self._rover_detail)
@@ -282,7 +288,17 @@ class VideoPanel(QWidget):
         self.receiver.width, self.receiver.height = geometry
         self._last_frame_at = None
         self._last_frame = None
-        self.receiver.start()
+        try:
+            self.receiver.start()
+        except Exception as exc:
+            # Same contract as set_streaming: a launch failure is shown as
+            # the cause, not left as a silent "Stop video" with no receiver.
+            self._streaming = False
+            self._toggle_requested = False
+            self.toggle_button.setText("Start video")
+            self._rover_state = "failed"
+            self._rover_detail = f"local receiver failed to start: {exc}"
+            self._refresh_status()
 
     def apply_status(self, status: dict) -> None:
         self._rover_state = status.get("state", "failed")
