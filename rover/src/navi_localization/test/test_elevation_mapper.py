@@ -256,3 +256,72 @@ def test_the_node_talks_on_exactly_the_three_map_topics(node):
     names = {name for name, _ in node.get_topic_names_and_types()}
     assert {MAP_TILE_TOPIC, MAP_COMMAND_TOPIC, MAP_STATUS_TOPIC} <= names
     assert '/localization/map' not in names
+
+
+class ExplodingStore:
+    """A MapStore whose save fails the way a full disk does."""
+
+    def __init__(self, real):
+        self.directory = real.directory
+        self._real = real
+
+    def list_names(self):
+        return self._real.list_names()
+
+    def save(self, name, state, overwrite=False):
+        raise OSError('[Errno 28] No space left on device')
+
+    def load(self, name):
+        return self._real.load(name)
+
+
+def test_a_save_that_fails_with_an_oserror_is_reported_not_fatal(node):
+    node._store = ExplodingStore(node._store)
+    node._on_cloud(cloud(points_at(0.1, 0.1)))
+
+    node._on_command(String(data='{"action":"save","name":"yard"}'))
+
+    node._publish_status()
+    last = json.loads(node._status_publisher.messages[-1].data)['last_command']
+    assert last['ok'] is False and 'No space left' in last['error']
+    # The node is still mapping: a raised OSError would have come out of
+    # rclpy.spin and ended the run.
+    node._on_cloud(cloud(points_at(0.1, 0.1)))
+    node._tick(now=1.0)
+    assert node._tile_publisher.messages
+
+
+def test_loading_a_truncated_map_is_reported_not_fatal(node, tmp_path):
+    node._on_cloud(cloud(points_at(0.1, 0.1)))
+    node._on_command(String(data='{"action":"save","name":"yard"}'))
+    path = tmp_path / 'yard.npz'
+    whole = path.read_bytes()
+    path.write_bytes(whole[:len(whole) // 2])
+
+    node._on_command(String(data='{"action":"load","name":"yard"}'))
+
+    node._publish_status()
+    last = json.loads(node._status_publisher.messages[-1].data)['last_command']
+    assert last['ok'] is False and 'yard' in last['error']
+    node._tick(now=1.0)
+
+
+def test_loading_a_map_without_an_elevation_array_is_reported_not_fatal(node, tmp_path):
+    np.savez_compressed(str(tmp_path / 'half.npz'),
+                        count=np.ones((4, 4), dtype=np.int32),
+                        origin_ix=np.int64(0), origin_iy=np.int64(0),
+                        resolution=np.float64(0.05))
+
+    node._on_command(String(data='{"action":"load","name":"half"}'))
+
+    node._publish_status()
+    last = json.loads(node._status_publisher.messages[-1].data)['last_command']
+    assert last['ok'] is False and 'elevation' in last['error']
+
+
+def test_the_status_tile_count_follows_the_map(node):
+    node._publish_status()
+    assert json.loads(node._status_publisher.messages[-1].data)['tiles'] == 0
+    node._on_cloud(cloud(points_at(0.1, 0.1)))     # tiles (0, 0) and (1, 0)
+    node._publish_status()
+    assert json.loads(node._status_publisher.messages[-1].data)['tiles'] == 2

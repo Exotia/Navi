@@ -123,6 +123,7 @@ class ElevationMapper(Node):
         self._loaded = None
         self._last_command = None
         self._warned_about_cap = False
+        self._tile_count = 0
 
         # Default QoS: reliable, volatile, depth 1 - sim_bridge relays this
         # topic with a generic subscription and a durability mismatch there
@@ -161,8 +162,16 @@ class ElevationMapper(Node):
 
     def _offer(self, now: float) -> None:
         snapshot = self._grid.snapshot()
-        if snapshot is not None:
-            self._scheduler.offer(tiles_of_snapshot(snapshot), now)
+        if snapshot is None:
+            self._tile_count = 0
+            return
+        keys = tiles_of_snapshot(snapshot)
+        # Remembered rather than recomputed in _publish_status: cutting the
+        # snapshot into tiles costs ~32 ms over a full 60 m map on the
+        # Jetson, and the status timer runs once a second whether or not
+        # anything changed. Here it is computed anyway.
+        self._tile_count = len(keys)
+        self._scheduler.offer(keys, now)
 
     def _tick(self, now: float = None) -> None:
         now = self._now() if now is None else now
@@ -190,7 +199,14 @@ class ElevationMapper(Node):
             else:
                 raise ValueError(f"unknown action {action!r}; save, load or clear")
             self._record(action, name, None)
-        except (ValueError, json.JSONDecodeError) as error:  # MapStoreError is a ValueError
+        except Exception as error:                          # noqa: BLE001
+            # Deliberately everything. This is a subscription callback: an
+            # exception that leaves it comes out of rclpy.spin and ends
+            # mapping for the whole run, so a save onto a full disk (OSError)
+            # or a load of a map file this build cannot parse would cost the
+            # operator the live map rather than one refused command. The
+            # spec's rule is that every command outcome is reported, and
+            # "reported" includes the ones nobody predicted.
             self.get_logger().error(f"map command refused: {error}")
             self._record(command.get('action') if isinstance(command, dict) else None,
                          command.get('name') if isinstance(command, dict) else None,
@@ -237,6 +253,7 @@ class ElevationMapper(Node):
     def _clear(self) -> None:
         self._grid.clear()
         self._loaded = None
+        self._tile_count = 0
         stamp = self.get_clock().now().to_msg()
         empty = np.full((TILE_SAMPLES, TILE_SAMPLES), np.nan, dtype=np.float32)
         for key in self._scheduler.forget_all():
@@ -248,16 +265,16 @@ class ElevationMapper(Node):
     def _publish_status(self) -> None:
         snapshot = self._grid.snapshot()
         if snapshot is None:
-            cells, extent, tiles = 0, [0.0, 0.0], 0
+            cells, extent = 0, [0.0, 0.0]
         else:
             seen = np.isfinite(snapshot.elevation)
             cells = int(seen.sum())
             rows, cols = snapshot.elevation.shape
             extent = [round(cols * RESOLUTION, 2), round(rows * RESOLUTION, 2)]
-            tiles = len(tiles_of_snapshot(snapshot))
         self._status_publisher.publish(String(data=json.dumps({
             'resolution': RESOLUTION, 'cells_seen': cells, 'extent_m': extent,
-            'tiles': tiles, 'loaded': self._loaded, 'maps': self._store.list_names(),
+            'tiles': self._tile_count, 'loaded': self._loaded,
+            'maps': self._store.list_names(),
             'last_command': self._last_command})))
 
 

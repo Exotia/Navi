@@ -7,6 +7,7 @@ resolution), compressed - the yard at 5 cm is under a megabyte.
 
 import os
 import re
+import zipfile
 from datetime import datetime, timezone
 
 import numpy as np
@@ -69,12 +70,42 @@ class MapStore:
         return path
 
     def load(self, name: str) -> GridState:
+        """The saved grid, or MapStoreError - never a raw numpy/zip error.
+
+        A map file on the rover can be truncated (the Orin lost power
+        mid-save on an older build), be something else entirely that got
+        the .npz name, or come from a future format. np.load answers all
+        of those with BadZipFile/OSError/KeyError/ValueError, and the
+        caller is a ROS callback: anything that is not a MapStoreError
+        escapes rclpy.spin and ends mapping for the whole run. So every
+        failure to read is named and re-raised as one.
+        """
         self.validate_name(name)
         path = self._path(name)
         if not os.path.exists(path):
             raise MapStoreError(f"no map named {name!r} in {self.directory}")
-        with np.load(path) as data:
-            return GridState(elevation=data['elevation'].astype(np.float32),
-                             count=data['count'].astype(np.int32),
-                             origin_ix=int(data['origin_ix']), origin_iy=int(data['origin_iy']),
-                             resolution=float(data['resolution']))
+        try:
+            with np.load(path) as data:
+                missing = [key for key in
+                           ('elevation', 'count', 'origin_ix', 'origin_iy', 'resolution')
+                           if key not in data.files]
+                if missing:
+                    raise MapStoreError(
+                        f"map {name!r} is missing {', '.join(missing)}; it was not "
+                        "written by this node")
+                elevation = data['elevation'].astype(np.float32)
+                count = data['count'].astype(np.int32)
+                origin_ix, origin_iy = int(data['origin_ix']), int(data['origin_iy'])
+                resolution = float(data['resolution'])
+        except MapStoreError:
+            raise
+        except (zipfile.BadZipFile, OSError, KeyError, ValueError) as error:
+            raise MapStoreError(
+                f"map {name!r} is not a readable map file "
+                f"({type(error).__name__}: {error})") from error
+        if count.shape != elevation.shape:
+            raise MapStoreError(
+                f"map {name!r} is inconsistent: count {count.shape} does not "
+                f"match elevation {elevation.shape}")
+        return GridState(elevation=elevation, count=count, origin_ix=origin_ix,
+                         origin_iy=origin_iy, resolution=resolution)
