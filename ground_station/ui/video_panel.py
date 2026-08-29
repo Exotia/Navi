@@ -64,6 +64,11 @@ class VideoPanel(QWidget):
                  refusal_seconds: float = 5.0):
         super().__init__(parent)
         self.receiver = receiver if receiver is not None else VideoReceiver()
+        # The geometry a fresh source is decoded at. The rover's status can
+        # move the receiver to the size it actually streams (640x360), and
+        # that must not leak into the next source: the simulation sends
+        # 672x376 and a decoder left at 640x360 dies with 'not-negotiated'.
+        self._default_geometry = (self.receiver.width, self.receiver.height)
         self.no_frame_after_seconds = no_frame_after_seconds
         self.refusal_seconds = refusal_seconds
         # A refusal is neither a rover claim nor a local fact, so it does not
@@ -170,6 +175,7 @@ class VideoPanel(QWidget):
         was_streaming = self._streaming
         self.stop_receiver()
         self.receiver.port = port
+        self.receiver.width, self.receiver.height = self._default_geometry
         self._source_name = name
         self._dead_reckoning = dead_reckoning
         self._reports_remote_status = reports_remote_status

@@ -619,3 +619,19 @@ def test_a_size_in_the_status_is_ignored_while_the_panel_is_not_streaming(qtbot)
 
     assert receiver.start_count == 0
     assert (receiver.width, receiver.height) == (672, 376)
+
+
+def test_switching_source_forgets_the_size_the_previous_source_reported(qtbot):
+    # Manual mode adopts the rover's 640x360; the simulation streams 672x376.
+    # Carrying the rover's size over killed the decoder with not-negotiated.
+    receiver = FakeReceiver()
+    receiver.width, receiver.height = 672, 376
+    panel = VideoPanel(receiver=receiver)
+    qtbot.addWidget(panel)
+    panel.set_streaming(True)
+    panel.apply_status({"state": "streaming", "detail": "192.168.178.101:5600 640x360"})
+    assert (receiver.width, receiver.height) == (640, 360)
+
+    panel.set_source("simulation", 5601, reports_remote_status=False)
+
+    assert (receiver.width, receiver.height) == (672, 376)
