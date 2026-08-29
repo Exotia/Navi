@@ -726,7 +726,8 @@ def test_a_spawn_that_is_never_answered_frees_its_slot_and_is_retried(writer):
     # test_a_written_off_spawn_that_never_reached_gazebo_costs_one_poll.
     assert os.path.exists(mesh_path)
     writer._model_list.calls[-1][1].resolve(Response(model_names=[]))
-    assert not os.path.exists(mesh_path)
+    # Kept through WRITE_OFF_GRACE_S: the spawn may still land.
+    assert os.path.exists(mesh_path)
 
     writer._pump(now=11.0)                        # retried, once the 1 s/tile cap allows
     assert len(writer._spawn.calls) == 2
@@ -753,12 +754,19 @@ def test_four_stalled_spawns_do_not_wedge_the_budget_forever(writer):
     # first word and finds Gazebo never created them - so they cost no
     # DeleteEntity call and free the budget again straight away.
     writer._model_list.calls[-1][1].resolve(Response(model_names=[]))
-    assert writer._doomed == {}
+    assert len(writer._doomed) == 4                 # kept through WRITE_OFF_GRACE_S, no delete sent
 
     writer._pump(now=11.0)                          # and the written-off four come back
     assert len(writer._spawn.calls) == 8
     assert writer._delete.calls == []
     assert writer._factory_in_flight == 4
+
+    later = 10.0 + writer.WRITE_OFF_GRACE_S + 1.0
+    writer._clock_fn.set(later)
+    writer._pump(now=later)
+    writer._model_list.calls[-1][1].resolve(Response(model_names=[]))
+    assert writer._doomed == {}                     # never existed: untracked for free
+    assert writer._delete.calls == []
 
 
 def test_a_delete_that_is_never_answered_is_re_attempted_after_the_timeout(writer):
@@ -898,9 +906,35 @@ def test_a_written_off_spawn_that_never_reached_gazebo_costs_one_poll(writer):
     assert os.path.exists(mesh_path)          # kept until the model is known gone
 
     writer._model_list.calls[-1][1].resolve(Response(model_names=[]))
-    assert writer._doomed == {}                # never existed, nothing to delete
+    # Absent right after the write-off proves nothing: the spawn may still
+    # be queued in the factory plugin. Kept through the grace...
+    assert tile_name(writer, 0) in writer._doomed
+    assert os.path.exists(mesh_path)
+    writer._clock_fn.set(10.0 + writer.WRITE_OFF_GRACE_S + 1.0)
+    writer._pump(now=10.0 + writer.WRITE_OFF_GRACE_S + 1.0)
+    writer._model_list.calls[-1][1].resolve(Response(model_names=[]))
+    # ... and then it never existed: nothing to delete.
+    assert writer._doomed == {}
     assert writer._delete.calls == []
     assert not os.path.exists(mesh_path)
+
+
+def test_a_written_off_spawn_that_lands_late_is_still_deleted(writer):
+    writer._on_tile(tile_message((0, 0), 1.0))
+    writer._pump(now=0.0)
+    late = writer._spawn.calls[0][0].name
+    writer._clock_fn.set(10.0)
+    writer._pump(now=10.0)                                   # written off, doomed
+    writer._model_list.calls[-1][1].resolve(Response(model_names=[]))
+    assert late in writer._doomed                            # not forgotten yet
+
+    # Gazebo creates it after all; the next poll lists it.
+    writer._clock_fn.set(12.0)
+    writer._pump(now=12.0)
+    writer._model_list.calls[-1][1].resolve(Response(model_names=[late]))
+    writer._clock_fn.set(13.0)
+    writer._pump(now=13.0)
+    assert any(call[0].name == late for call in writer._delete.calls)
 
 
 def test_giving_up_on_a_delete_still_unlinks_its_mesh(writer):
@@ -955,7 +989,8 @@ def test_obstacle_key_from_frame_id_refuses_anything_else():
     with pytest.raises(ValueError):
         obstacle_key_from_frame_id('map')
     with pytest.raises(ValueError):
-        obstacle_key_from_frame_id('odom|3|-2')
+        obstacle_key_from_frame_id('|3|-2')          # no frame at all
+    assert obstacle_key_from_frame_id('odom|3|-2')[0] == ('obst', 3, -2)   # any frame name
     with pytest.raises(ValueError):
         obstacle_key_from_frame_id('map|three|-2')
     with pytest.raises(ValueError):

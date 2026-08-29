@@ -332,6 +332,12 @@ class TerrainWriter(Node):
     # before that response is disbelieved and the delete is re-sent.
     MODEL_LIST_POLL_INTERVAL_S = 1.0
     DELETE_CONFIRM_GRACE_S = 2.0
+    # How long a doomed model that no DeleteEntity was ever sent for (a
+    # spawn written off by the watchdog) stays tracked while absent from
+    # the model list: the spawn may still be queued in Gazebo's factory
+    # plugin when the state plugin answers the poll, and forgetting it
+    # then would leave an orphan tile nothing deletes.
+    WRITE_OFF_GRACE_S = 5.0
 
     def __init__(self, model_dir: str = None) -> None:
         super().__init__('terrain_writer')
@@ -562,6 +568,11 @@ class TerrainWriter(Node):
                 continue
             if now - entry['last_attempt'] < self._delete_retry_interval:
                 continue
+            if entry['attempts'] == 0 and entry.get('absent_at') is not None:
+                # A written-off spawn the poll has not seen yet: the next
+                # poll either finds it (then it is deleted) or, once
+                # WRITE_OFF_GRACE_S is over, untracks it for free.
+                continue
             if self._factory_in_flight >= self._max_factory_in_flight:
                 continue                    # no slot this tick; its turn comes later
             self._attempt_delete(model, now)
@@ -687,6 +698,8 @@ class TerrainWriter(Node):
         """
         self._doomed[model] = {
             'mesh_name': mesh_name,
+            'doomed_at': self._clock_fn(),
+            'absent_at': None,
             'attempts': 0,
             # -inf: due the moment a slot is free.
             'last_attempt': float('-inf') if due_at is None else due_at,
@@ -818,9 +831,19 @@ class TerrainWriter(Node):
         now = self._clock_fn()
         for model, entry in list(self._doomed.items()):
             if model not in names:
+                if (entry['attempts'] == 0
+                        and now - entry['doomed_at'] < self.WRITE_OFF_GRACE_S):
+                    # Never deleted by us, so "absent" may just mean "not
+                    # spawned yet": keep it until the grace is over, and
+                    # hold its first delete back meanwhile (see _pump) - a
+                    # DeleteEntity for a model that is not there only
+                    # burns a slot.
+                    entry['absent_at'] = now
+                    continue
                 self._unlink(entry['mesh_name'])
                 del self._doomed[model]
                 continue
+            entry['absent_at'] = None                   # it is there: delete it
             confirmed_at = entry.get('confirmed_at')
             if confirmed_at is not None and now - confirmed_at >= self._delete_confirm_grace:
                 self.get_logger().warn(
