@@ -76,14 +76,30 @@ def _changed(new: np.ndarray, old) -> bool:
     return bool((np.abs(new[both] - old[both]) > DIRTY_THRESHOLD_M).any())
 
 
-class TileScheduler:
+def _default_changed(new, old) -> bool:
+    return not np.array_equal(new, old)
 
-    def __init__(self):
-        self._latest = {}         # key -> latest tile offered
-        self._published = {}      # key -> tile as last published (None = never)
+
+class PayloadScheduler:
+    """Dirty-tracking, paced scheduler for any per-key payload - `TileScheduler`
+    is this with a 1 cm/newly-finite comparator; obstacle voxel tiles use the
+    default (exact array equality). Timing and pacing rules (8 dirty per
+    tick oldest first, >= 1 s between publications of the same key, one
+    round-robin keepalive per tick, never a key that was never offered) are
+    the same regardless of what `changed` compares."""
+
+    def __init__(self, changed=_default_changed):
+        self._changed = changed
+        self._latest = {}         # key -> latest payload offered
+        self._published = {}      # key -> payload as last published (None = never)
         self._published_at = {}   # key -> time of last publication
         self._dirty = {}          # key -> time it became dirty (insertion ordered)
         self._round_robin = deque()
+
+    def _is_changed(self, new, old) -> bool:
+        # A key that has never been published is always dirty, regardless
+        # of what the comparator itself would say about `old = None`.
+        return old is None or self._changed(new, old)
 
     def is_dirty(self, key) -> bool:
         return key in self._dirty
@@ -94,7 +110,7 @@ class TileScheduler:
             if key not in self._published:
                 self._published[key] = None
                 self._round_robin.append(key)
-            if key not in self._dirty and _changed(tile, self._published[key]):
+            if key not in self._dirty and self._is_changed(tile, self._published[key]):
                 self._dirty[key] = now
 
     def due(self, now: float) -> list:
@@ -123,10 +139,10 @@ class TileScheduler:
             break
         return out
 
-    def published(self, key, tile: np.ndarray, now: float) -> None:
+    def published(self, key, tile, now: float) -> None:
         self._published[key] = tile
         self._published_at[key] = now
-        if key in self._dirty and not _changed(self._latest[key], tile):
+        if key in self._dirty and not self._is_changed(self._latest[key], tile):
             del self._dirty[key]
 
     def mark_all_dirty(self) -> None:
@@ -135,5 +151,13 @@ class TileScheduler:
 
     def forget_all(self) -> list:
         keys = [key for key, tile in self._published.items() if tile is not None]
-        self.__init__()
+        self.__init__(changed=self._changed)
         return keys
+
+
+class TileScheduler(PayloadScheduler):
+    """`PayloadScheduler` with the terrain grid's own comparator: a cell
+    newly finite, or finite in both and moved by more than 1 cm."""
+
+    def __init__(self, changed=_changed):
+        super().__init__(changed=changed)

@@ -8,8 +8,8 @@ import pytest
 
 from navi_localization.elevation_grid import GridSnapshot
 from navi_localization.tiles import (
-    DIRTY_THRESHOLD_M, MAX_DIRTY_PER_TICK, TILE_CELLS, TILE_SAMPLES, TileScheduler,
-    tile_center, tile_index_of, tiles_of_snapshot)
+    DIRTY_THRESHOLD_M, MAX_DIRTY_PER_TICK, TILE_CELLS, TILE_SAMPLES, PayloadScheduler,
+    TileScheduler, tile_center, tile_index_of, tiles_of_snapshot)
 
 
 def snapshot(elevation, origin_ix=0, origin_iy=0, resolution=0.05):
@@ -174,3 +174,79 @@ def test_mark_all_dirty_republishes_everything_and_forget_all_names_the_dead():
     assert scheduler.is_dirty((0, 0))
     assert scheduler.forget_all() == [(0, 0)]
     assert scheduler.due(now=10.0) == []
+
+
+# PayloadScheduler: the same offer/due/published/mark_all_dirty/forget_all/
+# is_dirty rules and timing, generalised to any payload compared with
+# `np.array_equal` (TileScheduler is this with its own 1 cm comparator -
+# every test above already exercises that subclass unchanged).
+
+def voxel_payload(*rows):
+    return {(0, 0): np.array(rows, dtype=np.int32)}
+
+
+def test_payload_scheduler_is_dirty_on_change_quiet_on_same_bytes():
+    scheduler = PayloadScheduler()
+    scheduler.offer(voxel_payload([1, 2, 3]), now=0.0)
+    due = scheduler.due(now=0.0)
+    assert [key for key, _ in due] == [(0, 0)]
+    scheduler.published((0, 0), due[0][1], now=0.0)
+
+    # Exact same payload (even a fresh, equal array): no dirty, no keepalive
+    # this soon.
+    scheduler.offer(voxel_payload([1, 2, 3]), now=0.5)
+    assert not scheduler.is_dirty((0, 0))
+    assert scheduler.due(now=0.5) == []
+
+    # Different bytes: dirty.
+    scheduler.offer(voxel_payload([1, 2, 4]), now=0.5)
+    assert scheduler.is_dirty((0, 0))
+
+
+def test_payload_scheduler_at_most_eight_dirty_per_tick_oldest_first():
+    scheduler = PayloadScheduler()
+    tiles = {(i, 0): np.array([[i, i, i]], dtype=np.int32) for i in range(12)}
+    scheduler.offer(tiles, now=0.0)
+    first = [k for k, _ in scheduler.due(now=0.0)]
+    assert len(first) == MAX_DIRTY_PER_TICK
+    for key, tile in scheduler.due(now=0.0):
+        scheduler.published(key, tile, now=0.0)
+    rest = [k for k, _ in scheduler.due(now=1.0)]
+    assert set(first) | set(rest) == set(tiles) and not set(first) & set(rest)
+
+
+def test_payload_scheduler_one_clean_tile_per_tick_keepalive_round_robin():
+    scheduler = PayloadScheduler()
+    tiles = {(i, 0): np.array([[1, 1, 1]], dtype=np.int32) for i in range(3)}
+    scheduler.offer(tiles, now=0.0)
+    for key, tile in scheduler.due(now=0.0):
+        scheduler.published(key, tile, now=0.0)
+    seen = []
+    for tick in range(1, 7):
+        scheduler.offer(tiles, now=float(tick) + 1.0)
+        due = scheduler.due(now=float(tick) + 1.0)
+        assert len(due) == 1
+        seen.append(due[0][0])
+        scheduler.published(due[0][0], due[0][1], now=float(tick) + 1.0)
+    assert seen == [(0, 0), (1, 0), (2, 0), (0, 0), (1, 0), (2, 0)]
+
+
+def test_payload_scheduler_forget_all_names_the_dead_and_keeps_the_comparator():
+    calls = []
+
+    def counting_changed(new, old):
+        calls.append((new, old))
+        return not np.array_equal(new, old)
+
+    scheduler = PayloadScheduler(changed=counting_changed)
+    scheduler.offer(voxel_payload([1, 2, 3]), now=0.0)
+    scheduler.published((0, 0), voxel_payload([1, 2, 3])[(0, 0)], now=0.0)
+    assert scheduler.forget_all() == [(0, 0)]
+    assert scheduler.due(now=10.0) == []
+
+    # forget_all() must have preserved the custom comparator, not silently
+    # reverted to the default - a fresh offer should invoke it again.
+    calls.clear()
+    scheduler.offer(voxel_payload([9, 9, 9]), now=10.0)
+    assert scheduler.is_dirty((0, 0))
+    assert calls == []  # never-published key: dirty without consulting `changed`
