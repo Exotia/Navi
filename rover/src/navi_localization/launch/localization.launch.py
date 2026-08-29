@@ -14,6 +14,11 @@ the initial burst (714 KB/s for the first few messages, settling within
 sample, mean ~32 %). Driving measurement not taken: no operator available
 for that session.
 
+obstacle_tile, measured 2026-08-29 on the same bench (Task 6, rover
+static, 20 s ros2 topic hz/bw sample): 2.7-2.75 Hz, 4.9-5.3 KB/s
+(0.13-6.80 KB messages); elevation_mapper 12-33 % of one core (two
+5 s-apart top samples).
+
 Startup, measured 2026-08-29 on the Orin, time from launch to
 /zed_front/zed_node/odom being advertised and to the first
 /localization/status message, each run from a verified-clean Orin
