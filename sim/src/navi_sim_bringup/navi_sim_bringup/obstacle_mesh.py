@@ -26,7 +26,7 @@ alternative the task allows.
 
 Voxel indices are recovered from centres as `round(centre / size - 0.5)`
 (the inverse of the rover's `(index + 0.5) * VOXEL` centre convention),
-and membership is a Python `set` of `(ix, iy, iz)` tuples - fast enough
+and membership is a vectorised lookup of bit-packed int64 keys (np.isin) - fast enough
 for the <= 5k voxels a single obstacle tile carries.
 """
 
