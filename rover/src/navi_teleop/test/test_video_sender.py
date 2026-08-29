@@ -3,9 +3,10 @@ import os
 
 import pytest
 import rclpy
+from sensor_msgs.msg import Image
 from std_msgs.msg import String
 
-from navi_teleop.video_request import VideoRequest
+from navi_teleop.video_request import DEFAULT_PORT, VideoRequest
 from navi_teleop.video_sender import VideoSender, build_pipeline
 
 REQUEST = VideoRequest(enable=True, host="192.168.178.101", port=5600,
@@ -78,11 +79,15 @@ def test_pipeline_stages_run_capture_to_sink_in_order():
 
 class FakeProcess:
     """Stands in for subprocess.Popen: alive until told otherwise, and
-    records whether the node ever asked it to stop."""
+    records whether the node ever asked it to stop. Also stands in for its
+    own stdin, so the zed_topic path's `process.stdin.write(...)` and the
+    shutdown path's `process.stdin.close()` land on this same fake."""
 
     def __init__(self) -> None:
         self.returncode = None
         self.terminated = False
+        self.stdin = self
+        self.written: list[bytes] = []
 
     def poll(self):
         return self.returncode
@@ -98,18 +103,27 @@ class FakeProcess:
     def wait(self, timeout=None):
         return self.returncode
 
+    def write(self, data):
+        self.written.append(bytes(data))
+
+    def flush(self):
+        pass
+
+    def close(self):
+        pass
+
 
 class FakeLauncher:
-    """Records every argv it was asked to launch and hands back one shared
-    FakeProcess, so a test can assert on the call and drive the process's
-    lifecycle (alive, dies, gets terminated)."""
+    """Records every argv (and kwargs) it was asked to launch and hands back
+    one shared FakeProcess, so a test can assert on the call and drive the
+    process's lifecycle (alive, dies, gets terminated)."""
 
     def __init__(self) -> None:
-        self.calls: list[list[str]] = []
+        self.calls: list[tuple[list[str], dict]] = []
         self.process = FakeProcess()
 
     def __call__(self, argv, **kwargs):
-        self.calls.append(argv)
+        self.calls.append((argv, kwargs))
         return self.process
 
 
@@ -122,8 +136,15 @@ def ros_context():
 
 @pytest.fixture
 def sender():
+    # These pre-date the zed_topic source and describe the node's generic
+    # request/lifecycle handling (enable, disable, malformed requests,
+    # process death, stderr cleanup) - none of it is specific to how a
+    # stream is produced. They exercise it through the v4l2 path, which
+    # still starts synchronously from _on_request like they expect; the
+    # zed_topic default now waits for a first frame before that happens.
     launcher = FakeLauncher()
-    node = VideoSender(launcher=launcher)
+    node = VideoSender(launcher=launcher, parameter_overrides=[
+        rclpy.parameter.Parameter("source", value="v4l2")])
     yield node, launcher
     if node._stderr_path and os.path.exists(node._stderr_path):
         os.remove(node._stderr_path)
@@ -214,3 +235,88 @@ def test_disable_removes_the_stderr_temp_file(sender):
 
     assert not os.path.exists(stderr_path)
     assert node._stderr_path is None
+
+
+def make_node(source="zed_topic"):
+    launcher = FakeLauncher()
+    node = VideoSender(launcher=launcher, parameter_overrides=[
+        rclpy.parameter.Parameter("source", value=source)])
+    return node, launcher
+
+
+def request(width=640, height=360):
+    msg = String()
+    msg.data = json.dumps({"enable": True, "host": "192.168.178.101", "port": DEFAULT_PORT,
+                           "width": width, "height": height, "fps": 15, "bitrate_kbps": 800})
+    return msg
+
+
+def image(width=640, height=360, encoding="bgra8"):
+    msg = Image()
+    msg.width, msg.height, msg.encoding = width, height, encoding
+    msg.step = width * 4
+    msg.data = bytes(width * height * 4)
+    return msg
+
+
+def test_zed_topic_source_starts_a_stdin_pipeline_on_the_first_frame():
+    node, launcher = make_node()
+    try:
+        node._on_request(request())
+        assert launcher.calls == []                # nothing to encode yet
+        assert node._state == "starting"
+        node._on_image(image())
+        argv, kwargs = launcher.calls[0]
+        assert "fdsrc" in argv and "format=bgra" in argv
+        assert kwargs["stdin"] is not None
+        assert node._state == "streaming"
+        assert launcher.process.written == [bytes(640 * 360 * 4)]
+    finally:
+        node.destroy_node()
+
+
+def test_zed_topic_source_refuses_a_frame_of_the_wrong_size_with_the_reason():
+    node, launcher = make_node()
+    try:
+        node._on_request(request(width=1280, height=720))
+        node._on_image(image(640, 360))
+        assert launcher.calls == []
+        assert node._state == "failed"
+        assert "640x360" in node._detail and "1280x720" in node._detail
+    finally:
+        node.destroy_node()
+
+
+def test_zed_topic_source_ignores_frames_when_not_streaming():
+    node, launcher = make_node()
+    try:
+        node._on_image(image())
+        assert launcher.calls == []
+        assert node._state == "stopped"
+    finally:
+        node.destroy_node()
+
+
+def test_v4l2_source_keeps_the_old_capture_pipeline():
+    node, launcher = make_node(source="v4l2")
+    try:
+        node._on_request(request(width=1344, height=376))
+        argv, _ = launcher.calls[0]
+        assert "v4l2src" in argv
+        assert node._state == "streaming"
+    finally:
+        node.destroy_node()
+
+
+def test_stopping_terminates_the_stdin_pipeline():
+    node, launcher = make_node()
+    try:
+        node._on_request(request())
+        node._on_image(image())
+        stop = String()
+        stop.data = json.dumps({"enable": False})
+        node._on_request(stop)
+        assert launcher.process.terminated
+        assert node._state == "stopped"
+    finally:
+        node.destroy_node()

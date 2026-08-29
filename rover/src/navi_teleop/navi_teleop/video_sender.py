@@ -6,9 +6,12 @@ RTP/UDP straight to the operator's machine. On the long-range field link
 that difference is the whole point - UDP loses packets and shows
 artifacts, where a TCP-framed stream stalls and then bursts.
 
-The camera is read as a plain UVC device, not through the ZED SDK or
-zed_ros2_wrapper, so this node shares no state with the localization
-stack and can run whether or not that stack is up.
+Two sources. `zed_topic` (the default) takes frames from the ZED ROS 2
+wrapper's rectified RGB topic and pipes them into the encoder through
+stdin: the wrapper owns the camera for localisation, and the ZED SDK
+opens it exclusively, so nothing else can. `v4l2` is the old path -
+the camera as a plain UVC device - for a run without localisation
+(start_navi.sh --no-localization), when the wrapper is not there.
 
 The pipeline runs as a gst-launch-1.0 subprocess rather than through
 PyGObject: it needs no Python bindings on either machine, and a pipeline
@@ -38,8 +41,10 @@ from pathlib import Path
 
 import rclpy
 from rclpy.node import Node
+from sensor_msgs.msg import Image
 from std_msgs.msg import String
 
+from navi_teleop.image_pipe import build_pipe_pipeline, bytes_per_pixel, frame_matches
 from navi_teleop.video_request import InvalidRequest, VideoRequest, parse_request
 
 
@@ -65,21 +70,32 @@ def build_pipeline(request: VideoRequest) -> list[str]:
 
 class VideoSender(Node):
 
-    def __init__(self, launcher=subprocess.Popen) -> None:
-        super().__init__('video_sender')
+    def __init__(self, launcher=subprocess.Popen, **node_kwargs) -> None:
+        super().__init__('video_sender', **node_kwargs)
 
         self.declare_parameter('max_width', 2560)
         self.declare_parameter('max_height', 720)
         self.declare_parameter('max_bitrate_kbps', 4000)
         self.declare_parameter('allowed_device', '/dev/video0')
         self.declare_parameter('status_interval_seconds', 1.0)
+        self.declare_parameter('source', 'zed_topic')
+        self.declare_parameter('image_topic', '/zed_front/zed_node/rgb/image_rect_color')
 
         self._launcher = launcher
         self._process: subprocess.Popen | None = None
         self._stderr_path: str | None = None
+        # A request waiting for its first frame: the pipeline for the
+        # zed_topic source cannot be built until a frame's encoding is
+        # known, so enabling it only records the request.
+        self._pending: VideoRequest | None = None
+        self._frame_bytes = 0
 
         self._status_publisher = self.create_publisher(String, '/video_status', 10)
         self.create_subscription(String, '/video_request', self._on_request, 10)
+        if self._source() == 'zed_topic':
+            # Depth 1: a late frame is worthless - only the newest one
+            # matters to a live stream.
+            self.create_subscription(Image, self._image_topic(), self._on_image, 1)
         self.create_timer(
             float(self.get_parameter('status_interval_seconds').value),
             self._publish_status_tick,
@@ -89,6 +105,12 @@ class VideoSender(Node):
         self._detail = ''
         self._publish_status()
         self.get_logger().info("video_sender ready, waiting for /video_request")
+
+    def _source(self) -> str:
+        return str(self.get_parameter('source').value)
+
+    def _image_topic(self) -> str:
+        return str(self.get_parameter('image_topic').value)
 
     def _limits(self) -> dict:
         return dict(
@@ -111,10 +133,18 @@ class VideoSender(Node):
             return
 
         self._stop_stream()
-        if request.enable:
+        if not request.enable:
+            self._set_state('stopped', '')
+            return
+        if self._source() == 'v4l2':
             self._start_stream(request)
         else:
-            self._set_state('stopped', '')
+            # The pipeline is built from the first frame, whose encoding
+            # decides the raw format - so until one arrives there is
+            # nothing to start.
+            self._pending = request
+            self._set_state('starting', f"waiting for {self._image_topic()} "
+                                        f"({request.width}x{request.height})")
 
     def _start_stream(self, request: VideoRequest) -> None:
         if shutil.which("gst-launch-1.0") is None:
@@ -143,9 +173,69 @@ class VideoSender(Node):
         self.get_logger().info(f"streaming to {request.host}:{request.port}")
         self._set_state('streaming', f"{request.host}:{request.port}")
 
+    def _on_image(self, msg: Image) -> None:
+        if self._pending is not None:
+            request, self._pending = self._pending, None
+            reason = frame_matches(msg.width, msg.height, msg.encoding, len(msg.data), request)
+            if reason is not None:
+                self.get_logger().warn(f"refusing video request: {reason}")
+                self._set_state('failed', reason)
+                return
+            self._start_pipe_stream(request, msg.encoding)
+        if self._state != 'streaming' or self._process is None:
+            return
+        if len(msg.data) != self._frame_bytes:
+            # A torn frame would desynchronise every frame after it.
+            self.get_logger().warn(
+                f"dropping frame: {len(msg.data)} bytes, expected {self._frame_bytes}")
+            return
+        try:
+            self._process.stdin.write(bytes(msg.data))
+        except (BrokenPipeError, OSError):
+            detail = self._stderr_tail()
+            self._stop_stream()
+            self._set_state('failed', detail if detail else "encoder exited")
+
+    def _start_pipe_stream(self, request: VideoRequest, encoding: str) -> None:
+        if shutil.which("gst-launch-1.0") is None:
+            self._set_state('failed', 'gst-launch-1.0 not installed')
+            return
+
+        self._set_state('starting', f"{request.width}x{request.height} "
+                                    f"@{request.fps} {request.bitrate_kbps}kbps")
+        argv = build_pipe_pipeline(request.host, request.port, request.width,
+                                   request.height, request.fps,
+                                   request.bitrate_kbps, encoding)
+        try:
+            # A stale path should never survive to here - _on_request always
+            # runs _stop_stream first - but a leftover file is worse than a
+            # defensive check, so a path that slipped through gets removed
+            # rather than silently orphaned.
+            self._remove_stderr_file()
+            stderr_file = tempfile.NamedTemporaryFile(
+                mode='w', prefix='video_sender_stderr_', delete=False)
+            self._stderr_path = stderr_file.name
+            with stderr_file:
+                self._process = self._launcher(argv, stdin=subprocess.PIPE,
+                                               stdout=subprocess.DEVNULL,
+                                               stderr=stderr_file)
+        except OSError as exc:
+            self._set_state('failed', f"could not start pipeline: {exc}")
+            return
+
+        self._frame_bytes = request.width * request.height * bytes_per_pixel(encoding)
+        self.get_logger().info(f"streaming to {request.host}:{request.port}")
+        self._set_state('streaming', f"{request.host}:{request.port}")
+
     def _stop_stream(self) -> None:
+        self._pending = None
         if self._process is None:
             return
+        if getattr(self._process, 'stdin', None) is not None:
+            try:
+                self._process.stdin.close()
+            except OSError:
+                pass
         self._process.terminate()
         try:
             self._process.wait(timeout=3)
