@@ -229,7 +229,16 @@ class ElevationMapper(Node):
             return snapshot
         low = -np.inf if self._clamp_below <= 0 else self._rover_z - self._clamp_below
         high = np.inf if self._clamp_above <= 0 else self._rover_z + self._clamp_above
-        elevation = np.clip(snapshot.elevation, low, high)
+        # Above the band is not ground the rover can drive on (a wall, a
+        # desk, a person, a boulder): those cells are published as unseen
+        # rather than as a plateau at the limit. Indoors on the bench the
+        # plateau covered two thirds of the map and looked like a floor.
+        # The obstacle layer will draw them from `top` later. Below the
+        # band is clamped: a pit deeper than a metre is still ground.
+        elevation = snapshot.elevation.copy()
+        with np.errstate(invalid='ignore'):
+            elevation[elevation > high] = np.nan
+            elevation = np.maximum(elevation, low)
         return dataclasses.replace(snapshot, elevation=elevation)
 
     def _offer(self, now: float) -> None:

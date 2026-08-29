@@ -281,7 +281,7 @@ def test_no_clamp_before_the_first_pose(node):
     assert node._grid.snapshot().top[0, 0] == pytest.approx(5.0)
 
 
-def test_a_pose_clamps_published_cells_to_the_rover_height_but_never_top(node):
+def test_a_pose_hides_published_cells_above_the_rover_band_but_never_top(node):
     # _on_pose only remembers z_rover - it does not re-offer (see
     # test_pose_alone_does_not_reoffer_tiles) - so the clamp is exercised
     # here through the _offer that _on_cloud already triggers, with the
@@ -290,11 +290,15 @@ def test_a_pose_clamps_published_cells_to_the_rover_height_but_never_top(node):
     odometry.pose.pose.position.z = 0.0
     node._on_pose(odometry)          # z_rover = 0.0; default clamp_above = 0.5
 
-    node._on_cloud(cloud([[0.1, 0.1, 5.0]]))
+    # One ground cell beside one cell 5 m up (a wall). The wall cell is
+    # published as unseen, not as a 0.5 m plateau; the ground cell stays.
+    node._on_cloud(cloud([[0.1, 0.1, 5.0], [0.16, 0.1, 0.0]]))
     node._tick(now=0.0)
 
     assert len(node._tile_publisher.messages) == 1
-    assert _only_finite_value(node._tile_publisher.messages[0]) == pytest.approx(0.5)
+    values = np.asarray(node._tile_publisher.messages[0].data[0].data, dtype=np.float32)
+    finite = values[np.isfinite(values)]
+    assert list(finite) == pytest.approx([0.0])
     # top is never clamped, even though the published cell now is.
     assert node._grid.snapshot().top[0, 0] == pytest.approx(5.0)
 
