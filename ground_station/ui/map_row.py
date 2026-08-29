@@ -4,9 +4,11 @@ Shown in semi-autonomous mode only. Everything here talks to the rover
 through signals the window routes to RosBridgeClient - no ROS in this file.
 """
 
+import html
 import re
+from time import monotonic
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QInputDialog, QLabel, QMessageBox,
                                QPushButton, QWidget)
 
@@ -15,16 +17,40 @@ from ground_station.models import MapState
 
 NAME_PATTERN = re.compile(r'^[A-Za-z0-9_-]{1,64}$')
 
+# How long the outcome of the last map command stays on the line after it
+# changes. The rover repeats `last_command` in every status message for as
+# long as it stands, so without this the line would still be reporting a
+# save from twenty minutes ago as if it had just happened - and an operator
+# who then presses Save and looks at the line has no way to tell the old
+# answer from the new one. Ten seconds is long enough to read and short
+# enough that anything still showing is about what just happened.
+OUTCOME_SECONDS = 10.0
+
+
+def _plain(text: str) -> str:
+    """Text as itself inside the rich-text status line.
+
+    Map names are restricted to A-Z a-z 0-9 _ - but an error string comes
+    from the rover verbatim and could contain anything; unescaped, a stray
+    '<' would swallow the rest of the line.
+    """
+    return html.escape(str(text))
+
 
 class MapRow(QWidget):
     save_requested = Signal(str)
     load_requested = Signal(str)
     clear_requested = Signal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, clock=monotonic):
         super().__init__(parent)
         self._state: MapState | None = None
         self._notice = ""
+        # Injectable so the tests can age an outcome without sleeping, and
+        # so the window can hand in the same reading its staleness timer
+        # already took.
+        self._clock = clock
+        self._last_command_at: float | None = None
         self.ask_name = self._ask_name_dialog
         self.confirm_clear = self._confirm_clear_dialog
 
@@ -33,6 +59,9 @@ class MapRow(QWidget):
         self.save_button = QPushButton("Save as…")
         self.clear_button = QPushButton("Clear")
         self.status_label = QLabel()
+        # Rich text so a failed outcome can be red while the rest of the
+        # line stays chrome-coloured; every value that goes in is escaped.
+        self.status_label.setTextFormat(Qt.TextFormat.RichText)
         self.status_label.setStyleSheet(
             f"color: {theme.TEXT_DIM}; font-family: {theme.MONO_FONT_FAMILY};")
 
@@ -54,6 +83,7 @@ class MapRow(QWidget):
         new_command = state.last_command if state is not None else None
         if new_command != previous_command:
             self._notice = ""
+            self._last_command_at = self._clock() if new_command else None
         self._state = state
         enabled = state is not None
         if state is not None:
@@ -70,20 +100,40 @@ class MapRow(QWidget):
         self.clear_button.setEnabled(enabled)
         self._refresh_status()
 
-    def _refresh_status(self) -> None:
+    def refresh(self, now: float | None = None) -> None:
+        """Re-renders the line, ageing the last-command outcome off it.
+
+        Called by the window's staleness timer: the outcome has to
+        disappear ten seconds after it changed even when no new status
+        arrives to redraw the line.
+        """
+        self._refresh_status(now)
+
+    def _refresh_status(self, now: float | None = None) -> None:
         if self._state is None:
             self.status_label.setText("MAP: no status")
             return
         s = self._state
-        parts = [f"{s.cells_seen} cells, {s.extent_m[0]:.1f} x {s.extent_m[1]:.1f} m, {s.tiles} tiles"]
+        parts = [_plain(f"{s.cells_seen} cells, {s.extent_m[0]:.1f} x "
+                        f"{s.extent_m[1]:.1f} m, {s.tiles} tiles")]
         if s.loaded:
-            parts.append(f"loaded: {s.loaded}")
-        if s.last_command:
-            outcome = "ok" if s.last_command.get("ok") else f"FAILED: {s.last_command.get('error')}"
-            parts.append(f"{s.last_command.get('action')} {s.last_command.get('name') or ''} {outcome}")
+            parts.append(_plain(f"loaded: {s.loaded}"))
+        if s.last_command and self._outcome_is_current(now):
+            failed = not s.last_command.get("ok")
+            outcome = f"FAILED: {s.last_command.get('error')}" if failed else "ok"
+            text = _plain(f"{s.last_command.get('action')} "
+                          f"{s.last_command.get('name') or ''} {outcome}")
+            parts.append(f'<span style="color: {theme.BAD};">{text}</span>' if failed
+                         else text)
         if self._notice:
-            parts.append(self._notice)
+            parts.append(_plain(self._notice))
         self.status_label.setText(" | ".join(parts))
+
+    def _outcome_is_current(self, now: float | None) -> bool:
+        if self._last_command_at is None:
+            return False
+        now = self._clock() if now is None else now
+        return now - self._last_command_at <= OUTCOME_SECONDS
 
     def _on_load(self) -> None:
         name = self.map_combo.currentText()

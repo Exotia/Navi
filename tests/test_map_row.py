@@ -1,3 +1,4 @@
+from ground_station import theme
 from ground_station.models import MapState
 from ground_station.ui.map_row import MapRow
 
@@ -93,3 +94,65 @@ def test_the_status_line_shows_size_loaded_map_and_the_last_command_outcome(qtbo
                                                    "ok": False, "error": "exists"}))
     text = row.status_label.text()
     assert "100" in text and "4.0" in text and "a" in text and "exists" in text
+
+
+class FakeClock:
+    def __init__(self, t=100.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+def test_the_last_command_outcome_is_shown_for_ten_seconds_then_goes(qtbot):
+    clock = FakeClock()
+    row = MapRow(clock=clock)
+    qtbot.addWidget(row)
+    row.set_state(state(last_command={"action": "save", "name": "x", "ok": True}))
+    assert "save" in row.status_label.text()
+
+    clock.t = 105.0
+    row.refresh()
+    assert "save" in row.status_label.text()
+
+    clock.t = 111.0
+    row.refresh()
+    assert "save" not in row.status_label.text()
+    # The rest of the line is untouched.
+    assert "100" in row.status_label.text()
+
+
+def test_the_ten_seconds_are_counted_from_the_change_not_from_the_last_status(qtbot):
+    clock = FakeClock()
+    row = MapRow(clock=clock)
+    qtbot.addWidget(row)
+    command = {"action": "save", "name": "x", "ok": True}
+    row.set_state(state(last_command=command))
+    for tick in range(1, 12):                      # status keeps arriving at 1 Hz
+        clock.t = 100.0 + tick
+        row.set_state(state(last_command=command))
+    assert "save" not in row.status_label.text()
+
+
+def test_a_failed_outcome_is_shown_in_red_and_an_ok_one_is_not(qtbot):
+    row = MapRow()
+    qtbot.addWidget(row)
+    row.set_state(state(last_command={"action": "save", "name": "x", "ok": False,
+                                      "error": "already exists"}))
+    text = row.status_label.text()
+    assert "already exists" in text
+    assert theme.BAD in text
+
+    row.set_state(state(last_command={"action": "load", "name": "a", "ok": True}))
+    assert theme.BAD not in row.status_label.text()
+
+
+def test_refresh_accepts_the_windows_own_clock_reading(qtbot):
+    clock = FakeClock()
+    row = MapRow(clock=clock)
+    qtbot.addWidget(row)
+    row.set_state(state(last_command={"action": "clear", "name": None, "ok": True}))
+    row.refresh(now=105.0)
+    assert "clear" in row.status_label.text()
+    row.refresh(now=111.0)
+    assert "clear" not in row.status_label.text()

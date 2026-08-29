@@ -8,6 +8,9 @@ TEXT_DIM = "#7d8590"
 ACCENT = "#e8823c"
 OK = "#3fb950"
 OFF = "#545d6b"
+# The one colour that means something went wrong rather than something
+# needs watching (ACCENT). Used for a refused or failed map command.
+BAD = "#f85149"
 
 FONT_FAMILY = "IBM Plex Sans"
 MONO_FONT_FAMILY = "IBM Plex Mono"

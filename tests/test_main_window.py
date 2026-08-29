@@ -834,3 +834,27 @@ def test_the_requested_frame_rate_matches_the_zeds_grab_rate(qtbot, monkeypatch)
 
     assert _last_video_request()["fps"] == 15
     assert main_window.ROVER_VIDEO_FPS == 15
+
+
+def test_the_staleness_timer_ages_the_map_command_outcome_off_the_row(qtbot):
+    # The rover repeats last_command in every status message for as long as
+    # it stands, so only the clock retires it - and the row cannot age it
+    # off on its own if no further status arrives to redraw the line.
+    window, _ = make_window(qtbot)
+    row = window.dashboard_page.map_row
+    topic = next(t for t in FakeTopic.instances if t.name == "/localization/map_status")
+    topic.callback({"data": json.dumps(
+        {"cells_seen": 5, "maps": ["m"],
+         "last_command": {"action": "save", "name": "m", "ok": True}})})
+    assert "save" in row.status_label.text()
+
+    # The rover is still publishing - _map_status_at keeps up - the row is
+    # simply not being redrawn by a new state between those messages.
+    window._map_status_at = row._last_command_at + 5.0
+    window._check_staleness(now=row._last_command_at + 5.0)
+    assert "save" in row.status_label.text()
+
+    window._map_status_at = row._last_command_at + 11.0
+    window._check_staleness(now=row._last_command_at + 11.0)
+    assert "save" not in row.status_label.text()
+    assert row.load_button.isEnabled()              # the row itself is not stale

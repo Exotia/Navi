@@ -330,6 +330,12 @@ class MainWindow(QMainWindow):
                 and now - self._map_status_at > LOCALIZATION_STATUS_STALE_AFTER_SECONDS):
             self._map_status_at = None
             self.dashboard_page.map_row.set_state(None)
+        else:
+            # The rover repeats last_command in every status message, so
+            # only the clock can retire it: the row shows an outcome for
+            # ten seconds after it changed and this is what ages it off
+            # when the line is otherwise unchanged.
+            self.dashboard_page.map_row.refresh(now)
 
     def local_address_for(self, host: str, port: int) -> str:
         """Our own address on the interface that reaches the rover. The
