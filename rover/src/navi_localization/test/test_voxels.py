@@ -8,6 +8,7 @@ import time
 import numpy as np
 import pytest
 
+from navi_localization.elevation_grid import finite_points
 from navi_localization.voxels import (
     OBSTACLE_MAX_ABOVE_ROVER, OBSTACLE_MIN_ABOVE_GROUND, VOXEL, ObstacleMap,
     occupied_voxels)
@@ -140,6 +141,28 @@ def test_state_replace_clear_round_trip():
     assert fresh.tiles() == {}
     assert fresh.state().shape == (0, 3)
     assert fresh.voxel_count == 0
+
+
+def test_already_filtered_points_voxelise_the_same_as_the_default_path():
+    # elevation_mapper._on_cloud filters the raw cloud once and hands the
+    # same finite_points() output to both ElevationGrid.update and
+    # ObstacleMap.update - already_filtered=True must produce the identical
+    # obstacle map as filtering inside update() itself, for the same cloud.
+    raw = np.concatenate([
+        two_points_at(1.0, 1.0, 0.5),
+        two_points_at(-3.0, -3.0, 0.5),
+        np.array([[np.nan, 1.0, 1.0], [0.0, 0.0, 0.0]]),  # dropped by finite_points
+    ])
+
+    default_map = ObstacleMap()
+    default_map.update(raw, flat_ground(0.0), rover_z=None)
+
+    pre_filtered_map = ObstacleMap()
+    pre_filtered_map.update(
+        finite_points(raw), flat_ground(0.0), rover_z=None, already_filtered=True)
+
+    assert np.array_equal(default_map.state(), pre_filtered_map.state())
+    assert set(default_map.tiles()) == set(pre_filtered_map.tiles())
 
 
 def test_state_is_sorted_deterministically():

@@ -178,13 +178,14 @@ def points_at(x0, y0, n=60, z=1.0):
     return [[x0 + 0.05 * i, y0 + 0.05 * j, z] for i in range(n) for j in range(2)]
 
 
-def wall_cloud(n=4):
+def wall_cloud(x0=0.1, y0=0.1, n=4):
     """A small ground patch plus a two-point wall voxel directly above its
-    first cell (2, 2 in grid indices, tile (0, 0)) - enough ground for
-    ground_height() to answer for that cell, and enough points in one voxel
-    (MIN_POINTS_PER_VOXEL) for the wall to register as an obstacle."""
-    ground = points_at(0.1, 0.1, n=n, z=0.0)
-    wall = [[0.1, 0.1, 0.5], [0.1, 0.1, 0.5]]
+    first cell ((x0, y0)'s grid cell) - enough ground for ground_height() to
+    answer for that cell, and enough points in one voxel
+    (MIN_POINTS_PER_VOXEL) for the wall to register as an obstacle. With the
+    defaults, the wall sits at grid cell (2, 2), tile (0, 0)."""
+    ground = points_at(x0, y0, n=n, z=0.0)
+    wall = [[x0, y0, 0.5], [x0, y0, 0.5]]
     return cloud(ground + wall)
 
 
@@ -615,3 +616,33 @@ def test_an_obstacle_tile_that_loses_all_voxels_is_republished_empty(node):
     empty = [m for m in node._obstacle_publisher.messages if m.width == 0]
     assert empty
     assert parse_obstacle_frame(empty[0].header.frame_id) == (0, 0)
+
+
+def test_load_sends_empty_obstacle_tile_for_tiles_the_loaded_map_no_longer_covers(node):
+    # Mirrors test_load_sends_all_nan_for_tiles_the_loaded_map_no_longer_covers,
+    # for obstacle tiles: a wall saved in tile A, a different wall mapped
+    # afterwards in tile B, then a load of the saved map must republish A
+    # with its voxel and send an empty tile for B, which the loaded map does
+    # not cover at all.
+    node._on_cloud(wall_cloud(0.1, 0.1))            # wall at cell (2, 2) -> tile (0, 0)
+    node._on_command(String(data='{"action":"save","name":"yard"}'))
+    node._on_cloud(wall_cloud(10.0, 10.0))          # wall at cell (200, 200) -> tile (4, 4)
+    node._tick(now=0.0)
+    node._obstacle_publisher.messages.clear()
+
+    node._on_command(String(data='{"action":"load","name":"yard"}'))
+    node._tick(now=5.0)
+
+    by_key = {}
+    for message in node._obstacle_publisher.messages:
+        key = parse_obstacle_frame(message.header.frame_id)
+        by_key.setdefault(key, []).append(message)
+
+    # Tile B is not in the loaded map at all: it must go out once more as an
+    # empty obstacle tile so the sim removes whatever it drew there.
+    assert (4, 4) in by_key
+    assert all(message.width == 0 for message in by_key[(4, 4)])
+
+    # Tile A is in the loaded map: it must be republished with its voxel.
+    assert (0, 0) in by_key
+    assert any(message.width > 0 for message in by_key[(0, 0)])

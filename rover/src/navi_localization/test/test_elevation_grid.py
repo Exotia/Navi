@@ -262,6 +262,52 @@ def test_a_200k_point_cloud_bins_in_under_a_hundred_milliseconds():
     assert elapsed < 0.4, f"binning 200k points took {elapsed * 1000:.1f} ms"
 
 
+def test_height_at_reads_seen_gap_outside_and_negative_indices():
+    grid = ElevationGrid()
+    # Window spans ix -2..0 (iy=0 throughout): -2 seen, -1 a gap cell no
+    # point ever touched, 0 seen - mirrors
+    # test_the_grid_grows_to_cover_new_points_and_leaves_the_gap_empty, but
+    # anchored so the window includes negative indices too.
+    grid.update([(-0.09, 0.02, 1.0), (0.02, 0.02, 3.0)])
+    snapshot = grid.snapshot()
+    assert snapshot.elevation.shape[1] == 3            # -2, -1 (gap), 0
+
+    origin_ix = snapshot.origin_ix
+    left_ix, gap_ix, right_ix = origin_ix, origin_ix + 1, origin_ix + 2
+    outside_ix = origin_ix + 100                        # nowhere near the window
+
+    result = grid.height_at(
+        np.array([left_ix, gap_ix, right_ix, outside_ix]), np.array([0, 0, 0, 0]))
+
+    assert result[0] == pytest.approx(1.0)              # seen, negative index
+    assert np.isnan(result[1])                          # inside the window, never seen
+    assert result[2] == pytest.approx(3.0)              # seen, positive index
+    assert np.isnan(result[3])                          # outside the window entirely
+
+
+def test_height_at_before_any_point_is_all_nan():
+    grid = ElevationGrid()
+    result = grid.height_at(np.array([0, -5, 12]), np.array([0, 3, -7]))
+    assert np.isnan(result).all()
+
+
+def test_already_filtered_points_bin_the_same_as_the_default_path():
+    # The obstacle voxeliser needs the exact same filtered array
+    # elevation_mapper._on_cloud hands to both update() calls - this pins
+    # already_filtered=True to produce the identical grid as filtering
+    # inside update() itself, for the same raw cloud.
+    points = [(0.02, 0.02, 1.0), (0.12, 0.02, 3.0),
+              (np.nan, 1.0, 1.0), (0.0, 0.0, 0.0)]      # a NaN and the padding zero
+
+    default_grid = ElevationGrid()
+    default_grid.update(points)
+
+    pre_filtered_grid = ElevationGrid()
+    pre_filtered_grid.update(finite_points(points), already_filtered=True)
+
+    assert pre_filtered_grid.snapshot().equals(default_grid.snapshot())
+
+
 def test_replace_refuses_a_state_bigger_than_the_cap():
     from navi_localization.elevation_grid import ElevationGrid, GridState, MAX_CELLS, RESOLUTION
     grid = ElevationGrid()
