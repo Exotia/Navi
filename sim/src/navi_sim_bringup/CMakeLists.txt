@@ -30,7 +30,7 @@ install(PROGRAMS navi_sim_bringup/terrain_writer.py
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(test_sim_bridge test/test_sim_bridge.py TIMEOUT 120)
-  ament_add_pytest_test(test_heightmap test/test_heightmap.py)
+  ament_add_pytest_test(test_terrain_mesh test/test_terrain_mesh.py)
   ament_add_pytest_test(test_terrain_writer test/test_terrain_writer.py)
   ament_add_pytest_test(test_grid_map_round_trip test/test_grid_map_round_trip.py)
 endif()

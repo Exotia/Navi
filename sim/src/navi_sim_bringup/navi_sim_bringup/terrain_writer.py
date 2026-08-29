@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Shows the ground the rover has mapped as terrain in the Gazebo view.
 
-Gazebo Classic cannot change a heightmap in place, so a changed map means
+Gazebo Classic cannot change a model's mesh in place, so a changed map means
 deleting the terrain model and spawning a new one. That is expensive and
 visible, which is where the design's two rules come from: at most one
 respawn every five seconds, and only when the map actually changed.
+
+The terrain is a mesh, not a heightmap - see terrain_mesh.py for the
+gzserver crash that decided it.
 
 Nothing else in the world is touched. The rover model is never deleted, and
 the world's ground plane at z = 0 stays, so the rover is never in the void
@@ -14,11 +17,11 @@ Runs on the simulation's ROS domain. /localization/map reaches that domain
 from the rover's domain 0 through sim_bridge (sub-project 2); this node
 knows nothing about domains and simply subscribes.
 
-Each version gets its own image file name. Gazebo caches heightmap data (and
-its level-of-detail paging under ~/.gazebo/paging) by image file name, so
-respawning with the same name can put the *previous* terrain back on the
-screen while every log line says the new one was loaded. A new name every
-time sidesteps that entirely; the old file is deleted once the new one is up.
+Each version gets its own mesh file name. Gazebo's MeshManager caches
+meshes by file name, so respawning with the same name would put the
+*previous* terrain back on the screen while every log line says the new one
+was loaded. A new name every time sidesteps that entirely; the old file is
+deleted once the new one is up.
 """
 
 import os
@@ -27,12 +30,13 @@ import time
 import numpy as np
 import rclpy
 from gazebo_msgs.srv import DeleteEntity, SpawnEntity
+from rclpy.executors import ExternalShutdownException
 from grid_map_msgs.msg import GridMap
 from rclpy.node import Node
 
-from navi_sim_bringup.heightmap import (
-    GAZEBO_MODEL_NAME, MODEL_NAME, heightmap_from_grid, model_config_xml,
-    png_bytes, terrain_sdf)
+from navi_sim_bringup.terrain_mesh import (
+    GAZEBO_MODEL_NAME, MODEL_NAME, model_config_xml, obj_bytes, terrain_sdf,
+    terrain_mesh_from_grid)
 
 LAYER = 'elevation'
 MAP_TOPIC = '/localization/map'
@@ -45,7 +49,7 @@ def elevation_from_message(message: GridMap):
     matrix has its index (0, 0) at the largest x and largest y, rows running
     in -x and columns in -y, stored column-major. The array returned here is
     the ordinary one - row 0 at the smallest y, column 0 at the smallest x -
-    which is what heightmap_from_grid expects.
+    which is what terrain_mesh_from_grid expects.
     """
     if LAYER not in message.layers:
         raise ValueError(
@@ -121,17 +125,17 @@ class TerrainWriter(Node):
 
         self._entity_name = str(self.get_parameter('entity_name').value)
         self._model_dir = str(self.get_parameter('model_dir').value)
-        self._texture_dir = os.path.join(self._model_dir, 'materials', 'textures')
+        self._mesh_dir = os.path.join(self._model_dir, 'meshes')
         self._policy = RespawnPolicy(
             float(self.get_parameter('respawn_interval_seconds').value))
         self._version = 0
-        self._heightmap = None
-        self._image_name = None
+        self._mesh = None
+        self._mesh_name = None
         self._busy = False
         self._spawned_once = False
         self._warned_no_service = False
 
-        os.makedirs(self._texture_dir, exist_ok=True)
+        os.makedirs(self._mesh_dir, exist_ok=True)
         with open(os.path.join(self._model_dir, 'model.config'), 'w') as handle:
             handle.write(model_config_xml())
 
@@ -155,11 +159,11 @@ class TerrainWriter(Node):
         except ValueError as error:
             self.get_logger().error(str(error))
             return
-        heightmap = heightmap_from_grid(elevation, resolution, center_x, center_y)
-        if heightmap is None:
+        mesh = terrain_mesh_from_grid(elevation, resolution, center_x, center_y)
+        if mesh is None:
             return
-        self._heightmap = heightmap
-        if self._policy.offer(png_bytes(heightmap.image), time.monotonic()):
+        self._mesh = mesh
+        if self._policy.offer(obj_bytes(mesh), time.monotonic()):
             self._respawn()
 
     def _tick(self) -> None:
@@ -182,15 +186,15 @@ class TerrainWriter(Node):
 
         payload = self._policy.pending
         self._version += 1
-        name = f"heightmap_{self._version:04d}.png"
-        with open(os.path.join(self._texture_dir, name), 'wb') as handle:
+        name = f"terrain_{self._version:04d}.obj"
+        with open(os.path.join(self._mesh_dir, name), 'wb') as handle:
             handle.write(payload)
-        uri = f"model://{GAZEBO_MODEL_NAME}/materials/textures/{name}"
-        sdf = terrain_sdf(uri, self._heightmap, self._entity_name)
+        uri = f"model://{GAZEBO_MODEL_NAME}/meshes/{name}"
+        sdf = terrain_sdf(uri, self._entity_name)
         with open(os.path.join(self._model_dir, 'model.sdf'), 'w') as handle:
             handle.write(sdf)
 
-        previous, self._image_name = self._image_name, name
+        previous, self._mesh_name = self._mesh_name, name
         if self._spawned_once:
             future = self._delete.call_async(
                 DeleteEntity.Request(name=self._entity_name))
@@ -222,14 +226,14 @@ class TerrainWriter(Node):
         self._policy.respawned(payload, time.monotonic())
         if previous:
             try:
-                os.remove(os.path.join(self._texture_dir, previous))
+                os.remove(os.path.join(self._mesh_dir, previous))
             except OSError:
                 pass
         self.get_logger().info(
             f"terrain version {self._version}: "
-            f"{self._heightmap.side} x {self._heightmap.side} samples, "
-            f"{self._heightmap.size_x:.1f} x {self._heightmap.size_y:.1f} m, "
-            f"height span {self._heightmap.size_z:.2f} m")
+            f"{self._mesh.cols} x {self._mesh.rows} samples, "
+            f"{self._mesh.size_x:.1f} x {self._mesh.size_y:.1f} m, "
+            f"{len(self._mesh.faces)} triangles")
 
 
 def main(args=None) -> None:
@@ -237,7 +241,9 @@ def main(args=None) -> None:
     node = TerrainWriter()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
+        # ExternalShutdownException is how ros2 launch's SIGINT reaches a
+        # spinning node; uncaught it is logged as a crash with exit code 1.
         pass
     finally:
         node.destroy_node()

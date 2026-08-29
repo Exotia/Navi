@@ -1,7 +1,7 @@
 """Reading the map message back, and the two rules on respawning.
 
   bash -c 'source /opt/ros/humble/setup.bash &&
-    PYTHONPATH=$PWD/sim/src/navi_sim_bringup python3 -m pytest \
+    PYTHONPATH=$PWD/sim/src/navi_sim_bringup:$PYTHONPATH python3 -m pytest \
     sim/src/navi_sim_bringup/test/test_terrain_writer.py -q'
 """
 

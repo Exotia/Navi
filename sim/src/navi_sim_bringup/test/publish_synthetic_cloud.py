@@ -11,7 +11,7 @@ bin. It is a script rather than an installed node: it belongs to the tests.
   python3 sim/src/navi_sim_bringup/test/publish_synthetic_cloud.py --grow
 
 --ramp x   ground rising 1 m over 6 m in +x, flat in y
---ramp y   the same rise in +y. The pair is how a mirrored heightmap is
+--ramp y   the same rise in +y. The pair is how a mirrored terrain is
            told from a correct one: run both and the relief must move.
 --grow     a patch that widens every publish, to watch the map grow and the
            terrain respawn no faster than once every five seconds.
