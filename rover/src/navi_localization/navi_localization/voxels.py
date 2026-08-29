@@ -119,6 +119,15 @@ def _bucket_by_tile(sorted_voxels: np.ndarray, voxel_m: float = VOXEL) -> dict:
     cells_per_tile = _cells_per_tile(voxel_m)
     tile_x = sorted_voxels[:, 0] // cells_per_tile
     tile_y = sorted_voxels[:, 1] // cells_per_tile
+    # Sorting by (ix, iy, iz) does NOT put a tile's rows together: along
+    # iy the rows of tile (0, 0) and (0, 1) alternate for every ix, so each
+    # tile appears as many separate runs and a "one run per tile" split
+    # would keep only the last run of each. A stable sort by tile key first
+    # groups the runs while keeping the (ix, iy, iz) order inside a tile.
+    order = np.lexsort((tile_y, tile_x))
+    sorted_voxels = sorted_voxels[order]
+    tile_x = tile_x[order]
+    tile_y = tile_y[order]
     change = np.empty(len(sorted_voxels), dtype=bool)
     change[0] = True
     change[1:] = (tile_x[1:] != tile_x[:-1]) | (tile_y[1:] != tile_y[:-1])
