@@ -13,6 +13,14 @@ opens it exclusively, so nothing else can. `v4l2` is the old path -
 the camera as a plain UVC device - for a run without localisation
 (start_navi.sh --no-localization), when the wrapper is not there.
 
+In `zed_topic` mode the stream adopts the published image's geometry: the
+wrapper owns the camera, the ground station cannot change what it emits by
+asking, and refusing the mismatch only cost the operator their video. The
+request's width/height are therefore advisory there, and the geometry
+actually being sent goes out in /video_status's detail so the operator sees
+what they got rather than what they asked for. The v4l2 path is unchanged -
+there the request really does choose the capture caps.
+
 The pipeline runs as a gst-launch-1.0 subprocess rather than through
 PyGObject: it needs no Python bindings on either machine, and a pipeline
 that dies on a bad frame kills a subprocess instead of this node.
@@ -44,7 +52,8 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 
-from navi_teleop.image_pipe import build_pipe_pipeline, bytes_per_pixel, frame_matches
+from navi_teleop.image_pipe import (
+    build_pipe_pipeline, bytes_per_pixel, unsupported_frame_reason)
 from navi_teleop.video_request import InvalidRequest, VideoRequest, parse_request
 
 
@@ -147,8 +156,7 @@ class VideoSender(Node):
             # decides the raw format - so until one arrives there is
             # nothing to start.
             self._pending = request
-            self._set_state('starting', f"waiting for {self._image_topic()} "
-                                        f"({request.width}x{request.height})")
+            self._set_state('starting', f"waiting for {self._image_topic()}")
 
     def _start_stream(self, request: VideoRequest) -> None:
         if shutil.which("gst-launch-1.0") is None:
@@ -180,12 +188,13 @@ class VideoSender(Node):
     def _on_image(self, msg: Image) -> None:
         if self._pending is not None:
             request, self._pending = self._pending, None
-            reason = frame_matches(msg.width, msg.height, msg.encoding, len(msg.data), request)
+            reason = unsupported_frame_reason(msg.width, msg.height, msg.encoding,
+                                              len(msg.data))
             if reason is not None:
                 self.get_logger().warn(f"refusing video request: {reason}")
                 self._set_state('failed', reason)
                 return
-            self._start_pipe_stream(request, msg.encoding)
+            self._start_pipe_stream(request, msg.width, msg.height, msg.encoding)
         if self._state != 'streaming' or self._process is None:
             return
         if len(msg.data) != self._frame_bytes:
@@ -200,15 +209,18 @@ class VideoSender(Node):
             self._stop_stream()
             self._set_state('failed', detail if detail else "encoder exited")
 
-    def _start_pipe_stream(self, request: VideoRequest, encoding: str) -> None:
+    def _start_pipe_stream(self, request: VideoRequest, width: int, height: int,
+                           encoding: str) -> None:
+        # width/height come from the frame, not the request: see the module
+        # docstring - in this mode the published image decides the geometry.
         if shutil.which("gst-launch-1.0") is None:
             self._set_state('failed', 'gst-launch-1.0 not installed')
             return
 
-        self._set_state('starting', f"{request.width}x{request.height} "
+        self._set_state('starting', f"{width}x{height} "
                                     f"@{request.fps} {request.bitrate_kbps}kbps")
-        argv = build_pipe_pipeline(request.host, request.port, request.width,
-                                   request.height, request.fps,
+        argv = build_pipe_pipeline(request.host, request.port, width,
+                                   height, request.fps,
                                    request.bitrate_kbps, encoding)
         try:
             # A stale path should never survive to here - _on_request always
@@ -227,9 +239,10 @@ class VideoSender(Node):
             self._set_state('failed', f"could not start pipeline: {exc}")
             return
 
-        self._frame_bytes = request.width * request.height * bytes_per_pixel(encoding)
-        self.get_logger().info(f"streaming to {request.host}:{request.port}")
-        self._set_state('streaming', f"{request.host}:{request.port}")
+        self._frame_bytes = width * height * bytes_per_pixel(encoding)
+        self.get_logger().info(
+            f"streaming {width}x{height} to {request.host}:{request.port}")
+        self._set_state('streaming', f"{request.host}:{request.port} {width}x{height}")
 
     def _stop_stream(self) -> None:
         self._pending = None

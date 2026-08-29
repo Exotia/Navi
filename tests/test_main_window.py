@@ -431,6 +431,32 @@ def test_video_request_width_matches_double_the_receiver_default_width(qtbot, mo
     assert default_receiver.height == request["height"]
 
 
+def test_the_requested_geometry_is_advisory_for_the_rovers_zed_topic_source(qtbot,
+                                                                             monkeypatch):
+    # Critical, final review: with localisation on, the rover's video_sender
+    # takes its frames from the ZED wrapper's topic, and the wrapper - which
+    # owns the camera - publishes 640x360, not the 1344x376 UVC capture size
+    # this window asks for. Nothing the ground station sends can change that,
+    # so the contract is: our width/height are advisory for that source, the
+    # rover adopts the published geometry, and it reports the geometry it is
+    # actually sending in /video_status's detail. This test pins the ground
+    # station's half of it - the request is still sent (the v4l2 source does
+    # use it), and a status whose detail names a different geometry is a
+    # success, not a failure to be surfaced as one.
+    window, _ = make_window(qtbot, initial_host="192.168.178.33")
+    monkeypatch.setattr(window, "local_address_for", lambda host, port: "10.20.30.40")
+
+    window._on_stream_requested(True)
+    request = _last_video_request()
+    assert (request["width"], request["height"]) == (1344, 376)
+
+    window._on_video_status({"state": "streaming", "detail": "10.20.30.40:5600 640x360"})
+
+    text = window.dashboard_page.video_panel.status_label.text()
+    assert "640x360" in text
+    assert "failed" not in text.lower()
+
+
 def test_disabling_video_stops_the_receiver_even_if_the_rover_never_answers(qtbot):
     window, _ = make_window(qtbot, initial_host="192.168.178.33")
     window._on_stream_requested(True)

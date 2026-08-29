@@ -270,6 +270,7 @@ def test_zed_topic_source_starts_a_stdin_pipeline_on_the_first_frame():
         assert "fdsrc" in argv and "format=bgra" in argv
         assert kwargs["stdin"] is not None
         assert node._state == "streaming"
+        assert node._detail == f"192.168.178.101:{DEFAULT_PORT} 640x360"
         assert launcher.process.written == [bytes(640 * 360 * 4)]
     finally:
         node.destroy_node()
@@ -300,14 +301,38 @@ def test_malformed_request_while_pending_leaves_the_pending_request_alone():
         node.destroy_node()
 
 
-def test_zed_topic_source_refuses_a_frame_of_the_wrong_size_with_the_reason():
+def test_zed_topic_source_adopts_the_image_size_and_says_so():
+    # The ground station asks for 1344x376 (the UVC capture size) while the
+    # wrapper publishes 640x360. The wrapper owns the camera, so its size
+    # wins and the request's geometry is advisory: the pipeline is built for
+    # what actually arrives, and /video_status carries that geometry so the
+    # operator sees what they got rather than what they asked for.
     node, launcher = make_node()
     try:
-        node._on_request(request(width=1280, height=720))
+        node._on_request(request(width=1344, height=376))
         node._on_image(image(640, 360))
+
+        argv, _ = launcher.calls[0]
+        assert "width=640" in argv and "height=360" in argv
+        assert f"blocksize={640 * 360 * 4}" in argv
+        assert node._state == "streaming"
+        assert "640x360" in node._detail
+        assert launcher.process.written == [bytes(640 * 360 * 4)]
+    finally:
+        node.destroy_node()
+
+
+def test_zed_topic_source_refuses_an_encoding_it_cannot_build_a_pipeline_for():
+    node, launcher = make_node()
+    try:
+        node._on_request(request())
+        bad = image()
+        bad.encoding = "mono16"
+        node._on_image(bad)
+
         assert launcher.calls == []
         assert node._state == "failed"
-        assert "640x360" in node._detail and "1280x720" in node._detail
+        assert "mono16" in node._detail
     finally:
         node.destroy_node()
 

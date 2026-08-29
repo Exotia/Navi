@@ -9,8 +9,6 @@ stream - a capsfilter only asserts. Pure functions, so the argv and the
 frame check are testable without a camera or ROS.
 """
 
-from navi_teleop.video_request import VideoRequest
-
 _FORMATS = {"bgra8": ("bgra", 4), "rgb8": ("rgb", 3), "bgr8": ("bgr", 3)}
 
 
@@ -43,14 +41,20 @@ def build_pipe_pipeline(host: str, port: int, width: int, height: int,
     ]
 
 
-def frame_matches(msg_width: int, msg_height: int, msg_encoding: str,
-                  msg_len: int, request: VideoRequest) -> str | None:
-    """None if this image can go into a pipeline built for `request`;
-    otherwise the reason it cannot. Rescaling here would hide a
-    misconfiguration behind a picture, so a mismatch is refused."""
-    if (msg_width, msg_height) != (request.width, request.height):
-        return (f"image is {msg_width}x{msg_height} but the request is for "
-                f"{request.width}x{request.height}")
+def unsupported_frame_reason(msg_width: int, msg_height: int,
+                             msg_encoding: str, msg_len: int) -> str | None:
+    """None if a pipeline can be built for this image; otherwise the reason
+    it cannot.
+
+    Geometry is deliberately not compared against the request. In
+    `zed_topic` mode the wrapper owns the camera and its published size is
+    the only size there is - the ground station cannot change it by asking,
+    so the stream adopts what arrives and the request's width/height are
+    advisory. What is still refused is an encoding this module has no
+    GStreamer format for (there is no pipeline to build), and a byte count
+    that disagrees with the frame's own header - a torn frame would
+    desynchronise every frame after it.
+    """
     try:
         expected = msg_width * msg_height * bytes_per_pixel(msg_encoding)
     except ValueError as exc:
