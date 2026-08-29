@@ -6,8 +6,13 @@ add one override file and one node.
 
 Measured on the Orin 2026-08-29 (nvpmodel 25 W, camera on the bench,
 NEURAL depth at 15 fps): pose 15.0 Hz, depth 15.0 Hz, GPU 29 %, CPU 15 %,
-fused cloud 1.0 Hz. Tile rate and bytes/s while driving: filled in by the
-plan's Task 10.
+fused cloud 1.0 Hz. Tile rate and bytes/s, rover static (Task 10,
+2026-08-29, same bench setup): map_tile 5.0-6.2 Hz aggregate (keepalive
+plus dirty tiles from sensor noise on a still rover), 65-95 KB/s once past
+the initial burst (714 KB/s for the first few messages, settling within
+~10 s); elevation_mapper 6-19 % of one core; GPU 6-95 % (21 s tegrastats
+sample, mean ~32 %). Driving measurement not taken: no operator available
+for that session.
 """
 
 import os
