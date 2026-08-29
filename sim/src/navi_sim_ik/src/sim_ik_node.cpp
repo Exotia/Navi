@@ -1,6 +1,7 @@
 #include <array>
 #include <cmath>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 
@@ -11,6 +12,9 @@
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "trajectory_msgs/msg/joint_trajectory.hpp"
+#include "gazebo_msgs/srv/set_entity_state.hpp"
+#include "geometry_msgs/msg/quaternion.hpp"
+#include "navi_sim_ik/external_pose.hpp"
 
 namespace
 {
@@ -74,6 +78,21 @@ constexpr double kTwistStaleAfterRealSeconds = 1.0;
 // reader: large, deliberately uninformative variances. Not a calibrated
 // number - there is nothing to calibrate against until localisation exists.
 constexpr double kDeadReckoningVariance = 1.0e6;
+
+// gazebo_ros_state's set_entity_state, under the /gazebo namespace the world
+// file gives it. This is how the model is moved in semi-autonomous mode;
+// planar_move is not loaded there, because two writers of one model pose
+// fight and the picture jitters between them.
+constexpr char kSetEntityStateService[] = "/gazebo/set_entity_state";
+
+/// Heading out of a quaternion. The pose on /localization/pose is planar in
+/// everything this simulation shows, so one angle is the whole of it.
+double yaw_of(const geometry_msgs::msg::Quaternion & q)
+{
+  return std::atan2(
+    2.0 * (q.w * q.z + q.x * q.y),
+    1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+}
 }  // namespace
 
 /// Drives the simulated rover from the same /manual_twist the real one gets.
@@ -132,6 +151,47 @@ public:
     //
     // Do NOT "tidy" this and the steady clock in tick() into one clock.
     // They answer different questions and each choice is a fixed bug.
+    pose_topic_ = declare_parameter<std::string>("pose_topic", "");
+    status_topic_ = declare_parameter<std::string>("status_topic", "/localization/status");
+    model_name_ = declare_parameter<std::string>("model_name", "asterope");
+    pose_z_offset_ = declare_parameter<double>("pose_z_offset", 0.05);
+    const double max_pose_rate_hz = declare_parameter<double>("max_pose_rate_hz", 30.0);
+    gate_ = navi_sim_ik::ExternalPoseGate(max_pose_rate_hz);
+
+    // Empty by default, so Simulation mode is byte for byte what it was:
+    // no subscriptions, no service client, no behaviour to regress.
+    if (!pose_topic_.empty()) {
+      pose_sub_ = create_subscription<nav_msgs::msg::Odometry>(
+        pose_topic_, 10,
+        [this](nav_msgs::msg::Odometry::SharedPtr msg) {
+          // Stored, not applied. Applying here would put the pose in
+          // before this tick's step() integrates over it, and /sim_odom
+          // would report localisation plus one tick of dead reckoning.
+          // See apply_external_pose().
+          pending_odom_ = msg;
+        });
+      status_sub_ = create_subscription<std_msgs::msg::String>(
+        status_topic_, 10,
+        [this](std_msgs::msg::String::SharedPtr msg) {
+          gate_.set_state(navi_sim_ik::localization_state(msg->data));
+        });
+      set_state_client_ =
+        create_client<gazebo_msgs::srv::SetEntityState>(kSetEntityStateService);
+      RCLCPP_INFO(
+        get_logger(),
+        "external pose mode: body pose from %s, gated on %s, model '%s' placed "
+        "through %s at up to %.1f Hz (z offset %.3f m). planar_move must NOT be "
+        "loaded in this mode - two writers of one model pose fight.",
+        pose_topic_.c_str(), status_topic_.c_str(), model_name_.c_str(),
+        kSetEntityStateService, max_pose_rate_hz, pose_z_offset_);
+    } else {
+      RCLCPP_INFO(
+        get_logger(),
+        "dead-reckoning mode: the pose is integrated from /manual_twist and "
+        "drifts without bound. Set pose_topic to place the model from the "
+        "rover's own localisation instead.");
+    }
+
     timer_ = rclcpp::create_timer(
       this, get_clock(), rclcpp::Duration::from_seconds(kTimestepSeconds),
       [this] {tick();});
@@ -194,6 +254,7 @@ private:
     check_tick_rate();
 
     stepper_.step(vx_, vy_, yaw_rate_);
+    apply_external_pose();
     publish_joints();
     publish_motion();
     publish_debug(stale);
@@ -257,6 +318,110 @@ private:
     }
   }
 
+  /// Replaces the integrated body pose with the localised one, and moves the
+  /// Gazebo model to match.
+  ///
+  /// Called between step() and the publishes, on purpose. In the
+  /// subscription callback the pose would land before this tick's step()
+  /// integrated over it and /sim_odom would report the localised pose plus
+  /// one tick of dead reckoning - a small, permanent, plausible-looking
+  /// error, which is the worst kind. Here, /sim_odom is exactly what
+  /// localisation said.
+  ///
+  /// The wheels and steering are untouched: they keep coming from
+  /// /manual_twist through the IK, so the picture still shows a rover
+  /// steering and rolling rather than sliding. Only the body pose is
+  /// external.
+  void apply_external_pose()
+  {
+    if (!pending_odom_) {
+      return;
+    }
+    // Steady, not the simulation clock, for the same reason the twist
+    // staleness guard uses it: the 30 Hz cap protects a service and a
+    // physics thread, which are real-time resources and do not slow down
+    // when the real-time factor does.
+    const double now = steady_clock_.now().seconds();
+    if (!gate_.accept(now)) {
+      if (!gate_.ok() && (!holding_ || holding_state_ != gate_.state())) {
+        RCLCPP_WARN(
+          get_logger(),
+          "localisation reports '%s', not OK - holding the model still and "
+          "ignoring poses on %s until it recovers.",
+          gate_.state().empty() ? "(nothing yet)" : gate_.state().c_str(),
+          pose_topic_.c_str());
+        holding_ = true;
+        holding_state_ = gate_.state();
+      }
+      return;
+    }
+    if (holding_) {
+      RCLCPP_INFO(
+        get_logger(), "localisation is OK again - the model follows the pose");
+      holding_ = false;
+      holding_state_.clear();
+    }
+
+    const auto odom = pending_odom_;
+    pending_odom_.reset();
+    const navi_sim_ik::Pose2D pose{
+      odom->pose.pose.position.x, odom->pose.pose.position.y,
+      yaw_of(odom->pose.pose.orientation)};
+    stepper_.set_pose(pose);
+    applied_odom_ = odom;
+    send_entity_state(pose);
+  }
+
+  void send_entity_state(const navi_sim_ik::Pose2D & pose)
+  {
+    if (!set_state_client_->service_is_ready()) {
+      // Warned once and then again on the next outage, rather than at the
+      // pose rate: at 30 Hz this would be 30 identical lines a second, and
+      // the launch log is where the reason has to be findable.
+      if (!set_state_missing_) {
+        RCLCPP_WARN(
+          get_logger(),
+          "%s is not available - is libgazebo_ros_state.so loaded in the world "
+          "file? The joints will move and the body will not.",
+          kSetEntityStateService);
+        set_state_missing_ = true;
+      }
+      return;
+    }
+    if (set_state_missing_) {
+      RCLCPP_INFO(get_logger(), "%s is available again", kSetEntityStateService);
+      set_state_missing_ = false;
+    }
+
+    auto request = std::make_shared<gazebo_msgs::srv::SetEntityState::Request>();
+    request->state.name = model_name_;
+    request->state.reference_frame = "world";
+    request->state.pose.position.x = pose.x;
+    request->state.pose.position.y = pose.y;
+    // /localization/pose is map -> base_footprint, so its z is the ground.
+    // The model was spawned 0.05 m up (spawn_entity.py -z 0.05) and putting
+    // it back at 0 here would sink it into the ground plane by that much on
+    // the first pose.
+    request->state.pose.position.z = pose_z_offset_;
+    request->state.pose.orientation.z = std::sin(pose.yaw / 2.0);
+    request->state.pose.orientation.w = std::cos(pose.yaw / 2.0);
+
+    // Fire and forget. This node spins single-threaded, so waiting on the
+    // future here would deadlock the very spin that delivers the response.
+    // The callback exists only so a refusal is not silent.
+    set_state_client_->async_send_request(
+      request,
+      [this](rclcpp::Client<gazebo_msgs::srv::SetEntityState>::SharedFuture future) {
+        if (!future.get()->success) {
+          RCLCPP_WARN_ONCE(
+            get_logger(),
+            "%s refused to move '%s' - is that the entity's name in the world? "
+            "It must match spawn_entity.py's -entity argument.",
+            kSetEntityStateService, model_name_.c_str());
+        }
+      });
+  }
+
   void publish_joints()
   {
     trajectory_msgs::msg::JointTrajectory msg;
@@ -298,20 +463,34 @@ private:
 
     nav_msgs::msg::Odometry odom;
     odom.header.stamp = now();
-    odom.header.frame_id = "odom";
+    // The frame this pose is expressed in changes with where it comes from.
+    // Publishing a localised, map-frame pose under frame_id "odom" would
+    // quietly claim it is a drifting local estimate.
+    odom.header.frame_id = applied_odom_ ? "map" : "odom";
     odom.child_frame_id = kBaseFootprintFrameId;
     odom.pose.pose.position.x = stepper_.pose().x;
     odom.pose.pose.position.y = stepper_.pose().y;
     odom.pose.pose.orientation.z = std::sin(stepper_.pose().yaw / 2.0);
     odom.pose.pose.orientation.w = std::cos(stepper_.pose().yaw / 2.0);
     // See kDeadReckoningVariance: an all-zero covariance asserts certainty,
-    // and this pose has none to assert. The 6x6 row-major diagonal is
-    // (x, y, z, roll, pitch, yaw). The twist covariance is set the same
-    // way even though odom.twist is left at zero, so a consumer cannot
-    // read that unpopulated zero as a confidently measured standstill.
+    // and a dead-reckoned pose has none to assert. The 6x6 row-major
+    // diagonal is (x, y, z, roll, pitch, yaw). The twist covariance is set
+    // that way unconditionally, because odom.twist is left at zero either
+    // way and a consumer must not read that unpopulated zero as a
+    // confidently measured standstill.
     for (int i = 0; i < 6; ++i) {
-      odom.pose.covariance[i * 6 + i] = kDeadReckoningVariance;
       odom.twist.covariance[i * 6 + i] = kDeadReckoningVariance;
+    }
+    if (applied_odom_) {
+      // The pose is localisation's and so is its uncertainty. Stamping
+      // kDeadReckoningVariance onto a measured pose is the same kind of lie
+      // as an all-zero covariance on a dead-reckoned one, pointing the
+      // other way.
+      odom.pose.covariance = applied_odom_->pose.covariance;
+    } else {
+      for (int i = 0; i < 6; ++i) {
+        odom.pose.covariance[i * 6 + i] = kDeadReckoningVariance;
+      }
     }
     odom_pub_->publish(odom);
   }
@@ -341,6 +520,23 @@ private:
   rclcpp::Time last_twist_{0, 0, RCL_STEADY_TIME};
   bool twist_ever_arrived_{false};
 
+  // External pose (semi-autonomous mode). All of it is inert while
+  // pose_topic_ is empty: no subscriptions are created and pending_odom_ is
+  // never set, so tick() costs one null check more than it did.
+  std::string pose_topic_;
+  std::string status_topic_;
+  std::string model_name_;
+  double pose_z_offset_{0.05};
+  navi_sim_ik::ExternalPoseGate gate_{30.0};
+  nav_msgs::msg::Odometry::SharedPtr pending_odom_;
+  nav_msgs::msg::Odometry::SharedPtr applied_odom_;
+  // Two fields rather than one: holding_state_ can legitimately be "" (no
+  // status has arrived at all), so an empty string cannot also mean "not
+  // holding" without swallowing the first and most important warning.
+  bool holding_{false};
+  std::string holding_state_;
+  bool set_state_missing_{false};
+
   // Three states, not a bool: "nothing has ever arrived" must not be
   // reported in the words used for "it came back".
   enum class TwistFlow { NeverArrived, Flowing, Stale };
@@ -360,6 +556,9 @@ private:
   bool tick_rate_reported_{false};
 
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr twist_sub_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr pose_sub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr status_sub_;
+  rclcpp::Client<gazebo_msgs::srv::SetEntityState>::SharedPtr set_state_client_;
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr joints_pub_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
