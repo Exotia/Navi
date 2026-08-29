@@ -338,6 +338,7 @@ class ElevationMapper(Node):
         snapshot = self._grid.snapshot()
         if snapshot is None:
             self._tile_count = 0
+            keys = {}
         else:
             keys = tiles_of_snapshot(self._clamped_for_tiles(snapshot))
             # Remembered rather than recomputed in _publish_status: cutting
@@ -350,11 +351,25 @@ class ElevationMapper(Node):
                 # now would erase terrain the map does believe in.
                 self._pending_nan_keys.discard(('terrain', key))
             self._scheduler.offer(keys, now)
+        # A tile the scheduler knows but this offer no longer contains has
+        # vanished from the map as published: every cell of it fell out of
+        # the rover's band once the first pose arrived (a desk top that
+        # was "ground" before the clamp could apply), or a load replaced
+        # the grid. Left in the scheduler it would keep going out as a
+        # keepalive forever, so it is forgotten - and blanked once if the
+        # sim ever saw it.
+        self._forget_vanished(self._scheduler, 'terrain', keys)
 
         obstacle_tiles = self._obstacles.tiles()
         for key in obstacle_tiles:
             self._pending_nan_keys.discard(('obstacle', key))
         self._obstacle_scheduler.offer(obstacle_tiles, now)
+        self._forget_vanished(self._obstacle_scheduler, 'obstacle', obstacle_tiles)
+
+    def _forget_vanished(self, scheduler, kind: str, current) -> None:
+        for key in scheduler.known_keys() - set(current):
+            if scheduler.forget(key):
+                self._queue_nan(kind, [key])
 
     def _queue_nan(self, kind: str, keys) -> None:
         for key in keys:
@@ -453,8 +468,10 @@ class ElevationMapper(Node):
         old_keys = self._scheduler.forget_all()
         old_obstacle_keys = self._obstacle_scheduler.forget_all()
         self._offer(self._now())
-        new_snapshot = self._grid.snapshot()
-        new_keys = set(tiles_of_snapshot(new_snapshot)) if new_snapshot is not None else set()
+        # What _offer actually scheduled - the *clamped* tile set, not the
+        # raw grid's: a loaded tile that is empty once clamped to the
+        # rover's band is not published, so it must count as gone below.
+        new_keys = self._scheduler.known_keys()
         # Any tile that was on screen before the load but has no seen cell
         # in the loaded map would otherwise never be mentioned again, and
         # the sim would keep its stale terrain forever - so every such tile
@@ -464,7 +481,7 @@ class ElevationMapper(Node):
         # Same reasoning for obstacle tiles: one that was published before
         # the load but the loaded voxels do not cover would otherwise never
         # be mentioned again either.
-        new_obstacle_keys = set(self._obstacles.tiles())
+        new_obstacle_keys = self._obstacle_scheduler.known_keys()
         self._queue_nan(
             'obstacle', (key for key in old_obstacle_keys if key not in new_obstacle_keys))
         self._scheduler.mark_all_dirty()

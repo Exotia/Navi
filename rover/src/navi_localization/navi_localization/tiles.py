@@ -154,6 +154,24 @@ class PayloadScheduler:
         self.__init__(changed=self._changed)
         return keys
 
+    def known_keys(self) -> set:
+        """Every key offered so far (published or not)."""
+        return set(self._latest)
+
+    def forget(self, key) -> bool:
+        """Drop one key from the schedule; True if it had been published
+        (so the consumer still shows it and needs a blank)."""
+        was_published = self._published.get(key) is not None
+        self._latest.pop(key, None)
+        self._published.pop(key, None)
+        self._published_at.pop(key, None)
+        self._dirty.pop(key, None)
+        try:
+            self._round_robin.remove(key)
+        except ValueError:
+            pass
+        return was_published
+
 
 class TileScheduler(PayloadScheduler):
     """`PayloadScheduler` with the terrain grid's own comparator: a cell
