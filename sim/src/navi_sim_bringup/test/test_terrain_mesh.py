@@ -133,3 +133,104 @@ def test_the_sdf_is_a_static_visual_only_mesh():
 
 def test_the_model_config_names_the_model_gazebo_will_look_up():
     assert '<name>navi_terrain</name>' in model_config_xml()
+
+
+def test_an_isolated_needle_is_flattened_to_its_neighbourhood():
+    # A single misread cell (a flying pixel) 1 m above flat ground: its 3x3
+    # neighbourhood is 8 finite cells, all at ground level, so its median
+    # is 0.0 and it gets pulled down.
+    grid = np.zeros((5, 5))
+    grid[2, 2] = 1.0
+
+    mesh = terrain_mesh_from_grid(grid, 0.10, 0.0, 0.0)
+
+    assert mesh.vertices[:, 2].max() == pytest.approx(0.0, abs=1e-9)
+
+
+def test_a_wide_dome_is_not_flattened():
+    # A 7x7 raised block in the middle of flat ground: interior cells of
+    # the block have neighbours that are also part of the block, so their
+    # median agrees with them and they are left alone. This is a real
+    # feature (a rock, a mound), not a flying pixel.
+    grid = np.zeros((15, 15))
+    grid[4:11, 4:11] = 0.20
+
+    mesh = terrain_mesh_from_grid(grid, 0.10, 0.0, 0.0)
+
+    assert mesh.vertices[:, 2].max() == pytest.approx(0.20, abs=0.01)
+
+
+def test_peak_threshold_m_controls_how_much_disagreement_is_tolerated():
+    grid = np.zeros((5, 5))
+    grid[2, 2] = 0.05                 # under the default 0.10 m threshold
+
+    default = terrain_mesh_from_grid(grid, 0.10, 0.0, 0.0)
+    assert default.vertices[:, 2].max() == pytest.approx(0.05)
+
+    strict = terrain_mesh_from_grid(grid, 0.10, 0.0, 0.0, peak_threshold_m=0.01)
+    assert strict.vertices[:, 2].max() == pytest.approx(0.0, abs=1e-9)
+
+
+def test_a_nan_neighbourhood_does_not_create_fake_values():
+    # Near a hole (fewer than 5 finite neighbours), the cell is left alone
+    # rather than replaced with a median trusted on too little data.
+    grid = np.full((5, 5), np.nan)
+    grid[0, 0] = 1.0
+    grid[0, 1] = 0.0
+    grid[1, 0] = 0.0
+    grid[1, 1] = 0.0
+
+    mesh = terrain_mesh_from_grid(grid, 0.10, 0.0, 0.0)
+
+    # The lone high corner (only 3 finite neighbours) survives unflattened,
+    # and no NaN turned into a fabricated number.
+    assert mesh.vertices[:, 2].max() == pytest.approx(1.0)
+    assert np.isfinite(mesh.vertices[:, 2]).all()
+
+
+def _stepped_grid(step_m: float, resolution: float, run_before: int = 4,
+                   run_after: int = 4) -> np.ndarray:
+    # A flat run, a sharp step of step_m, then another flat run - both
+    # rows and columns repeated so every triangle on either side of the
+    # step is a real, complete cell.
+    rows = 4
+    cols = run_before + run_after
+    row = np.array([0.0] * run_before + [step_m] * run_after)
+    return np.tile(row, (rows, 1))
+
+
+def test_a_vertical_wall_face_is_dropped_but_the_ground_beside_it_stays():
+    resolution = 0.10
+    grid = _stepped_grid(step_m=1.2, resolution=resolution)   # a near-vertical step
+
+    before = terrain_mesh_from_grid(grid, resolution, 0.0, 0.0, max_slope_deg=90.0)
+    after = terrain_mesh_from_grid(grid, resolution, 0.0, 0.0)
+
+    assert len(after.faces) < len(before.faces)
+    assert len(after.faces) > 0
+    # Ground away from the step - flat cells fully on one side - still
+    # produces faces; only the near-vertical step triangles are gone.
+    flat_vertex_indices = np.flatnonzero(after.vertices[:, 2] == 0.0)
+    assert any(np.isin(face, flat_vertex_indices).all() for face in after.faces)
+
+
+def test_a_45_degree_slope_keeps_every_face():
+    resolution = 0.10
+    rows, cols = 4, 6
+    # Each column step rises by exactly `resolution`, a 45 degree slope.
+    grid = np.tile(np.arange(cols) * resolution, (rows, 1))
+
+    mesh = terrain_mesh_from_grid(grid, resolution, 0.0, 0.0)
+    unfiltered = terrain_mesh_from_grid(grid, resolution, 0.0, 0.0, max_slope_deg=89.9)
+
+    assert len(mesh.faces) == len(unfiltered.faces)
+
+
+def test_max_slope_deg_controls_the_cutoff():
+    resolution = 0.10
+    grid = _stepped_grid(step_m=1.2, resolution=resolution)
+
+    lenient = terrain_mesh_from_grid(grid, resolution, 0.0, 0.0, max_slope_deg=90.0)
+    strict = terrain_mesh_from_grid(grid, resolution, 0.0, 0.0, max_slope_deg=10.0)
+
+    assert len(strict.faces) < len(lenient.faces)

@@ -32,11 +32,37 @@ Conventions:
     the ground the rover has seen.
   * Triangles wind counter-clockwise seen from +z. Gazebo culls back faces,
     and the chase camera looks down.
+
+Two cleanups run before the mesh reaches Gazebo, because the rover's
+elevation grid is not clean ground:
+
+  * Isolated-peak median: a flying pixel (a ZED depth outlier), a person or
+    a rover wheel caught mid-frame, or a single misregistered cell all show
+    up as a one- or two-cell needle - height wildly different from its
+    surroundings, with no support from its neighbours. Each cell is
+    compared with the median of its 3x3 neighbourhood; if it disagrees by
+    more than `peak_threshold_m` and that neighbourhood had enough finite
+    cells to trust (>= 5 of 8), the cell is pulled down to the median. A
+    genuine rock or ridge spanning many cells has neighbours that agree
+    with it, so its median tracks it up and it survives untouched.
+  * Slope cutoff: a wall, doorway or other near-vertical surface the ZED
+    caught face-on turns into a near-vertical spike of triangles in the
+    mesh - correct height data, wrong thing to draw as ground. Triangles
+    steeper than `max_slope_deg` from horizontal are dropped after meshing;
+    the flat ground beside the wall is unaffected because it is a separate
+    triangle.
+
+Together these are what "spikes in the terrain" turned out to be: not a
+mesh bug, but real leaks from the rover's grid (flying pixels, dynamic
+objects, vertical surfaces) that the rover's grid legitimately reports and
+this module must not draw as ground.
 """
 
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
 
 # Vertices per side, at most. 257 x 257 is 66k vertices and 131k triangles,
 # which Gazebo loads in well under a second; the elevation grid clips at
@@ -64,10 +90,43 @@ def _stride(cells: int) -> int:
     return max(1, -(-cells // MAX_SIDE))
 
 
+def _flatten_isolated_peaks(elevation: np.ndarray, peak_threshold_m: float) -> np.ndarray:
+    """Pulls one- or two-cell height outliers down to their neighbourhood median.
+
+    NaN-aware median over each cell's 3x3 neighbourhood (the eight cells
+    around it, not the cell itself), computed with a padded sliding window -
+    no scipy. A cell is only ever replaced when at least 5 of those 8
+    neighbours are finite, so a cell near the edge of the mapped area (or
+    next to a hole) is left alone rather than judged from a handful of
+    neighbours. A genuine multi-cell feature has neighbours that agree with
+    it, so its median tracks it and the diff never crosses the threshold;
+    only a needle - a cell whose neighbourhood is overwhelmingly ordinary
+    ground - gets pulled down.
+    """
+    rows, cols = elevation.shape
+    padded = np.pad(elevation, 1, constant_values=np.nan)
+    windows = sliding_window_view(padded, (3, 3)).reshape(rows, cols, 9)
+    neighbours = np.delete(windows, 4, axis=-1)          # drop the centre cell
+    finite = np.isfinite(neighbours)
+    count = finite.sum(axis=-1)
+    with np.errstate(invalid='ignore'), warnings.catch_warnings():
+        # A window with zero finite neighbours (deep inside an unseen
+        # region) makes nanmedian warn "All-NaN slice"; its NaN result is
+        # exactly right and `replace` below never selects it.
+        warnings.filterwarnings('ignore', message='All-NaN slice encountered')
+        median = np.nanmedian(neighbours, axis=-1)
+        diff = np.abs(elevation - median)
+    replace = (np.isfinite(elevation) & np.isfinite(median)
+               & (count >= 5) & (diff > peak_threshold_m))
+    return np.where(replace, median, elevation)
+
+
 def terrain_mesh_from_grid(elevation, resolution: float, center_x: float,
-                           center_y: float):
+                           center_y: float, *, max_slope_deg: float = 60.0,
+                           peak_threshold_m: float = 0.10):
     """A TerrainMesh for one elevation grid, or None if no cell is complete."""
     elevation = np.asarray(elevation, dtype=np.float64)
+    elevation = _flatten_isolated_peaks(elevation, peak_threshold_m)
     full_rows, full_cols = elevation.shape
     stride = max(_stride(full_rows), _stride(full_cols))
     sampled = elevation[::stride, ::stride]
@@ -97,6 +156,23 @@ def terrain_mesh_from_grid(elevation, resolution: float, center_x: float,
     faces = np.concatenate([np.stack([v00, v10, v11], axis=1),
                             np.stack([v00, v11, v01], axis=1)])
 
+    vertices = np.stack([grid_x, grid_y, heights], axis=-1).reshape(-1, 3)
+
+    # Slope cutoff: a wall or other near-vertical surface the rover mapped
+    # face-on comes out of the loop above as real triangles with real
+    # height data - just not something to draw as ground. Drop any
+    # triangle whose plane leans more than max_slope_deg from horizontal;
+    # the ground beside it is a separate triangle and keeps its face.
+    p0 = vertices[faces[:, 0]]
+    p1 = vertices[faces[:, 1]]
+    p2 = vertices[faces[:, 2]]
+    face_normal = np.cross(p1 - p0, p2 - p0)
+    face_normal_len = np.linalg.norm(face_normal, axis=1)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        cos_from_vertical = face_normal[:, 2] / face_normal_len
+    min_cos = np.cos(np.deg2rad(max_slope_deg))
+    faces = faces[cos_from_vertical >= min_cos]
+
     # Normals from the height gradient: n = (-dz/dx, -dz/dy, 1), unit
     # length. Unseen samples take height 0, which only affects normals of
     # vertices no drawn triangle uses.
@@ -105,7 +181,6 @@ def terrain_mesh_from_grid(elevation, resolution: float, center_x: float,
     normals = np.stack([-dz_dx, -dz_dy, np.ones_like(heights)], axis=-1)
     normals /= np.linalg.norm(normals, axis=-1, keepdims=True)
 
-    vertices = np.stack([grid_x, grid_y, heights], axis=-1).reshape(-1, 3)
     return TerrainMesh(vertices=vertices, normals=normals.reshape(-1, 3),
                        faces=faces.astype(np.int64), rows=rows, cols=cols,
                        size_x=(cols - 1) * spacing, size_y=(rows - 1) * spacing)
