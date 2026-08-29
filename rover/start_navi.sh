@@ -5,10 +5,14 @@
 #      station publishes, so what the rover receives is visible here
 #   3. video_sender - waits on /video_request and streams the ZED 2i to
 #      whichever address the ground station asks for
+#   4. localization.launch.py - the ZED 2i wrapper with positional tracking,
+#      plus localization_status publishing /localization/pose and
+#      /localization/status
 #
 #   ./start_navi.sh              all three, listener in the foreground
 #   ./start_navi.sh --no-bridge  no rosbridge (one is already running)
 #   ./start_navi.sh --no-video   no video_sender
+#   ./start_navi.sh --no-localization  no ZED tracking; video from the camera as a UVC device
 #   ./start_navi.sh --port 9091  serve rosbridge on a different port
 #   ./start_navi.sh --keep-stale don't clean up a previous run first
 #
@@ -23,12 +27,14 @@ WS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PORT=9090
 START_BRIDGE=1
 START_VIDEO=1
+START_LOCALIZATION=1
 CLEAN_STALE=1
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-bridge) START_BRIDGE=0; shift ;;
         --no-video) START_VIDEO=0; shift ;;
+        --no-localization) START_LOCALIZATION=0; shift ;;
         --keep-stale) CLEAN_STALE=0; shift ;;
         --port) PORT="$2"; shift 2 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -124,6 +130,13 @@ if [ "$CLEAN_STALE" -eq 1 ]; then
     # The pipeline video_sender spawns. Matched on the elements it always
     # contains, so an unrelated gst-launch on this machine is left alone.
     kill_stale "video pipelines" "gst-launch-1\.0.*v4l2src.*udpsink"
+    # The wrapper runs in a composable-node container; a killed run leaves
+    # it holding the camera, and the next wrapper then fails to open it.
+    kill_stale "ZED wrapper containers" "component_container_isolated.*zed"
+    kill_stale "localisation launches" "ros2 launch navi_localization"
+    kill_stale "localization_status nodes" "navi_localization/localization_status"
+    # The stdin-fed encode pipeline video_sender's zed_topic source spawns.
+    kill_stale "video pipe pipelines" "gst-launch-1\.0.*fdsrc.*udpsink"
     # Deliberately no pattern for start_navi.sh itself. It would match this
     # very process (and any ssh wrapper whose command line contains the
     # script's path), and there is nothing to gain: a leftover instance
@@ -144,6 +157,19 @@ if [ ! -f "$WS_DIR/install/local_setup.bash" ]; then
     exit 1
 fi
 source "$WS_DIR/install/local_setup.bash"
+
+ZED_WS="${ZED_WS:-$HOME/workspaces/isaac_ros-dev}"
+if [ "$START_LOCALIZATION" -eq 1 ]; then
+    if [ ! -f "$ZED_WS/install/setup.bash" ]; then
+        echo "error: ZED wrapper workspace not found at $ZED_WS" >&2
+        echo "       set ZED_WS, or run with --no-localization" >&2
+        exit 1
+    fi
+    source "$ZED_WS/install/setup.bash"
+    # After, not before, the wrapper's setup: that setup resets the overlay
+    # and this workspace would otherwise fall out of the path.
+    source "$WS_DIR/install/local_setup.bash"
+fi
 
 BACKGROUND_PIDS=()
 cleanup() {
@@ -192,15 +218,46 @@ if [ "$START_BRIDGE" -eq 1 ]; then
     echo "rosbridge_server is serving port $PORT"
 fi
 
+if [ "$START_LOCALIZATION" -eq 1 ]; then
+    echo "starting localisation (ZED 2i tracking)"
+    ros2 launch navi_localization localization.launch.py &
+    LOC_PID=$!
+    BACKGROUND_PIDS+=("$LOC_PID")
+
+    # Ready means a status message has actually been received, not that
+    # the launch process exists: the wrapper spends its first seconds
+    # opening the camera and advertising, and a camera it cannot open
+    # leaves the launch alive with nothing behind it.
+    LOC_UP=0
+    for _ in $(seq 1 30); do
+        if ! kill -0 "$LOC_PID" 2>/dev/null; then
+            echo "error: localisation launch exited during startup" >&2
+            exit 1
+        fi
+        if timeout 3 ros2 topic echo /localization/status --once >/dev/null 2>&1; then
+            LOC_UP=1
+            break
+        fi
+    done
+    if [ "$LOC_UP" -ne 1 ]; then
+        echo "error: /localization/status never arrived within 90 s" >&2
+        echo "       is the ZED 2i plugged in? see the wrapper output above" >&2
+        exit 1
+    fi
+    echo "localisation is publishing /localization/status"
+fi
+
 if [ "$START_VIDEO" -eq 1 ]; then
     # Not fatal when the camera is absent: the node idles until a request
     # arrives, and manual drive has to keep working without video.
-    if [ ! -e /dev/video0 ]; then
-        echo "warning: /dev/video0 does not exist - is the ZED 2i plugged in?" >&2
-        echo "         video_sender will start anyway and fail any request" >&2
+    if [ "$START_LOCALIZATION" -eq 0 ]; then
+        if [ ! -e /dev/video0 ]; then
+            echo "warning: /dev/video0 does not exist - is the ZED 2i plugged in?" >&2
+            echo "         video_sender will start anyway and fail any request" >&2
+        fi
     fi
     echo "starting video_sender (idle until the ground station asks for video)"
-    ros2 run navi_teleop video_sender &
+    ros2 run navi_teleop video_sender --ros-args -p source:=$( [ "$START_LOCALIZATION" -eq 1 ] && echo zed_topic || echo v4l2 ) &
     BACKGROUND_PIDS+=("$!")
 fi
 
