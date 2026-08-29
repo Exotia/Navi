@@ -372,6 +372,42 @@ def test_a_zed_topic_request_subscribes_and_stopping_unsubscribes():
         node.destroy_node()
 
 
+def test_a_refused_frame_leaves_no_subscription_behind():
+    # A request that cannot be served is not a request that is still
+    # wanted: leaving the topic subscribed would go on deserialising
+    # ~27 MB/s into a node that is reporting failed.
+    node, launcher = make_node()
+    try:
+        node._on_request(request())
+        bad = image()
+        bad.encoding = "mono16"
+        node._on_image(bad)
+
+        assert node._state == "failed"
+        assert node._image_subscription is None
+        assert image_topics(node) == []
+    finally:
+        node.destroy_node()
+
+
+def test_a_dead_pipeline_leaves_no_subscription_behind():
+    node, launcher = make_node()
+    try:
+        node._on_request(request())
+        node._on_image(image())
+        assert node._image_subscription is not None
+        launcher.process.returncode = 1
+
+        node._publish_status_tick()
+
+        assert node._state == "failed"
+        assert node._image_subscription is None
+    finally:
+        if node._stderr_path and os.path.exists(node._stderr_path):
+            os.remove(node._stderr_path)
+        node.destroy_node()
+
+
 def test_a_second_request_does_not_stack_up_subscriptions():
     node, _ = make_node()
     try:

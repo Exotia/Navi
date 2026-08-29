@@ -218,8 +218,14 @@ class VideoSender(Node):
             if reason is not None:
                 self.get_logger().warn(f"refusing video request: {reason}")
                 self._set_state('failed', reason)
+            else:
+                self._start_pipe_stream(request, msg.width, msg.height, msg.encoding)
+            if self._state != 'streaming':
+                # Nothing started, so nothing wants these frames: a refused
+                # request must not leave the topic subscribed and its
+                # frames being deserialised for the rest of the run.
+                self._unsubscribe_from_images()
                 return
-            self._start_pipe_stream(request, msg.width, msg.height, msg.encoding)
         if self._state != 'streaming' or self._process is None:
             return
         if len(msg.data) != self._frame_bytes:
@@ -297,6 +303,9 @@ class VideoSender(Node):
                 detail = self._stderr_tail()
                 self._remove_stderr_file()
                 self._process = None
+                # Same reason as the refusal path in _on_image: with no
+                # pipeline left there is nothing to feed.
+                self._unsubscribe_from_images()
                 self._set_state('failed', detail if detail else f"pipeline exited ({code})")
                 return
         self._publish_status()
