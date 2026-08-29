@@ -99,7 +99,7 @@ class MapStore:
                 resolution = float(data['resolution'])
         except MapStoreError:
             raise
-        except (zipfile.BadZipFile, OSError, KeyError, ValueError) as error:
+        except (zipfile.BadZipFile, OSError, KeyError, ValueError, TypeError) as error:
             raise MapStoreError(
                 f"map {name!r} is not a readable map file "
                 f"({type(error).__name__}: {error})") from error

@@ -319,7 +319,7 @@ class TerrainWriter(Node):
         self._spawn = self.create_client(SpawnEntity, '/spawn_entity')
         self._model_list = self.create_client(GetModelList, '/get_model_list')
         self.create_subscription(
-            GridMap, str(self.get_parameter('tile_topic').value), self._on_tile, 16)
+            GridMap, str(self.get_parameter('tile_topic').value), self._on_tile, 64)
         self.create_timer(0.25, self._pump)
         self.get_logger().info(
             f"terrain tiles under {self._model_dir}; one model per 2.5 m tile, "
