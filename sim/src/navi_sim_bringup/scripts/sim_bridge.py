@@ -46,6 +46,7 @@ DEFAULT_TOPICS = [
     "/localization/pose:nav_msgs/msg/Odometry",
     "/localization/status:std_msgs/msg/String",
     "/localization/map_tile:grid_map_msgs/msg/GridMap",
+    "/localization/obstacle_tile:sensor_msgs/msg/PointCloud2",
 ]
 
 # Deep enough for the map's blanking bursts. A clear or a load on the rover

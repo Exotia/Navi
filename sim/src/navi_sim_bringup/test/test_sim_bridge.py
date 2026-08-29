@@ -164,6 +164,7 @@ def test_the_sim_side_node_has_no_subscriptions_at_all():
 
 def test_the_map_tiles_are_among_the_topics_the_bridge_carries_by_default():
     assert "/localization/map_tile:grid_map_msgs/msg/GridMap" in sim_bridge.DEFAULT_TOPICS
+    assert "/localization/obstacle_tile:sensor_msgs/msg/PointCloud2" in sim_bridge.DEFAULT_TOPICS
     assert not any(spec.startswith("/localization/map:") for spec in sim_bridge.DEFAULT_TOPICS)
 
 

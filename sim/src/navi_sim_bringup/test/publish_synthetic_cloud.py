@@ -13,6 +13,8 @@ bin. It is a script rather than an installed node: it belongs to the tests.
 --ramp x   ground rising 1 m over 6 m in +x, flat in y
 --ramp y   the same rise in +y. The pair is how a mirrored terrain is
            told from a correct one: run both and the relief must move.
+--wall     a 1.2 m wall along the +y edge of the patch, points every 3 cm
+--box      a 0.5 m cube at (2.0, 1.0) - both draw as grey obstacle blocks
 --grow     a patch that widens every publish, to watch the map grow and the
            terrain respawn no faster than once every five seconds.
 """
@@ -30,6 +32,28 @@ TOPIC = '/zed_front/zed_node/mapping/fused_cloud'
 # points, uniformly, rather than the patchwork a boundary-aligned lattice
 # produces (some cells getting the point, their neighbour getting none).
 SPACING = 0.025
+
+
+def wall(size_m: float) -> np.ndarray:
+    """A 1.2 m wall along the +y edge of the patch, points every 3 cm."""
+    xs = np.arange(0.0, size_m, 0.03)
+    zs = np.arange(0.0, 1.2, 0.03)
+    gx, gz = np.meshgrid(xs, zs)
+    return np.stack([gx.ravel(), np.full(gx.size, size_m - 0.1), gz.ravel()], axis=1)
+
+
+def box(x0: float = 2.0, y0: float = 1.0, side: float = 0.5) -> np.ndarray:
+    """A closed cube: five visible faces (top and four sides), 3 cm points."""
+    t = np.arange(0.0, side, 0.03)
+    a, b = np.meshgrid(t, t)
+    faces = [
+        np.stack([x0 + a.ravel(), y0 + b.ravel(), np.full(a.size, side)], 1),      # top
+        np.stack([np.full(a.size, x0), y0 + a.ravel(), b.ravel()], 1),             # -x side
+        np.stack([np.full(a.size, x0 + side), y0 + a.ravel(), b.ravel()], 1),      # +x side
+        np.stack([x0 + a.ravel(), np.full(a.size, y0), b.ravel()], 1),             # -y side
+        np.stack([x0 + a.ravel(), np.full(a.size, y0 + side), b.ravel()], 1),      # +y side
+    ]
+    return np.concatenate(faces)
 
 
 def patch(size_m: float, ramp: str) -> np.ndarray:
@@ -61,7 +85,10 @@ def cloud_message(points: np.ndarray, stamp) -> PointCloud2:
 
 class SyntheticCloud(Node):
 
-    def __init__(self, ramp: str, size_m: float, grow: bool):
+    def __init__(self, ramp: str, size_m: float, grow: bool,
+                 with_wall: bool = False, with_box: bool = False):
+        self._with_wall = with_wall
+        self._with_box = with_box
         super().__init__('synthetic_fused_cloud')
         self._ramp = ramp
         self._size = size_m
@@ -73,6 +100,10 @@ class SyntheticCloud(Node):
 
     def _publish(self) -> None:
         points = patch(self._size, self._ramp)
+        if self._with_wall:
+            points = np.concatenate([points, wall(self._size)])
+        if self._with_box:
+            points = np.concatenate([points, box()])
         self._publisher.publish(
             cloud_message(points, self.get_clock().now().to_msg()))
         self.get_logger().info(
@@ -87,10 +118,13 @@ def main() -> None:
     parser.add_argument('--size', type=float, default=6.0,
                         help='side of the square patch in metres')
     parser.add_argument('--grow', action='store_true')
+    parser.add_argument('--wall', action='store_true')
+    parser.add_argument('--box', action='store_true')
     arguments = parser.parse_args()
 
     rclpy.init()
-    node = SyntheticCloud(arguments.ramp, arguments.size, arguments.grow)
+    node = SyntheticCloud(arguments.ramp, arguments.size, arguments.grow,
+                          with_wall=arguments.wall, with_box=arguments.box)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
