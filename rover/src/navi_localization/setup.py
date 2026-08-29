@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'localization_status = navi_localization.localization_status:main',
+            'elevation_mapper = navi_localization.elevation_mapper:main',
         ],
     },
 )

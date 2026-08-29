@@ -16,6 +16,8 @@ from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
+from navi_sim_bringup.world_composition import compose_world, site_scan_required
+
 
 def _robot_description(xacro_path, planar_move: bool):
     """Expands the xacro into a URDF string, or raises.
@@ -84,15 +86,18 @@ def _world_with_mesh(context, *args, **kwargs):
     # half-added.
     external_pose = mode == "semi"
 
-    if not os.path.exists(mesh):
+    if site_scan_required(mode) and not os.path.exists(mesh):
         raise RuntimeError(
             f"map mesh not found: {mesh}\n"
             "Pass map_mesh:=/path/to/Model3D_mesh2.obj - the mesh is "
-            "gitignored, so it is not in the repository.")
+            "gitignored, so it is not in the repository. In semi mode it is "
+            "not needed at all: the ground is the rover's own map.")
 
-    source = os.path.join(share, "worlds", "site.world")
-    with open(source) as handle:
-        world = handle.read().replace("MAP_MESH_PATH", mesh)
+    with open(os.path.join(share, "worlds", "site.world")) as handle:
+        world_text = handle.read()
+    with open(os.path.join(share, "worlds", "site_scan.model")) as handle:
+        scan_text = handle.read()
+    world = compose_world(world_text, scan_text, mode, mesh)
 
     generated = os.path.join(tempfile.mkdtemp(prefix="navi_sim_world_"), "site.world")
     with open(generated, "w") as handle:
@@ -166,6 +171,13 @@ def _world_with_mesh(context, *args, **kwargs):
              remappings=[("/manual_twist", twist_topic)]))
     actions.append(
         Node(package="navi_sim_video", executable="sim_video_sender", output="screen"))
+
+    if external_pose:
+        # The ground the rover has actually seen. Only in semi mode:
+        # simulation mode has the organisers' scan and no rover to map
+        # anything with.
+        actions.append(Node(package="navi_sim_bringup",
+                            executable="terrain_writer", output="screen"))
 
     if external_pose:
         # The twist entry follows twist_topic: with --twist-topic pointed at
