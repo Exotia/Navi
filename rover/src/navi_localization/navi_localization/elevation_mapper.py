@@ -34,7 +34,7 @@ from sensor_msgs.msg import PointCloud2, PointField
 from std_msgs.msg import Float32MultiArray, MultiArrayDimension, String
 
 from navi_localization.elevation_grid import RESOLUTION, ElevationGrid
-from navi_localization.map_store import DEFAULT_DIRECTORY, MapStore, MapStoreError
+from navi_localization.map_store import DEFAULT_DIRECTORY, MapStore
 from navi_localization.tiles import (
     TILE_SAMPLES, TileScheduler, tile_center, tiles_of_snapshot)
 
@@ -190,7 +190,7 @@ class ElevationMapper(Node):
             else:
                 raise ValueError(f"unknown action {action!r}; save, load or clear")
             self._record(action, name, None)
-        except (ValueError, MapStoreError, json.JSONDecodeError) as error:
+        except (ValueError, json.JSONDecodeError) as error:  # MapStoreError is a ValueError
             self.get_logger().error(f"map command refused: {error}")
             self._record(command.get('action') if isinstance(command, dict) else None,
                          command.get('name') if isinstance(command, dict) else None,
@@ -217,8 +217,20 @@ class ElevationMapper(Node):
         # map had touched but the loaded map does not cover would stay in
         # _latest/_round_robin and be marked dirty below, republishing a
         # tile that no longer belongs to the map at all.
-        self._scheduler.forget_all()
+        old_keys = self._scheduler.forget_all()
         self._offer(self._now())
+        new_snapshot = self._grid.snapshot()
+        new_keys = set(tiles_of_snapshot(new_snapshot)) if new_snapshot is not None else set()
+        # Any tile that was on screen before the load but has no seen cell
+        # in the loaded map would otherwise never be mentioned again, and
+        # the sim would keep its stale terrain forever - so every such tile
+        # goes out once more as all-NaN, exactly as _clear does.
+        stamp = self.get_clock().now().to_msg()
+        empty = np.full((TILE_SAMPLES, TILE_SAMPLES), np.nan, dtype=np.float32)
+        for key in old_keys:
+            if key not in new_keys:
+                self._tile_publisher.publish(
+                    build_tile_message(key, empty, self._frame_id, stamp))
         self._scheduler.mark_all_dirty()
         self.get_logger().info(f"map {name!r} loaded; republishing every tile")
 

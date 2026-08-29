@@ -203,11 +203,40 @@ def test_load_replaces_the_grid_and_republishes_every_tile(node):
 
     node._on_command(String(data='{"action":"load","name":"yard"}'))
     node._tick(now=5.0)
-    keys = sorted(tile_index_of(m.info.pose.position.x, m.info.pose.position.y)
-                  for m in node._tile_publisher.messages)
-    assert keys == [(0, 0), (1, 0)]
+    # The loaded map's own tiles are republished with finite data; the
+    # stale (10, 10)-area tiles are also republished, but as all-NaN - see
+    # test_load_sends_all_nan_for_tiles_the_loaded_map_no_longer_covers.
+    keys = {tile_index_of(m.info.pose.position.x, m.info.pose.position.y)
+            for m in node._tile_publisher.messages}
+    assert {(0, 0), (1, 0)} <= keys
     node._publish_status()
     assert json.loads(node._status_publisher.messages[-1].data)['loaded'] == 'yard'
+
+
+def test_load_sends_all_nan_for_tiles_the_loaded_map_no_longer_covers(node):
+    node._on_cloud(cloud(points_at(0.1, 0.1)))     # tiles (0,0),(1,0)
+    node._on_command(String(data='{"action":"save","name":"yard"}'))
+    node._on_cloud(cloud(points_at(10.0, 10.0)))    # far away: different tiles
+    node._tick(now=0.0)
+    node._tile_publisher.messages.clear()
+
+    node._on_command(String(data='{"action":"load","name":"yard"}'))
+    node._tick(now=5.0)
+
+    by_key = {}
+    for message in node._tile_publisher.messages:
+        key = tile_index_of(message.info.pose.position.x, message.info.pose.position.y)
+        by_key.setdefault(key, []).append(message)
+
+    stale_keys = {key for key in by_key if key not in {(0, 0), (1, 0)}}
+    assert stale_keys                                  # the (10, 10) area was touched
+    for key in stale_keys:
+        for message in by_key[key]:
+            assert np.isnan(np.asarray(message.data[0].data)).all()
+
+    for key in [(0, 0), (1, 0)]:
+        assert key in by_key
+        assert any(np.isfinite(np.asarray(m.data[0].data)).any() for m in by_key[key])
 
 
 def test_clear_empties_the_grid_and_sends_every_published_tile_once_more_as_nan(node):
