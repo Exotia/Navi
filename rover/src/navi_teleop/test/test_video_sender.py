@@ -337,6 +337,61 @@ def test_zed_topic_source_refuses_an_encoding_it_cannot_build_a_pipeline_for():
         node.destroy_node()
 
 
+def image_topics(node):
+    return [s.topic_name for s in node.subscriptions
+            if s.topic_name == node._image_topic()]
+
+
+def test_no_image_subscription_exists_until_video_is_asked_for():
+    # The topic carries ~27 MB/s of bgra8 and every message on a subscribed
+    # topic is deserialised whether anyone wants it or not. In
+    # semi-autonomous mode video is forbidden, so that cost must not be
+    # paid just because the node is running.
+    node, _ = make_node()
+    try:
+        assert image_topics(node) == []
+        assert node._image_subscription is None
+    finally:
+        node.destroy_node()
+
+
+def test_a_zed_topic_request_subscribes_and_stopping_unsubscribes():
+    node, _ = make_node()
+    try:
+        node._on_request(request())
+        assert len(image_topics(node)) == 1
+        assert node._image_subscription is not None
+
+        stop = String()
+        stop.data = json.dumps({"enable": False})
+        node._on_request(stop)
+
+        assert image_topics(node) == []
+        assert node._image_subscription is None
+    finally:
+        node.destroy_node()
+
+
+def test_a_second_request_does_not_stack_up_subscriptions():
+    node, _ = make_node()
+    try:
+        node._on_request(request())
+        node._on_request(request())
+        assert len(image_topics(node)) == 1
+    finally:
+        node.destroy_node()
+
+
+def test_the_v4l2_source_never_subscribes_to_images():
+    node, _ = make_node(source="v4l2")
+    try:
+        node._on_request(request(width=1344, height=376))
+        assert node._image_subscription is None
+        assert image_topics(node) == []
+    finally:
+        node.destroy_node()
+
+
 def test_zed_topic_source_ignores_frames_when_not_streaming():
     node, launcher = make_node()
     try:

@@ -98,13 +98,11 @@ class VideoSender(Node):
         # known, so enabling it only records the request.
         self._pending: VideoRequest | None = None
         self._frame_bytes = 0
+        # Created only while a stream is wanted - see _subscribe_to_images.
+        self._image_subscription = None
 
         self._status_publisher = self.create_publisher(String, '/video_status', 10)
         self.create_subscription(String, '/video_request', self._on_request, 10)
-        if self._source() == 'zed_topic':
-            # Depth 1: a late frame is worthless - only the newest one
-            # matters to a live stream.
-            self.create_subscription(Image, self._image_topic(), self._on_image, 1)
         self.create_timer(
             float(self.get_parameter('status_interval_seconds').value),
             self._publish_status_tick,
@@ -154,9 +152,36 @@ class VideoSender(Node):
         else:
             # The pipeline is built from the first frame, whose encoding
             # decides the raw format - so until one arrives there is
-            # nothing to start.
+            # nothing to start, and the subscription that delivers it is
+            # created here rather than at construction.
             self._pending = request
+            self._subscribe_to_images()
             self._set_state('starting', f"waiting for {self._image_topic()}")
+
+    def _subscribe_to_images(self) -> None:
+        """Subscribes to the wrapper's image topic, if not already.
+
+        Lazy on purpose. The topic carries ~27 MB/s of bgra8, and every
+        message on a subscribed topic is deserialised into Python whether
+        anyone wants it or not - in semi-autonomous mode, where video is
+        forbidden, that was pure waste on the rover's CPU. The subscription
+        exists exactly while a stream is wanted; _stop_stream removes it.
+        """
+        if self._image_subscription is not None:
+            return
+        # Depth 1: a late frame is worthless - only the newest one matters
+        # to a live stream.
+        self._image_subscription = self.create_subscription(
+            Image, self._image_topic(), self._on_image, 1)
+
+    def _unsubscribe_from_images(self) -> None:
+        if self._image_subscription is None:
+            return
+        # Safe from inside _on_image (the failure path stops the stream
+        # there): rclpy defers the actual teardown until the callback that
+        # is using the subscription has returned.
+        self.destroy_subscription(self._image_subscription)
+        self._image_subscription = None
 
     def _start_stream(self, request: VideoRequest) -> None:
         if shutil.which("gst-launch-1.0") is None:
@@ -246,6 +271,7 @@ class VideoSender(Node):
 
     def _stop_stream(self) -> None:
         self._pending = None
+        self._unsubscribe_from_images()
         if self._process is None:
             return
         if getattr(self._process, 'stdin', None) is not None:
