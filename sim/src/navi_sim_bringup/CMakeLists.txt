@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.8)
 project(navi_sim_bringup)
 find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_python REQUIRED)
+
+# The package is ament_cmake because of the world, the URDF and the launch
+# files, but its nodes are Python. ament_python_install_package puts the
+# module on the path; install(PROGRAMS) makes each node an executable
+# ros2 launch can find by name.
+ament_python_install_package(${PROJECT_NAME})
 
 # The real URDF is copied in at build time rather than referenced from the
 # working tree, so an installed package does not depend on the source
