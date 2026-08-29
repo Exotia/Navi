@@ -7,6 +7,8 @@ Run on this laptop with:
 and on the Orin as part of ./deploy_rover.sh --test.
 """
 
+import time
+
 import numpy as np
 import pytest
 
@@ -21,6 +23,8 @@ def test_a_single_point_makes_a_single_cell_holding_its_height():
     snapshot = grid.snapshot()
     assert snapshot.elevation.shape == (1, 1)
     assert snapshot.elevation[0, 0] == pytest.approx(1.25)
+    # A single-point cell reports that point at both height and top.
+    assert snapshot.top[0, 0] == pytest.approx(1.25)
     # The cell spans [0.0, 0.05) in both axes, so its centre - and the
     # one-cell grid's centre - is at (0.025, 0.025).
     assert snapshot.center_x == pytest.approx(0.025)
@@ -28,11 +32,17 @@ def test_a_single_point_makes_a_single_cell_holding_its_height():
     assert snapshot.resolution == pytest.approx(RESOLUTION)
 
 
-def test_a_cell_holds_the_mean_of_the_points_in_it():
+def test_a_cell_holds_the_20th_percentile_height_and_the_max_as_top():
+    # A wall, a person or a flying pixel must not pull the drawn height up
+    # towards it: four points on the ground and one spike at z=1.0 should
+    # leave the height at the ground and put the spike only in `top`.
     grid = ElevationGrid()
-    grid.update([(0.01, 0.01, 1.0), (0.04, 0.04, 2.0), (0.02, 0.02, 3.0)])
+    grid.update([(0.01, 0.01, 0.0), (0.02, 0.02, 0.0), (0.03, 0.03, 0.0),
+                (0.04, 0.04, 0.0), (0.015, 0.015, 1.0)])
 
-    assert grid.snapshot().elevation[0, 0] == pytest.approx(2.0)
+    snapshot = grid.snapshot()
+    assert snapshot.elevation[0, 0] == pytest.approx(0.0)
+    assert snapshot.top[0, 0] == pytest.approx(1.0)
 
 
 def test_the_grid_grows_to_cover_new_points_and_leaves_the_gap_empty():
@@ -76,6 +86,24 @@ def test_a_later_cloud_replaces_the_cells_it_covers_and_keeps_the_rest():
     # cumulative, so accumulating across messages counts points twice.
     assert elevation[0, 0] == pytest.approx(4.0)
     assert elevation[0, 2] == pytest.approx(5.0)
+
+
+def test_a_later_cloud_replaces_the_cells_percentile_not_just_a_single_point():
+    grid = ElevationGrid()
+    # First update: cell (0, 0) sees a spread of points; 20th percentile of
+    # five ascending values [0, 1, 2, 3, 4] lands on index floor(0.2*4)=0.
+    grid.update([(0.02, 0.02, 0.0), (0.02, 0.02, 1.0), (0.02, 0.02, 2.0),
+                (0.02, 0.02, 3.0), (0.02, 0.02, 4.0)])
+    first = grid.snapshot()
+    assert first.elevation[0, 0] == pytest.approx(0.0)
+    assert first.top[0, 0] == pytest.approx(4.0)
+
+    # A later, unrelated cloud for the same cell must compute its own
+    # percentile from only this update's points, not blend with the old one.
+    grid.update([(0.02, 0.02, 10.0), (0.02, 0.02, 11.0)])
+    second = grid.snapshot()
+    assert second.elevation[0, 0] == pytest.approx(10.0)   # floor(0.2*1)=0 -> the lower of the two
+    assert second.top[0, 0] == pytest.approx(11.0)
 
 
 def test_growth_clips_to_the_cap_instead_of_freezing_short_of_it():
@@ -157,20 +185,30 @@ def test_state_round_trips_through_replace():
 
     assert other.snapshot().equals(grid.snapshot())
     assert state.elevation.dtype == np.float32
+    assert state.top.dtype == np.float32
     assert state.count.dtype == np.int32
+    # The two-point cell's height is the 20th percentile of [1.0, 3.0]
+    # (floor(0.2*1)=0 -> the lower one), its top the max, and both round
+    # trip through replace() unchanged.
+    two_point_cell = (state.count == 2)
+    assert int(two_point_cell.sum()) == 1
+    assert state.elevation[two_point_cell].item() == pytest.approx(1.0)
+    assert state.top[two_point_cell].item() == pytest.approx(3.0)
+    assert other.snapshot().top[two_point_cell].item() == pytest.approx(3.0)
     # Replacing reproduces the grid's exact internal state, not just its
-    # visible mean: the same later update(), on the original and on the
+    # visible height: the same later update(), on the original and on the
     # replayed copy, must land on the same value. (update() replaces a
-    # touched cell's running mean rather than accumulating into it - see
-    # test_a_later_cloud_replaces_the_cells_it_covers_and_keeps_the_rest -
-    # so this cell's mean of two points becomes this new single point,
-    # 5.0, on both grids alike.)
+    # touched cell's percentile rather than blending with the old one - see
+    # test_a_later_cloud_replaces_the_cells_percentile_not_just_a_single_point -
+    # so this cell's two points become this new single point, 5.0, on both
+    # grids alike.)
     grid.update([[0.12, 0.31, 5.0]])
     other.update([[0.12, 0.31, 5.0]])
     assert other.snapshot().equals(grid.snapshot())
     assert other.snapshot().elevation[state.count.argmax() // state.count.shape[1],
                                       state.count.argmax() % state.count.shape[1]] \
         == pytest.approx(5.0)
+    assert other.snapshot().top[two_point_cell].item() == pytest.approx(5.0)
 
 
 def test_state_of_an_empty_grid_is_none_and_clear_empties_a_populated_grid():
@@ -195,6 +233,7 @@ def test_replace_refuses_a_state_built_at_a_different_resolution():
     from navi_localization.elevation_grid import ElevationGrid, GridState
     grid = ElevationGrid()
     state = GridState(elevation=np.array([[1.0]], dtype=np.float32),
+                       top=np.array([[1.0]], dtype=np.float32),
                        count=np.array([[1]], dtype=np.int32),
                        origin_ix=0, origin_iy=0, resolution=0.10)
 
@@ -202,11 +241,33 @@ def test_replace_refuses_a_state_built_at_a_different_resolution():
         grid.replace(state)
 
 
+def test_a_200k_point_cloud_bins_in_under_a_hundred_milliseconds():
+    # The spec's own budget: the percentile binning is vectorised (lexsort
+    # + np.unique) precisely so a full-size fused cloud never costs a
+    # Python loop over cells. A generous 400 ms ceiling absorbs laptop/CI
+    # jitter around the true, much smaller, number - see the report for
+    # the measured figure.
+    rng = np.random.default_rng(0)
+    n = 200_000
+    xy = rng.uniform(-15.0, 15.0, size=(n, 2))
+    z = rng.uniform(0.0, 2.0, size=n)
+    points = np.column_stack([xy, z])
+
+    grid = ElevationGrid()
+    started = time.perf_counter()
+    grid.update(points)
+    elapsed = time.perf_counter() - started
+
+    assert grid.snapshot() is not None
+    assert elapsed < 0.4, f"binning 200k points took {elapsed * 1000:.1f} ms"
+
+
 def test_replace_refuses_a_state_bigger_than_the_cap():
     from navi_localization.elevation_grid import ElevationGrid, GridState, MAX_CELLS, RESOLUTION
     grid = ElevationGrid()
     oversized_rows = MAX_CELLS + 1
     state = GridState(elevation=np.full((oversized_rows, 1), np.nan, dtype=np.float32),
+                       top=np.full((oversized_rows, 1), np.nan, dtype=np.float32),
                        count=np.zeros((oversized_rows, 1), dtype=np.int32),
                        origin_ix=0, origin_iy=0, resolution=RESOLUTION)
 

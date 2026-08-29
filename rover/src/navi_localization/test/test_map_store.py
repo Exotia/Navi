@@ -6,24 +6,42 @@ from navi_localization.elevation_grid import GridState
 from navi_localization.map_store import MapStore, MapStoreError
 
 
-def state(value=1.0):
+def state(value=1.0, top_value=None):
     elevation = np.full((4, 6), value, dtype=np.float32)
     elevation[0, 0] = np.nan
-    return GridState(elevation=elevation, count=np.ones((4, 6), dtype=np.int32),
+    top = np.full((4, 6), value if top_value is None else top_value, dtype=np.float32)
+    top[0, 0] = np.nan
+    return GridState(elevation=elevation, top=top, count=np.ones((4, 6), dtype=np.int32),
                      origin_ix=-3, origin_iy=7, resolution=0.05)
 
 
 def test_save_then_list_then_load_round_trips(tmp_path):
     store = MapStore(str(tmp_path))
     assert store.list_names() == []
-    path = store.save('yard-day1', state())
+    saved = state(value=1.0, top_value=9.0)
+    path = store.save('yard-day1', saved)
     assert path.endswith('yard-day1.npz')
     assert store.list_names() == ['yard-day1']
 
     loaded = store.load('yard-day1')
-    assert np.array_equal(loaded.elevation, state().elevation, equal_nan=True)
+    assert np.array_equal(loaded.elevation, saved.elevation, equal_nan=True)
+    assert np.array_equal(loaded.top, saved.top, equal_nan=True)
+    assert loaded.top.dtype == np.float32
     assert loaded.count.dtype == np.int32 and loaded.count.sum() == 24
     assert (loaded.origin_ix, loaded.origin_iy, loaded.resolution) == (-3, 7, 0.05)
+
+
+def test_loading_a_map_saved_before_top_existed_falls_back_to_elevation(tmp_path):
+    store = MapStore(str(tmp_path))
+    elevation = np.full((4, 6), 2.0, dtype=np.float32)
+    elevation[0, 0] = np.nan
+    np.savez_compressed(str(tmp_path / 'old.npz'),
+                        elevation=elevation, count=np.ones((4, 6), dtype=np.int32),
+                        origin_ix=np.int64(0), origin_iy=np.int64(0),
+                        resolution=np.float64(0.05))
+
+    loaded = store.load('old')
+    assert np.array_equal(loaded.top, elevation, equal_nan=True)
 
 
 def test_saving_over_an_existing_name_is_refused_unless_asked(tmp_path):

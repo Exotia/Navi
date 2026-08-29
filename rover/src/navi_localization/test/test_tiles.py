@@ -15,7 +15,10 @@ from navi_localization.tiles import (
 def snapshot(elevation, origin_ix=0, origin_iy=0, resolution=0.05):
     elevation = np.asarray(elevation, dtype=np.float32)
     rows, cols = elevation.shape
-    return GridSnapshot(elevation=elevation,
+    # top plays no part in tiling (it is not published yet), so this
+    # helper hands tiles_of_snapshot a copy of elevation for it - any array
+    # of the right shape would do.
+    return GridSnapshot(elevation=elevation, top=elevation.copy(),
                         center_x=(origin_ix + cols / 2.0) * resolution,
                         center_y=(origin_iy + rows / 2.0) * resolution,
                         resolution=resolution, origin_ix=origin_ix, origin_iy=origin_iy)

@@ -20,9 +20,21 @@ running is what makes the SDK do the mapping work at all. When it is not
 running, the topic is silent and the GPU is not spending anything on it -
 that is by design, not a fault.
 
+Clamped to the rover, not to the world: this node also subscribes
+/localization/pose (localization_status's map -> base_footprint Odometry)
+and, once a pose has arrived, clips every published cell's elevation to
+[z_rover - clamp_below, z_rover + clamp_above] before cutting it into
+tiles. That is what keeps a wall or an overhanging branch from drawing as
+a spike or a cliff in the Gazebo terrain right under the rover, without
+touching the grid itself - the clamp is applied to a copy, so a saved map
+still holds true heights, and `top` (the cell's true max, for a later
+obstacle layer) is never clamped. Before the first pose: no clamp at all,
+since there is no rover height yet to clamp relative to.
+
 Measured numbers: see launch/localization.launch.py.
 """
 
+import dataclasses
 import json
 from collections import deque
 from datetime import datetime, timezone
@@ -30,6 +42,7 @@ from datetime import datetime, timezone
 import numpy as np
 import rclpy
 from grid_map_msgs.msg import GridMap
+from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2, PointField
 from std_msgs.msg import Float32MultiArray, MultiArrayDimension, String
@@ -40,6 +53,7 @@ from navi_localization.tiles import (
     TILE_SAMPLES, TileScheduler, tile_center, tiles_of_snapshot)
 
 FUSED_CLOUD_TOPIC = '/zed_front/zed_node/mapping/fused_cloud'
+POSE_TOPIC = '/localization/pose'
 MAP_TILE_TOPIC = '/localization/map_tile'
 MAP_COMMAND_TOPIC = '/localization/map_command'
 MAP_STATUS_TOPIC = '/localization/map_status'
@@ -130,6 +144,12 @@ class ElevationMapper(Node):
         self.declare_parameter('frame_id', 'map')
         self.declare_parameter('tick_seconds', 1.0)
         self.declare_parameter('map_directory', map_directory or DEFAULT_DIRECTORY)
+        # <= 0 disables that side of the clamp. Defaults are the spec's
+        # numbers: a rover-height window that keeps a wall or an
+        # overhanging branch out of the drawn terrain without clamping the
+        # ground under a ramp or a curb the rover can actually climb.
+        self.declare_parameter('clamp_above', 0.5)
+        self.declare_parameter('clamp_below', 1.0)
 
         self._frame_id = str(self.get_parameter('frame_id').value)
         self._grid = ElevationGrid()
@@ -139,6 +159,11 @@ class ElevationMapper(Node):
         self._last_command = None
         self._warned_about_cap = False
         self._tile_count = 0
+        self._clamp_above = float(self.get_parameter('clamp_above').value)
+        self._clamp_below = float(self.get_parameter('clamp_below').value)
+        # None until /localization/pose's first message: no rover height to
+        # clamp relative to yet, so _offer applies no clamp at all.
+        self._rover_z = None
         # Tiles a clear or a load has orphaned, waiting to go out as
         # all-NaN, `NAN_TILES_PER_TICK` a tick. The set is the queue's
         # membership: a key is dropped from it (not from the deque) when
@@ -155,6 +180,7 @@ class ElevationMapper(Node):
         self._status_publisher = self.create_publisher(String, MAP_STATUS_TOPIC, 1)
         self.create_subscription(
             PointCloud2, str(self.get_parameter('cloud_topic').value), self._on_cloud, 1)
+        self.create_subscription(Odometry, POSE_TOPIC, self._on_pose, 1)
         self.create_subscription(String, MAP_COMMAND_TOPIC, self._on_command, 4)
         self.create_timer(float(self.get_parameter('tick_seconds').value), self._tick)
         self.create_timer(1.0, self._publish_status)
@@ -183,12 +209,33 @@ class ElevationMapper(Node):
                 "started rather than sliding and forgetting ground")
         self._offer(self._now())
 
+    def _on_pose(self, message: Odometry) -> None:
+        self._rover_z = float(message.pose.pose.position.z)
+        # The rover's height changed, which changes every clamped cell even
+        # though no new cloud arrived - re-offer so the scheduler notices
+        # and republishes what is now out of the clamp window.
+        self._offer(self._now())
+
+    def _clamped_for_tiles(self, snapshot):
+        """`snapshot`, or a copy clamped to the rover's height for
+        publishing. The grid itself is never touched - a saved map must
+        keep true heights - and `top` is never clamped either way, since
+        it is not published yet."""
+        if self._rover_z is None:
+            return snapshot
+        if self._clamp_above <= 0 and self._clamp_below <= 0:
+            return snapshot
+        low = -np.inf if self._clamp_below <= 0 else self._rover_z - self._clamp_below
+        high = np.inf if self._clamp_above <= 0 else self._rover_z + self._clamp_above
+        elevation = np.clip(snapshot.elevation, low, high)
+        return dataclasses.replace(snapshot, elevation=elevation)
+
     def _offer(self, now: float) -> None:
         snapshot = self._grid.snapshot()
         if snapshot is None:
             self._tile_count = 0
             return
-        keys = tiles_of_snapshot(snapshot)
+        keys = tiles_of_snapshot(self._clamped_for_tiles(snapshot))
         # Remembered rather than recomputed in _publish_status: cutting the
         # snapshot into tiles costs ~32 ms over a full 60 m map on the
         # Jetson, and the status timer runs once a second whether or not

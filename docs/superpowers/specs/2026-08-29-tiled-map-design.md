@@ -74,8 +74,16 @@ imports `rclpy` (rosbridge only). The ZED magnetometer stays unused.
 ### Grid
 
 `ElevationGrid` at **0.05 m** resolution, cap **60 m** a side (1200 cells,
-≈ 12 MB for the mean and count arrays — trivial). Running mean per cell as
-today. Nothing else about the grid changes.
+≈ 12 MB for the height, top and count arrays — trivial). A cell's drawn
+height is the **20th percentile** of that cell's z values in an update, not
+the mean: a wall, a person or a flying pixel in a cell would otherwise pull
+the mean into a spike, and the map has to show the ground the rover can
+drive on. Each cell also keeps **`top`**, the max z of the update's points,
+computed alongside the percentile and not published yet (a later change
+draws obstacles from it). `elevation_mapper` clamps the elevation it
+publishes — never `top`, and never the grid itself — to the rover's own
+height from `/localization/pose`: `[z_rover - clamp_below, z_rover +
+clamp_above]`, defaults 1.0 m / 0.5 m, no clamp until a pose has arrived.
 
 ### Tiles
 

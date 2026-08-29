@@ -13,10 +13,11 @@ import numpy as np
 import pytest
 import rclpy
 from builtin_interfaces.msg import Time
+from nav_msgs.msg import Odometry
 from sensor_msgs.msg import PointCloud2, PointField
 
 from navi_localization.elevation_mapper import (
-    MAP_COMMAND_TOPIC, MAP_STATUS_TOPIC, MAP_TILE_TOPIC, ElevationMapper,
+    MAP_COMMAND_TOPIC, MAP_STATUS_TOPIC, MAP_TILE_TOPIC, POSE_TOPIC, ElevationMapper,
     build_tile_message, points_from_cloud)
 from navi_localization.tiles import TILE_SAMPLES, tile_center, tile_index_of
 from std_msgs.msg import String
@@ -257,6 +258,58 @@ def test_the_node_talks_on_exactly_the_three_map_topics(node):
     names = {name for name, _ in node.get_topic_names_and_types()}
     assert {MAP_TILE_TOPIC, MAP_COMMAND_TOPIC, MAP_STATUS_TOPIC} <= names
     assert '/localization/map' not in names
+
+
+def test_the_node_subscribes_the_rover_pose(node):
+    names = {name for name, _ in node.get_topic_names_and_types()}
+    assert POSE_TOPIC in names
+
+
+def _only_finite_value(message):
+    values = np.asarray(message.data[0].data)
+    finite = values[np.isfinite(values)]
+    assert finite.size == 1
+    return float(finite[0])
+
+
+def test_no_clamp_before_the_first_pose(node):
+    node._on_cloud(cloud([[0.1, 0.1, 5.0]]))
+    node._tick(now=0.0)
+
+    assert len(node._tile_publisher.messages) == 1
+    assert _only_finite_value(node._tile_publisher.messages[0]) == pytest.approx(5.0)
+    assert node._grid.snapshot().top[0, 0] == pytest.approx(5.0)
+
+
+def test_a_pose_clamps_published_cells_to_the_rover_height_but_never_top(node):
+    node._on_cloud(cloud([[0.1, 0.1, 5.0]]))
+    node._tick(now=0.0)
+    node._tile_publisher.messages.clear()
+
+    odometry = Odometry()
+    odometry.pose.pose.position.z = 0.0
+    node._on_pose(odometry)          # z_rover = 0.0; default clamp_above = 0.5
+    node._tick(now=2.0)              # past MIN_INTERVAL_S, and the tile changed
+
+    assert len(node._tile_publisher.messages) == 1
+    assert _only_finite_value(node._tile_publisher.messages[0]) == pytest.approx(0.5)
+    # top is never clamped, even though the published cell now is.
+    assert node._grid.snapshot().top[0, 0] == pytest.approx(5.0)
+
+
+def test_a_pose_also_clamps_cells_below_the_rover_height(node):
+    node._on_cloud(cloud([[0.1, 0.1, -5.0]]))
+    node._tick(now=0.0)
+    node._tile_publisher.messages.clear()
+
+    odometry = Odometry()
+    odometry.pose.pose.position.z = 0.0
+    node._on_pose(odometry)          # z_rover = 0.0; default clamp_below = 1.0
+    node._tick(now=2.0)
+
+    assert len(node._tile_publisher.messages) == 1
+    assert _only_finite_value(node._tile_publisher.messages[0]) == pytest.approx(-1.0)
+    assert node._grid.snapshot().top[0, 0] == pytest.approx(-5.0)
 
 
 class ExplodingStore:

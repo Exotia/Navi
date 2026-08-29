@@ -1,8 +1,10 @@
 """Saved maps on the rover: ~/navi_maps/<name>.npz.
 
 Opt-in and one-shot: nothing is written unless the operator asks for a
-save. A map file is the grid whole (mean, count, lattice origin,
-resolution), compressed - the yard at 5 cm is under a megabyte.
+save. A map file is the grid whole (height, top, count, lattice origin,
+resolution), compressed - the yard at 5 cm is under a megabyte. `top` is a
+newer field: a map saved before it existed has no `top` key, and loading
+one falls back to a copy of `elevation` rather than refusing the file.
 """
 
 import os
@@ -55,6 +57,7 @@ class MapStore:
             with open(temporary, 'wb') as handle:
                 np.savez_compressed(
                     handle, elevation=state.elevation.astype(np.float32),
+                    top=state.top.astype(np.float32),
                     count=state.count.astype(np.int32),
                     origin_ix=np.int64(state.origin_ix), origin_iy=np.int64(state.origin_iy),
                     resolution=np.float64(state.resolution),
@@ -94,6 +97,11 @@ class MapStore:
                         f"map {name!r} is missing {', '.join(missing)}; it was not "
                         "written by this node")
                 elevation = data['elevation'].astype(np.float32)
+                # `top` postdates this format: a map saved before it existed
+                # has no such key, and falling back to a copy of `elevation`
+                # lets an older map still load rather than being refused.
+                top = (data['top'].astype(np.float32) if 'top' in data.files
+                       else elevation.copy())
                 count = data['count'].astype(np.int32)
                 origin_ix, origin_iy = int(data['origin_ix']), int(data['origin_iy'])
                 resolution = float(data['resolution'])
@@ -107,5 +115,9 @@ class MapStore:
             raise MapStoreError(
                 f"map {name!r} is inconsistent: count {count.shape} does not "
                 f"match elevation {elevation.shape}")
-        return GridState(elevation=elevation, count=count, origin_ix=origin_ix,
+        if top.shape != elevation.shape:
+            raise MapStoreError(
+                f"map {name!r} is inconsistent: top {top.shape} does not "
+                f"match elevation {elevation.shape}")
+        return GridState(elevation=elevation, top=top, count=count, origin_ix=origin_ix,
                          origin_iy=origin_iy, resolution=resolution)
