@@ -97,3 +97,26 @@ def test_the_wheels_sit_at_the_910mm_square(robot):
         assert z == pytest.approx(-0.284)
         seen.add((x > 0, y > 0))
     assert len(seen) == 4, "the four corners must be four distinct corners"
+
+
+def test_the_front_zed_sits_at_the_front_camera_box(robot):
+    # The black 37x188x30 mm box on the front white block is the ZED 2i
+    # body. Its centre is the wrapper's zed_camera_link. Authored from the
+    # existing visual, not from a measurement - see the comment in the URDF.
+    j = joint(robot, "zed_camera_joint")
+    assert j.get("type") == "fixed"
+    assert j.find("parent").get("link") == "base_link"
+    assert j.find("child").get("link") == "zed_camera_link"
+    assert j.find("origin").get("xyz") == "0.322 0 0.154"
+    assert j.find("origin").get("rpy") == "0 0 0"
+    assert any(l.get("name") == "zed_camera_link" for l in robot.findall("link"))
+
+
+def test_the_rear_zed_faces_backwards(robot):
+    j = joint(robot, "zed_rear_camera_joint")
+    assert j.get("type") == "fixed"
+    assert j.find("parent").get("link") == "base_link"
+    assert j.find("child").get("link") == "zed_rear_camera_link"
+    assert j.find("origin").get("xyz") == "-0.322 0 0.154"
+    assert j.find("origin").get("rpy") == "0 0 3.14159265"
+    assert any(l.get("name") == "zed_rear_camera_link" for l in robot.findall("link"))
