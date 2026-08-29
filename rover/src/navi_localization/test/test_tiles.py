@@ -67,6 +67,25 @@ def test_negative_indices_partition_the_same_way():
     assert tiles[(0, 0)][0, 0] == 0.0
 
 
+def test_a_grid_spanning_four_tiles_shares_the_same_diagonal_corner_value():
+    # 60 x 60 cells from lattice origin (20, 20): ix and iy both 20..79,
+    # straddling the tile boundary at 50 on both axes, so the grid touches
+    # all four tiles (0,0), (1,0), (0,1), (1,1).
+    grid = np.arange(60 * 60, dtype=np.float32).reshape(60, 60)
+    tiles = tiles_of_snapshot(snapshot(grid, origin_ix=20, origin_iy=20))
+
+    assert set(tiles) == {(0, 0), (1, 0), (0, 1), (1, 1)}
+
+    # Absolute lattice (50, 50) - array index (30, 30) in this grid - is the
+    # diagonal corner shared by all four tiles: each carries it either as
+    # its own cell or as halo, and every one of them must agree on its value.
+    corner_value = grid[30, 30]
+    assert tiles[(0, 0)][50, 50] == corner_value
+    assert tiles[(1, 0)][50, 0] == corner_value
+    assert tiles[(0, 1)][0, 50] == corner_value
+    assert tiles[(1, 1)][0, 0] == corner_value
+
+
 def flat(value):
     return {(0, 0): np.full((TILE_SAMPLES, TILE_SAMPLES), value, dtype=np.float32)}
 

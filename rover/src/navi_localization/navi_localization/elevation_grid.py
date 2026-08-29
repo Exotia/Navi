@@ -163,7 +163,7 @@ class ElevationGrid:
         self._count = np.zeros((0, 0), dtype=np.int64)
         self.points_outside_cap = 0
 
-    def state(self):
+    def state(self) -> GridState | None:
         if self._origin_ix is None:
             return None
         snapshot = self.snapshot()
@@ -172,7 +172,7 @@ class ElevationGrid:
                          origin_ix=int(self._origin_ix), origin_iy=int(self._origin_iy),
                          resolution=self.resolution)
 
-    def replace(self, state) -> None:
+    def replace(self, state: GridState) -> None:
         """The grid becomes `state`, exactly. `_sum` is rebuilt from
         mean * count, so the internal state - not just the visible mean -
         matches what it would be had this grid built `state` itself, and a
@@ -188,7 +188,7 @@ class ElevationGrid:
         count = state.count.astype(np.int64)
         elevation = np.nan_to_num(state.elevation.astype(np.float64), nan=0.0)
         self._origin_ix, self._origin_iy = int(state.origin_ix), int(state.origin_iy)
-        self._count = count.copy()
+        self._count = count
         self._sum = elevation * count
         self.points_outside_cap = 0
 

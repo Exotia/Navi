@@ -25,11 +25,15 @@ from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2, PointField
 
 TOPIC = '/zed_front/zed_node/mapping/fused_cloud'
-SPACING = 0.05          # finer than the 0.10 m grid, so every cell gets points
+# Half the 5 cm grid, offset by a quarter cell so no sample falls exactly on
+# a cell boundary: that gives every cell in the patch the same 2 x 2 = 4
+# points, uniformly, rather than the patchwork a boundary-aligned lattice
+# produces (some cells getting the point, their neighbour getting none).
+SPACING = 0.025
 
 
 def patch(size_m: float, ramp: str) -> np.ndarray:
-    axis = np.arange(0.0, size_m, SPACING)
+    axis = np.arange(SPACING / 2.0, size_m, SPACING)
     xs, ys = np.meshgrid(axis, axis, indexing='xy')
     zs = (xs if ramp == 'x' else ys) / 6.0
     return np.stack([xs.ravel(), ys.ravel(), zs.ravel()], axis=1)

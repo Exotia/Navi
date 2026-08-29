@@ -57,3 +57,16 @@ def test_the_file_records_when_it_was_saved(tmp_path):
     store.save('a', state())
     with np.load(str(tmp_path / 'a.npz')) as data:
         assert str(data['saved_at']).startswith('20')
+
+
+def test_a_save_that_blows_up_leaves_no_tmp_or_npz_behind(tmp_path, monkeypatch):
+    import navi_localization.map_store as map_store_module
+
+    def explode(*args, **kwargs):
+        raise OSError('disk full')
+
+    monkeypatch.setattr(map_store_module.np, 'savez_compressed', explode)
+    store = MapStore(str(tmp_path))
+    with pytest.raises(OSError, match='disk full'):
+        store.save('a', state())
+    assert list(tmp_path.iterdir()) == []

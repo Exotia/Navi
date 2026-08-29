@@ -49,13 +49,22 @@ class MapStore:
         # Write beside, then rename: a save interrupted half way must not
         # leave a truncated file under the real name.
         temporary = path + '.tmp'
-        with open(temporary, 'wb') as handle:
-            np.savez_compressed(
-                handle, elevation=state.elevation.astype(np.float32),
-                count=state.count.astype(np.int32),
-                origin_ix=np.int64(state.origin_ix), origin_iy=np.int64(state.origin_iy),
-                resolution=np.float64(state.resolution),
-                saved_at=np.str_(datetime.now(timezone.utc).isoformat(timespec='seconds')))
+        written = False
+        try:
+            with open(temporary, 'wb') as handle:
+                np.savez_compressed(
+                    handle, elevation=state.elevation.astype(np.float32),
+                    count=state.count.astype(np.int32),
+                    origin_ix=np.int64(state.origin_ix), origin_iy=np.int64(state.origin_iy),
+                    resolution=np.float64(state.resolution),
+                    saved_at=np.str_(datetime.now(timezone.utc).isoformat(timespec='seconds')))
+            written = True
+        finally:
+            # A save that blew up partway (disk full, bad data) must not
+            # leave a half-written .tmp behind for the next save or list to
+            # trip over.
+            if not written and os.path.exists(temporary):
+                os.remove(temporary)
         os.replace(temporary, path)
         return path
 
