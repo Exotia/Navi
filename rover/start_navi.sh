@@ -124,6 +124,107 @@ clear_bridge_port() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# Wait for localisation to be up, and then for it to actually be tracking.
+#
+# Two stages, because a status message on its own proves nothing:
+# localization_status publishes an initial OFF from its constructor, so an
+# unplugged ZED - or one the wrapper cannot open - still produces a status
+# within a second, and a loop that accepts any message reports the rover
+# ready with no localisation behind it. The state has to be read.
+#
+# The second stage does not fail the launcher: an indoor bring-up, or a
+# bench test with nothing worth tracking, must still proceed. It warns
+# loudly and continues; driving does not depend on the pose.
+#
+#   $1  pid of the localisation launch to watch, or empty to watch nothing
+#
+# Returns 1 only when no status ever arrives, or the launch dies.
+# ---------------------------------------------------------------------------
+LOC_STATUS_SECONDS="${LOC_STATUS_SECONDS:-90}"
+LOC_TRACKING_SECONDS="${LOC_TRACKING_SECONDS:-60}"
+
+# The status is JSON inside a std_msgs/String, itself inside the YAML that
+# `ros2 topic echo` prints. grep rather than a JSON tool: nothing else in
+# this script assumes jq is installed on the rover.
+loc_state() {
+    printf '%s' "$1" \
+        | grep -oE 'state[^A-Z]*[A-Z]+' \
+        | grep -oE '[A-Z]+' | head -1 || true
+}
+
+loc_status_once() {
+    timeout 3 ros2 topic echo /localization/status --once 2>/dev/null || true
+}
+
+wait_for_localization() {
+    local launch_pid="$1"
+    local state="" seen="" deadline
+
+    deadline=$((SECONDS + LOC_STATUS_SECONDS))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if [ -n "$launch_pid" ] && ! kill -0 "$launch_pid" 2>/dev/null; then
+            echo "error: localisation launch exited during startup" >&2
+            return 1
+        fi
+        state=$(loc_state "$(loc_status_once)")
+        if [ -n "$state" ]; then
+            break
+        fi
+        # The `timeout` above paces this loop only while it actually blocks.
+        # A `ros2` that fails immediately (no ROS on the path, a broken
+        # workspace) returns at once, and without this the whole budget is
+        # spent in a fraction of a second.
+        sleep 1
+    done
+
+    if [ -z "$state" ]; then
+        echo "error: /localization/status never arrived within ${LOC_STATUS_SECONDS} s" >&2
+        echo "       see the wrapper output above" >&2
+        return 1
+    fi
+    echo "localisation is publishing /localization/status (state $state)"
+
+    if [ "$state" = "OFF" ]; then
+        echo "localisation reports OFF - waiting for the ZED to start tracking"
+        deadline=$((SECONDS + LOC_TRACKING_SECONDS))
+        while [ "$SECONDS" -lt "$deadline" ]; do
+            if [ -n "$launch_pid" ] && ! kill -0 "$launch_pid" 2>/dev/null; then
+                echo "error: localisation launch exited during startup" >&2
+                return 1
+            fi
+            sleep 1
+            seen=$(loc_state "$(loc_status_once)")
+            # An echo that timed out says nothing about the state; keep the
+            # last one that did rather than treating silence as a change.
+            if [ -n "$seen" ]; then
+                state="$seen"
+            fi
+            if [ "$state" != "OFF" ]; then
+                break
+            fi
+        done
+    fi
+
+    if [ "$state" = "OFF" ]; then
+        echo "WARNING: localisation is up but still reports OFF after ${LOC_TRACKING_SECONDS} s -" >&2
+        echo "         the ZED is not tracking. Is the ZED 2i plugged in?" >&2
+        echo "         See the wrapper output above. Continuing anyway: manual" >&2
+        echo "         driving does not depend on the pose." >&2
+        return 0
+    fi
+
+    echo "localisation is tracking (state $state)"
+    return 0
+}
+
+# rover/test/test_start_navi_gate.sh sources this script to exercise
+# wait_for_localization against a fake `ros2`; everything below brings a
+# rover up, which a test must not do.
+if [ -n "${NAVI_FUNCTIONS_ONLY:-}" ]; then
+    return 0
+fi
+
 if [ "$CLEAN_STALE" -eq 1 ]; then
     kill_stale "navi_teleop nodes" "navi_teleop/(manual_twist_listener|video_sender)"
     kill_stale "ros2 run wrappers" "ros2 run navi_teleop"
@@ -224,27 +325,11 @@ if [ "$START_LOCALIZATION" -eq 1 ]; then
     LOC_PID=$!
     BACKGROUND_PIDS+=("$LOC_PID")
 
-    # Ready means a status message has actually been received, not that
-    # the launch process exists: the wrapper spends its first seconds
-    # opening the camera and advertising, and a camera it cannot open
-    # leaves the launch alive with nothing behind it.
-    LOC_UP=0
-    for _ in $(seq 1 30); do
-        if ! kill -0 "$LOC_PID" 2>/dev/null; then
-            echo "error: localisation launch exited during startup" >&2
-            exit 1
-        fi
-        if timeout 3 ros2 topic echo /localization/status --once >/dev/null 2>&1; then
-            LOC_UP=1
-            break
-        fi
-    done
-    if [ "$LOC_UP" -ne 1 ]; then
-        echo "error: /localization/status never arrived within 90 s" >&2
-        echo "       is the ZED 2i plugged in? see the wrapper output above" >&2
+    # Ready means a status message has actually been received *and* it
+    # reports a state other than OFF - see wait_for_localization above.
+    if ! wait_for_localization "$LOC_PID"; then
         exit 1
     fi
-    echo "localisation is publishing /localization/status"
 fi
 
 if [ "$START_VIDEO" -eq 1 ]; then
