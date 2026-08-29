@@ -1,6 +1,7 @@
 import json
 
 from ground_station.ros_client import RosBridgeClient
+from ground_station.ui import main_window
 from ground_station.ui.main_window import MainWindow
 from ground_station.video_receiver import VideoReceiver
 from tests.test_video_panel import FakeReceiver
@@ -817,3 +818,19 @@ def test_map_row_buttons_send_commands(qtbot):
     row.load_button.click()
     command_topic = next(t for t in FakeTopic.instances if t.name == "/localization/map_command")
     assert json.loads(command_topic.published_messages[-1]["data"]) == {"action": "load", "name": "m"}
+
+
+def test_the_requested_frame_rate_matches_the_zeds_grab_rate(qtbot, monkeypatch):
+    # The ZED wrapper grabs at 15 fps (grab_frame_rate: 15 in
+    # rover/src/navi_localization/config/zed_front.yaml), and the rover's
+    # video_sender stamps the request's fps straight into
+    # `rawvideoparse framerate=<fps>/1`. Asking for 30 tells the pipeline
+    # that frames arrive twice as fast as they do, which is a lie about
+    # every timestamp in the stream.
+    window, _ = make_window(qtbot, initial_host="192.168.178.33")
+    monkeypatch.setattr(window, "local_address_for", lambda host, port: "10.20.30.40")
+
+    window._on_stream_requested(True)
+
+    assert _last_video_request()["fps"] == 15
+    assert main_window.ROVER_VIDEO_FPS == 15

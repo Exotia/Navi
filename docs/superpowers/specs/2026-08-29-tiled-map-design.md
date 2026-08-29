@@ -167,8 +167,11 @@ status message (cheap). The ground station's dropdown is this list.
 `general.pub_frame_rate: 15.0`, `mapping.resolution: 0.05`,
 `mapping.fused_pointcloud_freq: 1.0`, `max_mapping_range` stays 8.0. The
 launch docstring records the calibration numbers. The video sender's
-pipeline is checked to accept 15 fps input (its `rawvideoparse` framerate
-follows the wrapper's published rate, not a constant).
+`rawvideoparse framerate` is whatever the ground station asks for, so the
+ground station asks for 15 (`ROVER_VIDEO_FPS` in
+`ground_station/ui/main_window.py`) to match the grab rate - it used to
+ask for 30, which told GStreamer that frames arrived twice as fast as
+they did.
 
 ## Laptop: `sim_bridge`
 

@@ -30,6 +30,16 @@ SEMI_AUTO_REFUSAL = "no camera stream in semi-autonomous mode"
 # STATUS, which is what is actually true.
 LOCALIZATION_STATUS_STALE_AFTER_SECONDS = 3.0
 
+# What we ask the rover's camera for, and it must match what the camera
+# actually delivers: with localisation running, the frames come from the
+# ZED wrapper, which grabs at `general.grab_frame_rate: 15` (see
+# rover/src/navi_localization/config/zed_front.yaml). The rover's
+# video_sender puts this number straight into its pipeline as
+# `rawvideoparse framerate=<fps>/1`, so asking for 30 would tell GStreamer
+# that frames arrive twice as fast as they do - every timestamp in the
+# stream wrong by a factor of two. Change one of the two and change this.
+ROVER_VIDEO_FPS = 15
+
 
 class MainWindow(QMainWindow):
     SEMI_AUTO_REFUSAL = SEMI_AUTO_REFUSAL
@@ -367,7 +377,7 @@ class MainWindow(QMainWindow):
 
         self.ros_client.publish_video_request(
             enable=enable, host=address, port=self.video_port,
-            width=1344, height=376, fps=30, bitrate_kbps=800)
+            width=1344, height=376, fps=ROVER_VIDEO_FPS, bitrate_kbps=800)
         return True
 
     def _on_stream_requested(self, enable: bool) -> None:
