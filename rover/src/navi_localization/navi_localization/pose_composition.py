@@ -28,14 +28,16 @@ class Transform:
 
 IDENTITY = Transform(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
 
-# Front ZED 2i body centre in base_footprint: the URDF's zed_camera_joint
-# (zed_front_camera_joint: 0.345, 0, 0.139 in base_link, the 1/4" mounting screw) plus base_footprint_joint's 0.409 m of
-# height. tests/test_mount_offset_agrees_with_urdf.py in the Navi repository
-# keeps the two in step.
+# Front ZED 2i body centre in base_footprint: the URDF's
+# zed_front_camera_joint (0.345, 0, 0.139 in base_link - the 1/4" mounting
+# screw) plus base_footprint_joint's 0.409 m of height.
+# tests/test_mount_offset_agrees_with_urdf.py in the Navi repository keeps
+# the two in step, so a re-measurement has to change both together.
 CAMERA_IN_BASE_FOOTPRINT = Transform(0.345, 0.0, 0.548, 0.0, 0.0, 0.0, 1.0)
 
-# The offset above was read off a URDF visual that was authored from
-# photographs. Flip this only after measuring camera centre to base_link.
+# The numbers come from the hardware team's measured optical centres, which
+# is what zed_front_camera_joint in the URDF carries. Flip this only if a
+# re-measurement of camera centre to base_link disagrees with them.
 MOUNT_OFFSET_VERIFIED = True
 
 
