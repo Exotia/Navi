@@ -156,11 +156,13 @@ class RosBridgeClient:
         if not isinstance(status, dict):
             return _localization_status_failure("status was not a JSON object")
         seconds = status.get("seconds_since_ok")
+        distance = status.get("distance_travelled")
         return {
             "state": str(status.get("state", "OFF")),
             "seconds_since_ok": seconds if isinstance(seconds, (int, float)) else None,
             "source": str(status.get("source", "")),
-            "distance_travelled": float(status.get("distance_travelled", 0.0) or 0.0),
+            "distance_travelled": (float(distance)
+                                   if isinstance(distance, (int, float)) else 0.0),
             "mount_offset_verified": bool(status.get("mount_offset_verified", False)),
             "detail": "",
         }

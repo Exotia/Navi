@@ -338,6 +338,7 @@ class ElevationMapper(Node):
         snapshot = self._grid.snapshot()
         if snapshot is None:
             self._tile_count = 0
+            keys = {}
         else:
             keys = tiles_of_snapshot(self._clamped_for_tiles(snapshot))
             # Remembered rather than recomputed in _publish_status: cutting
@@ -350,11 +351,25 @@ class ElevationMapper(Node):
                 # now would erase terrain the map does believe in.
                 self._pending_nan_keys.discard(('terrain', key))
             self._scheduler.offer(keys, now)
+        # A tile the scheduler knows but this offer no longer contains has
+        # vanished from the map as published: every cell of it fell out of
+        # the rover's band once the first pose arrived (a desk top that
+        # was "ground" before the clamp could apply), or a load replaced
+        # the grid. Left in the scheduler it would keep going out as a
+        # keepalive forever, so it is forgotten - and blanked once if the
+        # sim ever saw it.
+        self._forget_vanished(self._scheduler, 'terrain', keys)
 
         obstacle_tiles = self._obstacles.tiles()
         for key in obstacle_tiles:
             self._pending_nan_keys.discard(('obstacle', key))
         self._obstacle_scheduler.offer(obstacle_tiles, now)
+        self._forget_vanished(self._obstacle_scheduler, 'obstacle', obstacle_tiles)
+
+    def _forget_vanished(self, scheduler, kind: str, current) -> None:
+        for key in scheduler.known_keys() - set(current):
+            if scheduler.forget(key):
+                self._queue_nan(kind, [key])
 
     def _queue_nan(self, kind: str, keys) -> None:
         for key in keys:
@@ -425,6 +440,28 @@ class ElevationMapper(Node):
                          command.get('name') if isinstance(command, dict) else None,
                          str(error))
 
+    def _rescaled_voxels(self, voxels, file_voxel_m: float):
+        """A loaded map's voxels expressed at this node's `obstacle_voxel_m`.
+
+        The file's size is a property of the file, not a setting for the
+        rest of the run: without this, loading a map saved before the
+        size existed (the store reports 0.05 for those) switched the live
+        map to 5 cm voxels until a restart - and the next save baked that
+        in. Finer or equal voxels are coarsened to the parameter (index
+        floor-scaled, duplicates merged). A file coarser than the
+        parameter cannot be refined, so its size is adopted, with a
+        warning, as the one exception."""
+        own = self._obstacles.voxel_m
+        if abs(file_voxel_m - own) < 1e-9:
+            return voxels, None
+        if file_voxel_m > own + 1e-9:
+            self.get_logger().warn(
+                f"loaded map was built with {file_voxel_m:.3f} m obstacle voxels, "
+                f"coarser than obstacle_voxel_m={own:.3f}; using the map's size")
+            return voxels, file_voxel_m
+        scaled = np.floor(voxels.astype(np.float64) * (file_voxel_m / own)).astype(np.int32)
+        return np.unique(scaled, axis=0), None
+
     def _record(self, action, name, error) -> None:
         self._last_command = {
             'action': action, 'name': name, 'ok': error is None, 'error': error,
@@ -442,7 +479,7 @@ class ElevationMapper(Node):
     def _load(self, name) -> None:
         state, voxels, voxel_m = self._store.load(name)
         self._grid.replace(state)
-        self._obstacles.replace(voxels, voxel_m=voxel_m)
+        self._obstacles.replace(*self._rescaled_voxels(voxels, voxel_m))
         self._loaded = name
         # A load replaces the grid and the obstacle map outright, so each
         # scheduler's memory of the previous one is dropped too: without
@@ -453,8 +490,10 @@ class ElevationMapper(Node):
         old_keys = self._scheduler.forget_all()
         old_obstacle_keys = self._obstacle_scheduler.forget_all()
         self._offer(self._now())
-        new_snapshot = self._grid.snapshot()
-        new_keys = set(tiles_of_snapshot(new_snapshot)) if new_snapshot is not None else set()
+        # What _offer actually scheduled - the *clamped* tile set, not the
+        # raw grid's: a loaded tile that is empty once clamped to the
+        # rover's band is not published, so it must count as gone below.
+        new_keys = self._scheduler.known_keys()
         # Any tile that was on screen before the load but has no seen cell
         # in the loaded map would otherwise never be mentioned again, and
         # the sim would keep its stale terrain forever - so every such tile
@@ -464,7 +503,7 @@ class ElevationMapper(Node):
         # Same reasoning for obstacle tiles: one that was published before
         # the load but the loaded voxels do not cover would otherwise never
         # be mentioned again either.
-        new_obstacle_keys = set(self._obstacles.tiles())
+        new_obstacle_keys = self._obstacle_scheduler.known_keys()
         self._queue_nan(
             'obstacle', (key for key in old_obstacle_keys if key not in new_obstacle_keys))
         self._scheduler.mark_all_dirty()

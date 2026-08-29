@@ -343,3 +343,19 @@ def test_send_map_command_without_a_connection_publishes_nothing(qtbot):
     client = make_client(qtbot)
     client.send_map_command("clear")
     assert not any(t.name == "/localization/map_command" for t in FakeTopic.instances)
+
+
+def test_a_non_numeric_distance_travelled_does_not_raise_in_the_receive_thread(qtbot):
+    client = make_client(qtbot)
+    client.connect()
+    client.subscribe_localization_status()
+    topic = next(t for t in FakeTopic.instances if t.name == "/localization/status")
+
+    with qtbot.waitSignal(client.signals.localization_status_received,
+                          timeout=1000) as blocker:
+        topic.callback({"data": json.dumps({
+            "state": "OK", "seconds_since_ok": 0.0, "source": "zed_vio",
+            "distance_travelled": "n/a", "mount_offset_verified": True})})
+
+    assert blocker.args[0]["state"] == "OK"
+    assert blocker.args[0]["distance_travelled"] == 0.0

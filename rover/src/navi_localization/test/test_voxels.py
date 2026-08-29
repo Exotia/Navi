@@ -355,3 +355,34 @@ def test_200k_points_voxelise_under_60ms():
     # this task's file list). Recorded rather than asserted so this stays a
     # visible, honest measurement instead of a silently loosened target.
     assert best_ms < 300.0
+
+
+def test_tiles_interleaved_along_y_keep_every_voxel():
+    """Sorted by (ix, iy, iz), the rows of tile (0, 0) and tile (0, 1)
+    alternate for every ix - a "one contiguous run per tile" split kept
+    only the last run of each tile and silently dropped the rest (the
+    review finding: walls losing most of their blocks). Every occupied
+    voxel must survive bucketing, whatever the tile layout."""
+    obstacle_map = ObstacleMap(voxel_m=0.10)
+    points = np.array([
+        [0.05, 0.05, 0.5],   # tile (0, 0), column (0, 0)
+        [0.05, 3.05, 0.5],   # tile (0, 1), column (0, 30)
+        [0.15, 0.05, 0.5],   # tile (0, 0), column (1, 0)
+        [0.15, 3.05, 0.5],   # tile (0, 1), column (1, 30)
+    ], dtype=np.float64)
+    obstacle_map.update(points, flat_ground(0.0), rover_z=None)
+    tiles = obstacle_map.tiles()
+    assert obstacle_map.voxel_count == 4
+    assert sorted(map(tuple, tiles[(0, 0)])) == [(0, 0, 5), (1, 0, 5)]
+    assert sorted(map(tuple, tiles[(0, 1)])) == [(0, 30, 5), (1, 30, 5)]
+    # Rows inside a tile stay in (ix, iy, iz) order (deterministic bytes).
+    for rows in tiles.values():
+        assert [tuple(r) for r in rows] == sorted(tuple(r) for r in rows)
+
+    # The same through replace() (a loaded map).
+    state = obstacle_map.state()
+    fresh = ObstacleMap(voxel_m=0.10)
+    fresh.replace(state)
+    assert fresh.voxel_count == 4
+    assert {k: v.tolist() for k, v in fresh.tiles().items()} == \
+        {k: v.tolist() for k, v in tiles.items()}

@@ -1,11 +1,13 @@
 #include <gtest/gtest.h>
 
+#include <limits>
 #include <string>
 
 #include "navi_sim_ik/external_pose.hpp"
 
 using navi_sim_ik::ExternalPoseGate;
 using navi_sim_ik::localization_state;
+using navi_sim_ik::model_z;
 
 // The exact payload localization_status publishes (sub-project 1). Pinned
 // here as a whole string rather than a fragment: this is the wire format
@@ -116,4 +118,20 @@ TEST(ExternalPoseGate, TheFirstPoseIsNeverRateLimited)
   ExternalPoseGate gate(30.0);
   gate.set_state("OK");
   EXPECT_TRUE(gate.accept(1.0e6));
+}
+
+// The rover's z in the world follows the localised ground height, as the
+// mapper's terrain does - pinning it to the spawn offset sank the model
+// into every ramp the terrain drew at its true height.
+TEST(ModelZ, FollowsTheLocalisedHeightPlusTheSpawnOffset)
+{
+  EXPECT_DOUBLE_EQ(model_z(0.0, 0.05), 0.05);
+  EXPECT_DOUBLE_EQ(model_z(0.5, 0.05), 0.55);
+  EXPECT_DOUBLE_EQ(model_z(-0.3, 0.05), -0.25);
+}
+
+TEST(ModelZ, ANonFinitePoseCountsAsGroundLevel)
+{
+  EXPECT_DOUBLE_EQ(model_z(std::numeric_limits<double>::quiet_NaN(), 0.05), 0.05);
+  EXPECT_DOUBLE_EQ(model_z(std::numeric_limits<double>::infinity(), 0.05), 0.05);
 }

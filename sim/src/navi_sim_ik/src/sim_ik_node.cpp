@@ -369,10 +369,10 @@ private:
       yaw_of(odom->pose.pose.orientation)};
     stepper_.set_pose(pose);
     applied_odom_ = odom;
-    send_entity_state(pose);
+    send_entity_state(pose, odom->pose.pose.position.z);
   }
 
-  void send_entity_state(const navi_sim_ik::Pose2D & pose)
+  void send_entity_state(const navi_sim_ik::Pose2D & pose, double pose_z)
   {
     if (!set_state_client_->service_is_ready()) {
       // Warned once and then again on the next outage, rather than at the
@@ -398,11 +398,12 @@ private:
     request->state.reference_frame = "world";
     request->state.pose.position.x = pose.x;
     request->state.pose.position.y = pose.y;
-    // /localization/pose is map -> base_footprint, so its z is the ground.
-    // The model was spawned 0.05 m up (spawn_entity.py -z 0.05) and putting
-    // it back at 0 here would sink it into the ground plane by that much on
-    // the first pose.
-    request->state.pose.position.z = pose_z_offset_;
+    // /localization/pose is map -> base_footprint: its z is the height of
+    // the ground under the rover in the map frame - the same frame the
+    // mapper's terrain tiles are drawn in - plus the spawn offset
+    // (spawn_entity.py -z 0.05), without which the model would sink into
+    // flat ground by that much on the first pose.
+    request->state.pose.position.z = navi_sim_ik::model_z(pose_z, pose_z_offset_);
     request->state.pose.orientation.z = std::sin(pose.yaw / 2.0);
     request->state.pose.orientation.w = std::cos(pose.yaw / 2.0);
 

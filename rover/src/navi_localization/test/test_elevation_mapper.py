@@ -683,3 +683,95 @@ def test_load_sends_empty_obstacle_tile_for_tiles_the_loaded_map_no_longer_cover
     # Tile A is in the loaded map: it must be republished with its voxel.
     assert (0, 0) in by_key
     assert any(message.width > 0 for message in by_key[(0, 0)])
+
+
+def _tile_keys(messages):
+    return [tile_index_of(m.info.pose.position.x, m.info.pose.position.y) for m in messages]
+
+
+def _all_nan(message):
+    return not np.isfinite(np.asarray(message.data[0].data, dtype=np.float32)).any()
+
+
+def test_a_tile_emptied_by_the_clamp_is_blanked_once_and_never_kept_alive(node):
+    # Before the first pose there is no clamp: a desk top 5 m up in tile
+    # (0, 0) goes out as ground.
+    node._on_cloud(cloud([[0.1, 0.1, 5.0]]))
+    node._tick(now=0.0)
+    assert _tile_keys(node._tile_publisher.messages) == [(0, 0)]
+    assert not _all_nan(node._tile_publisher.messages[0])
+    node._tile_publisher.messages.clear()
+
+    # The pose arrives; the next cloud (somewhere else) re-offers with the
+    # clamp on, and the desk's tile has no publishable cell any more.
+    odometry = Odometry()
+    odometry.pose.pose.position.z = 0.0
+    node._on_pose(odometry)
+    node._on_cloud(cloud([[5.1, 5.1, 0.0]]))       # tile (2, 2), real ground
+    node._tick(now=2.0)
+
+    keys = _tile_keys(node._tile_publisher.messages)
+    assert (0, 0) in keys and (2, 2) in keys
+    blank = node._tile_publisher.messages[keys.index((0, 0))]
+    assert _all_nan(blank)                         # the desk is taken off screen
+
+    # ... and never comes back as a keepalive.
+    node._tile_publisher.messages.clear()
+    for t in range(3, 20):
+        node._tick(now=float(t))
+    assert (0, 0) not in _tile_keys(node._tile_publisher.messages)
+    assert (2, 2) in _tile_keys(node._tile_publisher.messages)
+
+
+def test_a_loaded_tile_that_is_empty_after_the_clamp_blanks_the_old_one(node, tmp_path):
+    # A live tile (0, 0) at 5 m before any pose; saved that way.
+    node._on_cloud(cloud([[0.1, 0.1, 5.0]]))
+    node._tick(now=0.0)
+    node._on_command(String(data='{"action":"save","name":"desk"}'))
+    node._tile_publisher.messages.clear()
+
+    # Pose known now; loading the same map must not leave the 5 m tile
+    # standing in the sim: it is empty once clamped, so it goes out blank.
+    odometry = Odometry()
+    odometry.pose.pose.position.z = 0.0
+    node._on_pose(odometry)
+    node._on_command(String(data='{"action":"load","name":"desk"}'))
+    node._tick(now=2.0)
+
+    messages = node._tile_publisher.messages
+    assert _tile_keys(messages) == [(0, 0)]
+    assert _all_nan(messages[0])
+
+
+def test_loading_an_old_5cm_map_keeps_the_10cm_parameter_and_coarsens_its_voxels(node, tmp_path):
+    # A map written before voxel_m existed: no such key, voxels in 5 cm
+    # units. Two 5 cm voxels that share one 10 cm voxel.
+    node._on_cloud(cloud(points_at(0.1, 0.1, n=4, z=0.0)))
+    state = node._grid.state()
+    np.savez(tmp_path / 'old.npz', elevation=state.elevation, count=state.count,
+             origin_ix=state.origin_ix, origin_iy=state.origin_iy,
+             resolution=state.resolution, saved_at='x',
+             voxels=np.array([[2, 2, 10], [3, 2, 10]], dtype=np.int32))
+
+    assert node._obstacles.voxel_m == pytest.approx(0.10)
+    node._on_command(String(data='{"action":"load","name":"old"}'))
+    node._publish_status()
+    status = json.loads(node._status_publisher.messages[-1].data)
+    assert status['last_command']['ok'], status['last_command']
+    assert node._obstacles.voxel_m == pytest.approx(0.10)          # parameter kept
+    assert node._obstacles.state().tolist() == [[1, 1, 5]]         # merged into one 10 cm voxel
+
+    # The next fused cloud keeps voxelising at 10 cm, and so does the message.
+    node._on_cloud(wall_cloud())
+    node._tick(now=1.0)
+    non_empty = [m for m in node._obstacle_publisher.messages if m.width > 0]
+    assert all(m.header.frame_id.endswith('|0.1') for m in non_empty), \
+        [m.header.frame_id for m in non_empty]
+
+
+def test_loading_a_map_coarser_than_the_parameter_adopts_its_size(node):
+    node._on_cloud(wall_cloud())
+    node._on_command(String(data='{"action":"save","name":"coarse"}'))
+    node._obstacles.replace(np.zeros((0, 3), dtype=np.int32), voxel_m=0.05)
+    node._on_command(String(data='{"action":"load","name":"coarse"}'))
+    assert node._obstacles.voxel_m == pytest.approx(0.10)

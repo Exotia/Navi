@@ -250,3 +250,16 @@ def test_payload_scheduler_forget_all_names_the_dead_and_keeps_the_comparator():
     scheduler.offer(voxel_payload([9, 9, 9]), now=10.0)
     assert scheduler.is_dirty((0, 0))
     assert calls == []  # never-published key: dirty without consulting `changed`
+
+
+def test_payload_scheduler_forget_one_key_drops_it_from_keepalive_and_says_if_published():
+    scheduler = PayloadScheduler()
+    scheduler.offer({**voxel_payload([1, 2, 3]), (1, 0): np.zeros((1, 3), dtype=np.int32)}, now=0.0)
+    scheduler.published((0, 0), voxel_payload([1, 2, 3])[(0, 0)], now=0.0)
+    assert scheduler.known_keys() == {(0, 0), (1, 0)}
+
+    assert scheduler.forget((0, 0)) is True       # the sim shows it: needs a blank
+    assert scheduler.forget((1, 0)) is False      # never went out: nothing to blank
+    assert scheduler.forget((7, 7)) is False      # unknown: harmless
+    assert scheduler.known_keys() == set()
+    assert scheduler.due(now=10.0) == []          # no keepalive of a forgotten key
