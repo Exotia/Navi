@@ -210,11 +210,13 @@ class ElevationMapper(Node):
         self._offer(self._now())
 
     def _on_pose(self, message: Odometry) -> None:
+        # Only remembers the rover's height. It does not re-offer: cutting
+        # the whole grid into tiles costs ~30 ms at the 60 m cap, and pose
+        # arrives at 15 Hz while the cloud (the thing that actually changes
+        # what there is to publish) arrives at ~1 Hz. The next _offer -
+        # from the next cloud, or from a load - uses whatever z is current
+        # by then, so the clamp is never more than one cloud tick stale.
         self._rover_z = float(message.pose.pose.position.z)
-        # The rover's height changed, which changes every clamped cell even
-        # though no new cloud arrived - re-offer so the scheduler notices
-        # and republishes what is now out of the clamp window.
-        self._offer(self._now())
 
     def _clamped_for_tiles(self, snapshot):
         """`snapshot`, or a copy clamped to the rover's height for

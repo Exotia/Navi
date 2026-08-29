@@ -282,14 +282,16 @@ def test_no_clamp_before_the_first_pose(node):
 
 
 def test_a_pose_clamps_published_cells_to_the_rover_height_but_never_top(node):
-    node._on_cloud(cloud([[0.1, 0.1, 5.0]]))
-    node._tick(now=0.0)
-    node._tile_publisher.messages.clear()
-
+    # _on_pose only remembers z_rover - it does not re-offer (see
+    # test_pose_alone_does_not_reoffer_tiles) - so the clamp is exercised
+    # here through the _offer that _on_cloud already triggers, with the
+    # pose set first.
     odometry = Odometry()
     odometry.pose.pose.position.z = 0.0
     node._on_pose(odometry)          # z_rover = 0.0; default clamp_above = 0.5
-    node._tick(now=2.0)              # past MIN_INTERVAL_S, and the tile changed
+
+    node._on_cloud(cloud([[0.1, 0.1, 5.0]]))
+    node._tick(now=0.0)
 
     assert len(node._tile_publisher.messages) == 1
     assert _only_finite_value(node._tile_publisher.messages[0]) == pytest.approx(0.5)
@@ -298,18 +300,54 @@ def test_a_pose_clamps_published_cells_to_the_rover_height_but_never_top(node):
 
 
 def test_a_pose_also_clamps_cells_below_the_rover_height(node):
-    node._on_cloud(cloud([[0.1, 0.1, -5.0]]))
-    node._tick(now=0.0)
-    node._tile_publisher.messages.clear()
-
     odometry = Odometry()
     odometry.pose.pose.position.z = 0.0
     node._on_pose(odometry)          # z_rover = 0.0; default clamp_below = 1.0
-    node._tick(now=2.0)
+
+    node._on_cloud(cloud([[0.1, 0.1, -5.0]]))
+    node._tick(now=0.0)
 
     assert len(node._tile_publisher.messages) == 1
     assert _only_finite_value(node._tile_publisher.messages[0]) == pytest.approx(-1.0)
     assert node._grid.snapshot().top[0, 0] == pytest.approx(-5.0)
+
+
+def test_pose_alone_does_not_reoffer_tiles(node, monkeypatch):
+    # _on_pose must be cheap: it only remembers z_rover. Re-cutting the
+    # grid into tiles costs ~30 ms at the 60 m cap, and pose arrives at
+    # 15 Hz while the cloud - the thing that actually changes what there
+    # is to publish - arrives at ~1 Hz, so _on_pose calling tiles_of_snapshot
+    # would burn ~half a core on the Jetson for nothing.
+    import navi_localization.elevation_mapper as elevation_mapper_module
+
+    node._on_cloud(cloud([[0.1, 0.1, 5.0]]))
+    node._tick(now=0.0)
+    published_before = list(node._tile_publisher.messages)
+    node._tile_publisher.messages.clear()
+
+    calls = []
+    real_tiles_of_snapshot = elevation_mapper_module.tiles_of_snapshot
+
+    def counting_tiles_of_snapshot(*args, **kwargs):
+        calls.append(1)
+        return real_tiles_of_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(elevation_mapper_module, 'tiles_of_snapshot', counting_tiles_of_snapshot)
+
+    for i in range(20):
+        odometry = Odometry()
+        odometry.pose.pose.position.z = float(i) * 0.1
+        node._on_pose(odometry)
+
+    assert calls == []          # _on_pose never re-cuts the grid into tiles
+
+    node._tick(now=5.0)         # past MIN_INTERVAL_S: a keepalive may go out
+    if node._tile_publisher.messages:
+        # Whatever the keepalive republishes is exactly what the last real
+        # _offer (from the cloud, before any pose arrived) computed - the
+        # 20 pose messages did not change it.
+        assert (_only_finite_value(node._tile_publisher.messages[-1])
+                == _only_finite_value(published_before[-1]))
 
 
 class ExplodingStore:
