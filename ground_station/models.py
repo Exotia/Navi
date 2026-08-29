@@ -116,21 +116,49 @@ class MapState:
     last_command: dict | None
 
 
+def _safe_int(value, default=0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_extent(value) -> tuple:
+    if not isinstance(value, list) or len(value) != 2:
+        return (0.0, 0.0)
+    try:
+        return (float(value[0]), float(value[1]))
+    except (TypeError, ValueError):
+        return (0.0, 0.0)
+
+
+def _safe_maps(value) -> list:
+    if not isinstance(value, list):
+        return []
+    return [str(name) for name in value]
+
+
 def parse_map_status(payload: str):
+    """A best-effort MapState from /localization/map_status's JSON.
+
+    The payload comes off the wire as whatever arrived: a field of the
+    wrong type (a string where a list was expected, a one-element extent,
+    non-numeric counts) must fall back to that field's default rather than
+    raise, the same defensive stance as pose_readout_from_odometry.
+    """
     try:
         status = json.loads(payload)
     except (json.JSONDecodeError, TypeError):
         return None
     if not isinstance(status, dict):
         return None
-    extent = status.get("extent_m") or [0.0, 0.0]
     last = status.get("last_command")
     return MapState(
-        cells_seen=int(status.get("cells_seen", 0) or 0),
-        extent_m=(float(extent[0]), float(extent[1])),
-        tiles=int(status.get("tiles", 0) or 0),
+        cells_seen=_safe_int(status.get("cells_seen", 0)),
+        extent_m=_safe_extent(status.get("extent_m")),
+        tiles=_safe_int(status.get("tiles", 0)),
         loaded=status.get("loaded") if isinstance(status.get("loaded"), str) else None,
-        maps=[str(name) for name in status.get("maps", []) or []],
+        maps=_safe_maps(status.get("maps", [])),
         last_command=last if isinstance(last, dict) else None)
 
 

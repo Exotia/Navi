@@ -150,6 +150,34 @@ def test_map_status_that_is_not_json_is_none():
     assert parse_map_status('[1,2]') is None
 
 
+def test_map_status_falls_back_to_defaults_on_type_malformed_fields():
+    # rosbridge hands the payload over as whatever JSON arrived; a field of
+    # the wrong shape must fall back to its default, not blow up the poll.
+    state = parse_map_status(json.dumps({
+        "extent_m": "not a list",
+        "cells_seen": "twelve",
+        "tiles": [1, 2],
+        "maps": {"a": 1},
+        "loaded": None,
+        "last_command": None,
+    }))
+    assert state == MapState(cells_seen=0, extent_m=(0.0, 0.0), tiles=0,
+                             loaded=None, maps=[], last_command=None)
+
+    # A one-element extent is malformed the same way a non-list one is.
+    short_extent = parse_map_status(json.dumps({"extent_m": [3.5]}))
+    assert short_extent.extent_m == (0.0, 0.0)
+
+    # A non-numeric entry inside an otherwise well-typed extent list.
+    bad_entry = parse_map_status(json.dumps({"extent_m": ["nope", 2.0]}))
+    assert bad_entry.extent_m == (0.0, 0.0)
+
+    # maps as a plain string (iterable, but not a list of names) must not
+    # be exploded into one-character map names.
+    string_maps = parse_map_status(json.dumps({"maps": "yard"}))
+    assert string_maps.maps == []
+
+
 def test_map_commands_are_the_json_the_rover_reads():
     assert json.loads(map_command_json("save", "yard")) == {"action": "save", "name": "yard"}
     assert json.loads(map_command_json("clear")) == {"action": "clear"}

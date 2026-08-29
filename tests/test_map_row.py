@@ -69,6 +69,23 @@ def test_clear_needs_confirmation(qtbot):
     assert emitted == [True]
 
 
+def test_a_stale_save_refusal_notice_clears_once_last_command_changes(qtbot):
+    row = MapRow()
+    qtbot.addWidget(row)
+    row.set_state(state())
+    row.ask_name = lambda: "has space"
+    row.save_button.click()
+    assert "refused" in row.status_label.text().lower()
+    # An unrelated update that repeats the same last_command (still None)
+    # must not wipe the refusal notice out from under the operator.
+    row.set_state(state())
+    assert "refused" in row.status_label.text().lower()
+    # A new last_command - even an unrelated one - means the refusal is
+    # no longer news, so the stale notice must not linger forever.
+    row.set_state(state(last_command={"action": "load", "name": "a", "ok": True}))
+    assert "refused" not in row.status_label.text().lower()
+
+
 def test_the_status_line_shows_size_loaded_map_and_the_last_command_outcome(qtbot):
     row = MapRow()
     qtbot.addWidget(row)

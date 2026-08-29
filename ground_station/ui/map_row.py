@@ -50,6 +50,10 @@ class MapRow(QWidget):
         self.set_state(None)
 
     def set_state(self, state) -> None:
+        previous_command = self._state.last_command if self._state is not None else None
+        new_command = state.last_command if state is not None else None
+        if new_command != previous_command:
+            self._notice = ""
         self._state = state
         enabled = state is not None
         if state is not None:
