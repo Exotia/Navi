@@ -27,6 +27,7 @@
          with no physics there is nothing to stand on, and its 1.68 M faces
          would be a punishing collision mesh for no benefit. -->
     <model name="ground">
+      <!-- GROUND_POSE -->
       <static>true</static>
       <link name="link">
         <collision name="collision">

@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from navi_sim_bringup.world_composition import (
-    MESH_PLACEHOLDER, SITE_SCAN_MARKER, compose_world, site_scan_required)
+    MESH_PLACEHOLDER, SEMI_GROUND_Z, SITE_SCAN_MARKER, compose_world, site_scan_required)
 
 WORLDS = Path(__file__).resolve().parent.parent / "worlds"
 WORLD = (WORLDS / "site.world").read_text()
@@ -63,3 +63,22 @@ def test_the_mesh_is_only_required_when_the_scan_is():
 def test_a_world_that_lost_the_marker_fails_loudly():
     with pytest.raises(RuntimeError):
         compose_world("<sdf><world name='x'></world></sdf>", SCAN, "semi", "")
+
+
+def ground_pose_z(world_text):
+    world = ET.fromstring(world_text).find("world")
+    ground = next(m for m in world.findall("model") if m.get("name") == "ground")
+    pose = ground.find("pose")
+    return 0.0 if pose is None else float(pose.text.split()[2])
+
+
+def test_semi_mode_lowers_the_ground_plane_under_the_map():
+    # The localised z on flat ground is about -0.55 (the ZED's origin is
+    # where it started, 0.55 m up); the plane at 0 would hide the rover
+    # and every terrain tile.
+    assert ground_pose_z(compose_world(WORLD, SCAN, "semi", "")) == SEMI_GROUND_Z
+    assert SEMI_GROUND_Z < -1.0
+
+
+def test_simulation_mode_keeps_the_ground_plane_at_zero():
+    assert ground_pose_z(compose_world(WORLD, SCAN, "simulation", "/tmp/mesh.obj")) == 0.0
