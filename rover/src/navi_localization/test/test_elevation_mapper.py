@@ -1,4 +1,5 @@
-"""The two conversions the map hangs on: a PointCloud2 in, a GridMap out.
+"""The two conversions the map hangs on: a PointCloud2 in, tiles and
+commands out.
 
 Needs grid_map_msgs and sensor_msgs importable, so:
   bash -c 'source /opt/ros/humble/setup.bash &&
@@ -6,16 +7,19 @@ Needs grid_map_msgs and sensor_msgs importable, so:
     rover/src/navi_localization/test/test_elevation_mapper.py -q'
 """
 
+import json
+
 import numpy as np
 import pytest
 import rclpy
 from builtin_interfaces.msg import Time
 from sensor_msgs.msg import PointCloud2, PointField
 
-from navi_localization.elevation_grid import GridSnapshot, RESOLUTION
 from navi_localization.elevation_mapper import (
-    FUSED_CLOUD_TOPIC, LAYER, ElevationMapper, build_grid_map_message,
-    points_from_cloud)
+    MAP_COMMAND_TOPIC, MAP_STATUS_TOPIC, MAP_TILE_TOPIC, ElevationMapper,
+    build_tile_message, points_from_cloud)
+from navi_localization.tiles import TILE_SAMPLES, tile_center, tile_index_of
+from std_msgs.msg import String
 
 
 def cloud(points, with_rgb=True):
@@ -78,74 +82,39 @@ def test_a_cloud_whose_xyz_fields_are_not_float32_is_refused():
         points_from_cloud(message)
 
 
-def snapshot():
-    # Two rows (y), three columns (x). Distinct values so a transposed or
-    # flipped conversion cannot pass by accident.
-    elevation = np.array([[1.0, 2.0, 3.0],
-                          [4.0, 5.0, np.nan]], dtype=np.float32)
-    return GridSnapshot(elevation=elevation, center_x=10.0, center_y=-5.0,
-                        resolution=RESOLUTION, origin_ix=0, origin_iy=0)
+def tile(value=1.0):
+    return np.full((TILE_SAMPLES, TILE_SAMPLES), value, dtype=np.float32)
 
 
-def test_the_message_carries_one_elevation_layer_in_the_map_frame():
-    message = build_grid_map_message(snapshot(), 'map', Time())
-
-    assert message.header.frame_id == 'map'
-    assert message.layers == [LAYER]
-    assert message.basic_layers == [LAYER]
-    assert len(message.data) == 1
-
-
-def test_the_message_geometry_is_the_snapshots():
-    message = build_grid_map_message(snapshot(), 'map', Time())
-
-    assert message.info.resolution == pytest.approx(RESOLUTION)
-    # grid_map's length_x counts the rows of its own matrix, which run along
-    # x - three columns of the snapshot, so 3 * RESOLUTION.
-    assert message.info.length_x == pytest.approx(3 * RESOLUTION)
-    assert message.info.length_y == pytest.approx(2 * RESOLUTION)
-    assert message.info.pose.position.x == pytest.approx(10.0)
-    assert message.info.pose.position.y == pytest.approx(-5.0)
-    assert message.info.pose.orientation.w == pytest.approx(1.0)
+def test_the_tile_message_is_a_51_sample_grid_map_centred_on_the_tile():
+    message = build_tile_message((2, -1), tile(), 'map', Time())
+    assert message.layers == ['elevation'] and message.basic_layers == ['elevation']
+    assert message.info.resolution == pytest.approx(0.05)
+    assert message.info.length_x == pytest.approx(2.55)
+    assert message.info.length_y == pytest.approx(2.55)
+    cx, cy = tile_center(2, -1)
+    assert message.info.pose.position.x == pytest.approx(cx)
+    assert message.info.pose.position.y == pytest.approx(cy)
+    assert tile_index_of(message.info.pose.position.x, message.info.pose.position.y) == (2, -1)
+    assert len(message.data[0].data) == TILE_SAMPLES * TILE_SAMPLES
+    assert message.outer_start_index == 0 and message.inner_start_index == 0
 
 
-def test_the_layout_is_the_column_major_one_grid_map_ros_writes():
-    layer = build_grid_map_message(snapshot(), 'map', Time()).data[0]
-
-    assert [dimension.label for dimension in layer.layout.dim] == [
-        'column_index', 'row_index']
-    assert layer.layout.dim[0].size == 2      # columns of the grid_map matrix
-    assert layer.layout.dim[0].stride == 6
-    assert layer.layout.dim[1].size == 3      # rows of the grid_map matrix
-    assert layer.layout.dim[1].stride == 3
-    assert len(layer.data) == 6
-
-
-def test_index_zero_is_the_cell_at_the_largest_x_and_largest_y():
-    # grid_map's convention: row index runs in -x, column index in -y, so
-    # (0, 0) is the far corner. In the snapshot that is the last column of
-    # the last row - the NaN.
-    layer = build_grid_map_message(snapshot(), 'map', Time()).data[0]
-
-    assert np.isnan(layer.data[0])
-    # Column-major: index 1 is grid_map row 1, column 0 - one cell towards
-    # -x from the corner, i.e. snapshot row 1, column 1.
-    assert layer.data[1] == pytest.approx(5.0)
-    # The last element is grid_map (row 2, column 1): snapshot (0, 0).
-    assert layer.data[5] == pytest.approx(1.0)
-
-
-def test_the_circular_buffer_indices_are_left_at_zero():
-    message = build_grid_map_message(snapshot(), 'map', Time())
-
-    assert message.outer_start_index == 0
-    assert message.inner_start_index == 0
+def test_the_tile_layout_is_grid_maps_column_major_with_index_zero_at_max_x_max_y():
+    values = tile(np.nan)
+    values[0, 0] = 1.0          # smallest y, smallest x
+    values[50, 50] = 9.0        # largest y, largest x
+    message = build_tile_message((0, 0), values, 'map', Time())
+    data = message.data[0]
+    assert data.layout.dim[0].label == 'column_index'
+    assert data.data[0] == 9.0
+    assert data.data[-1] == 1.0
 
 
 # Node-level tests: the node is exercised with messages fed straight into its
-# callbacks and its publisher replaced with a recorder, the same pattern
+# callbacks and its publishers replaced with recorders, the same pattern
 # test_localization_status.py uses. No spinning, no executor - the timer is
-# ticked by calling _publish_if_changed() directly.
+# ticked by calling _tick() directly.
 
 
 class Recorder:
@@ -164,45 +133,33 @@ def ros():
 
 
 @pytest.fixture
-def node():
-    n = ElevationMapper()
-    n._publisher = Recorder()
-    yield n
-    n.destroy_node()
+def node(ros, tmp_path):
+    node = ElevationMapper(map_directory=str(tmp_path))
+    node._tile_publisher = Recorder()
+    node._status_publisher = Recorder()
+    yield node
+    node.destroy_node()
 
 
-def test_a_cloud_then_a_tick_publishes_one_grid_map(node):
-    node._on_cloud(cloud([(0.05, 0.05, 1.0), (0.25, 0.05, 2.0)]))
-    node._publish_if_changed()
-
-    assert len(node._publisher.messages) == 1
-    message = node._publisher.messages[0]
-    assert message.header.frame_id == 'map'
-    assert message.layers == [LAYER]
-    assert message.info.resolution == pytest.approx(RESOLUTION)
-    layer = message.data[0]
-    assert len(layer.data) == layer.layout.dim[0].size * layer.layout.dim[1].size
+def points_at(x0, y0, n=60, z=1.0):
+    return [[x0 + 0.05 * i, y0 + 0.05 * j, z] for i in range(n) for j in range(2)]
 
 
-def test_a_second_tick_without_a_new_cloud_publishes_nothing(node):
-    node._on_cloud(cloud([(0.05, 0.05, 1.0), (0.25, 0.05, 2.0)]))
-    node._publish_if_changed()
+def test_a_cloud_then_a_tick_publishes_the_tiles_it_touched(node):
+    node._on_cloud(cloud(points_at(0.1, 0.1)))     # x 0.1..3.05: tiles 0 and 1
+    node._tick(now=0.0)
+    keys = sorted(tile_index_of(m.info.pose.position.x, m.info.pose.position.y)
+                  for m in node._tile_publisher.messages)
+    assert keys == [(0, 0), (1, 0)]
 
-    node._publish_if_changed()
 
-    assert len(node._publisher.messages) == 1
-
-
-def test_a_changed_cloud_then_a_tick_publishes_again(node):
-    node._on_cloud(cloud([(0.05, 0.05, 1.0), (0.25, 0.05, 2.0)]))
-    node._publish_if_changed()
-
-    # Same cell, different z - the grid replaces rather than accumulates, so
-    # this changes the published mean and should trigger a republish.
-    node._on_cloud(cloud([(0.05, 0.05, 9.0), (0.25, 0.05, 2.0)]))
-    node._publish_if_changed()
-
-    assert len(node._publisher.messages) == 2
+def test_an_unchanged_map_sends_one_keepalive_tile_per_tick(node):
+    node._on_cloud(cloud(points_at(0.1, 0.1)))
+    node._tick(now=0.0)
+    node._tile_publisher.messages.clear()
+    node._tick(now=2.0)
+    node._tick(now=3.0)
+    assert len(node._tile_publisher.messages) == 2
 
 
 def test_a_malformed_cloud_is_logged_and_does_not_publish(node):
@@ -210,24 +167,63 @@ def test_a_malformed_cloud_is_logged_and_does_not_publish(node):
     message.fields[0].name = 'intensity'
 
     node._on_cloud(message)
-    node._publish_if_changed()
+    node._tick(now=0.0)
 
-    assert node._publisher.messages == []
-
-
-def test_the_node_subscribes_only_the_fused_cloud_topic(node):
-    topics = [s.topic_name for s in node.subscriptions]
-    assert topics == [FUSED_CLOUD_TOPIC]
+    assert node._tile_publisher.messages == []
 
 
-def test_an_unchanged_map_is_resent_once_the_keepalive_has_elapsed(node):
-    # A late joiner - terrain_writer starting after the map stopped growing,
-    # or a restarted bridge - would otherwise never see the map at all.
-    node._on_cloud(cloud([(0.05, 0.05, 1.0), (0.25, 0.05, 2.0)]))
-    node._publish_if_changed()
-    assert len(node._publisher.messages) == 1
-    node._last_publish_time -= 11.0     # pretend 11 s passed (keepalive is 10)
+def test_a_save_command_writes_the_file_and_the_status_reports_it(node, tmp_path):
+    node._on_cloud(cloud(points_at(0.1, 0.1)))
+    node._on_command(String(data='{"action":"save","name":"yard"}'))
+    assert (tmp_path / 'yard.npz').exists()
+    node._publish_status()
+    status = json.loads(node._status_publisher.messages[-1].data)
+    assert status['maps'] == ['yard']
+    assert status['last_command'] == {**status['last_command'], 'action': 'save',
+                                      'name': 'yard', 'ok': True, 'error': None}
+    assert status['resolution'] == 0.05 and status['cells_seen'] > 0
+    assert status['loaded'] is None
 
-    node._publish_if_changed()
 
-    assert len(node._publisher.messages) == 2
+def test_a_bad_command_is_reported_not_raised(node):
+    node._on_command(String(data='not json'))
+    node._on_command(String(data='{"action":"save","name":"bad name"}'))
+    node._on_command(String(data='{"action":"teleport"}'))
+    node._publish_status()
+    last = json.loads(node._status_publisher.messages[-1].data)['last_command']
+    assert last['ok'] is False and 'teleport' in last['error']
+
+
+def test_load_replaces_the_grid_and_republishes_every_tile(node):
+    node._on_cloud(cloud(points_at(0.1, 0.1)))
+    node._on_command(String(data='{"action":"save","name":"yard"}'))
+    node._on_cloud(cloud(points_at(10.0, 10.0)))
+    node._tick(now=0.0)
+    node._tile_publisher.messages.clear()
+
+    node._on_command(String(data='{"action":"load","name":"yard"}'))
+    node._tick(now=5.0)
+    keys = sorted(tile_index_of(m.info.pose.position.x, m.info.pose.position.y)
+                  for m in node._tile_publisher.messages)
+    assert keys == [(0, 0), (1, 0)]
+    node._publish_status()
+    assert json.loads(node._status_publisher.messages[-1].data)['loaded'] == 'yard'
+
+
+def test_clear_empties_the_grid_and_sends_every_published_tile_once_more_as_nan(node):
+    node._on_cloud(cloud(points_at(0.1, 0.1)))
+    node._tick(now=0.0)
+    node._tile_publisher.messages.clear()
+    node._on_command(String(data='{"action":"clear"}'))
+    messages = node._tile_publisher.messages
+    assert len(messages) == 2
+    assert all(np.isnan(np.asarray(m.data[0].data)).all() for m in messages)
+    node._publish_status()
+    status = json.loads(node._status_publisher.messages[-1].data)
+    assert status['cells_seen'] == 0 and status['tiles'] == 0
+
+
+def test_the_node_talks_on_exactly_the_three_map_topics(node):
+    names = {name for name, _ in node.get_topic_names_and_types()}
+    assert {MAP_TILE_TOPIC, MAP_COMMAND_TOPIC, MAP_STATUS_TOPIC} <= names
+    assert '/localization/map' not in names

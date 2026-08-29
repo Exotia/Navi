@@ -1,9 +1,11 @@
-"""Publishes /localization/map: the ground the rover has actually seen.
+"""Publishes the map as tiles, and answers save/load/clear commands.
 
 Input is the ZED SDK's fused point cloud, which the wrapper publishes in the
 map frame - the same frame and the same tracking as /localization/pose, so
 the map and the pose cannot drift apart relative to each other. Output is a
-grid_map_msgs/GridMap with a single `elevation` layer.
+stream of grid_map_msgs/GridMap tiles, one `elevation` layer each, on
+/localization/map_tile, plus JSON status on /localization/map_status and
+JSON commands accepted on /localization/map_command.
 
 The cloud is read with numpy rather than sensor_msgs_py.point_cloud2:
 ZedCamera::callback_pubFusedPc lays every point out as four float32s
@@ -18,23 +20,28 @@ running is what makes the SDK do the mapping work at all. When it is not
 running, the topic is silent and the GPU is not spending anything on it -
 that is by design, not a fault.
 
-Measured on the Orin 2026-08-29 with the camera on the bench: fused cloud
-0.50 Hz / ~0.2 MB per message (99 KB/s), map published at 0.50 Hz while
-the scene was still being explored, 6.4 x 7.3 m (64 x 73 cells) after
-about 60 s. Mapper CPU not captured (the measurement was cut short).
+Measured numbers: see launch/localization.launch.py.
 """
+
+import json
+from datetime import datetime, timezone
 
 import numpy as np
 import rclpy
 from grid_map_msgs.msg import GridMap
 from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2, PointField
-from std_msgs.msg import Float32MultiArray, MultiArrayDimension
+from std_msgs.msg import Float32MultiArray, MultiArrayDimension, String
 
 from navi_localization.elevation_grid import RESOLUTION, ElevationGrid
+from navi_localization.map_store import DEFAULT_DIRECTORY, MapStore, MapStoreError
+from navi_localization.tiles import (
+    TILE_SAMPLES, TileScheduler, tile_center, tiles_of_snapshot)
 
 FUSED_CLOUD_TOPIC = '/zed_front/zed_node/mapping/fused_cloud'
-MAP_TOPIC = '/localization/map'
+MAP_TILE_TOPIC = '/localization/map_tile'
+MAP_COMMAND_TOPIC = '/localization/map_command'
+MAP_STATUS_TOPIC = '/localization/map_status'
 LAYER = 'elevation'
 
 
@@ -63,38 +70,33 @@ def points_from_cloud(message: PointCloud2) -> np.ndarray:
     return floats.reshape(-1, stride)[:, :3].astype(np.float64)
 
 
-def build_grid_map_message(snapshot, frame_id: str, stamp) -> GridMap:
-    """A GridMap with one `elevation` layer, in grid_map's own index order.
+def build_tile_message(key, tile: np.ndarray, frame_id: str, stamp) -> GridMap:
+    """One tile as a GridMap, in grid_map's own index order.
 
-    grid_map's convention is not the obvious one: index (0, 0) is the cell at
-    the *maximum* x and maximum y, the row index runs in -x and the column
-    index in -y, and the data is column-major - which is what grid_map_ros's
-    matrixEigenCopyToMultiArrayMessage produces from an Eigen matrix. The
-    snapshot stores the opposite (row 0 at minimum y, column 0 at minimum x),
-    so both axes are reversed and the result transposed. Getting this right
-    is what lets rviz's grid_map plugin and terrain_writer read the same
-    message without either of them needing a special case.
+    grid_map's convention: index (0, 0) is the sample at the *maximum* x
+    and maximum y, rows run in -x, columns in -y, data column-major. The
+    tile array is the opposite (row 0 at minimum y, column 0 at minimum
+    x), so both axes are reversed and the result transposed.
     """
-    grid = snapshot.elevation[::-1, ::-1].T
+    grid = np.asarray(tile, dtype=np.float32)[::-1, ::-1].T
     n_rows, n_cols = grid.shape
-
     layer = Float32MultiArray()
     layer.layout.dim = [
-        MultiArrayDimension(label='column_index', size=n_cols,
-                            stride=n_rows * n_cols),
+        MultiArrayDimension(label='column_index', size=n_cols, stride=n_rows * n_cols),
         MultiArrayDimension(label='row_index', size=n_rows, stride=n_rows),
     ]
     layer.layout.data_offset = 0
-    layer.data = grid.flatten(order='F').astype(np.float32).tolist()
+    layer.data = grid.flatten(order='F').tolist()
 
+    center_x, center_y = tile_center(*key)
     message = GridMap()
     message.header.frame_id = frame_id
     message.header.stamp = stamp
-    message.info.resolution = float(snapshot.resolution)
-    message.info.length_x = float(n_rows * snapshot.resolution)
-    message.info.length_y = float(n_cols * snapshot.resolution)
-    message.info.pose.position.x = float(snapshot.center_x)
-    message.info.pose.position.y = float(snapshot.center_y)
+    message.info.resolution = float(RESOLUTION)
+    message.info.length_x = float(n_rows * RESOLUTION)
+    message.info.length_y = float(n_cols * RESOLUTION)
+    message.info.pose.position.x = float(center_x)
+    message.info.pose.position.y = float(center_y)
     message.info.pose.position.z = 0.0
     message.info.pose.orientation.w = 1.0
     message.layers = [LAYER]
@@ -107,43 +109,40 @@ def build_grid_map_message(snapshot, frame_id: str, stamp) -> GridMap:
 
 class ElevationMapper(Node):
 
-    def __init__(self) -> None:
+    def __init__(self, map_directory: str = None) -> None:
         super().__init__('elevation_mapper')
         self.declare_parameter('cloud_topic', FUSED_CLOUD_TOPIC)
         self.declare_parameter('frame_id', 'map')
-        # 0.5 Hz, the spec's rate. At the 60 x 60 m ceiling one publish is
-        # 600 * 600 * 4 = 1.44 MB, which a wired link carries without
-        # noticing; a run's real map is far smaller.
-        self.declare_parameter('publish_interval_seconds', 2.0)
-        # A map that only ever goes out when it changes is invisible to anyone
-        # who joins after the last change - terrain_writer starting a minute
-        # into a run, or a restarted bridge. The keepalive resends the current
-        # map at this interval even when nothing changed; on a wired link a
-        # 1.4 MB message every 10 s is nothing.
-        self.declare_parameter('keepalive_seconds', 10.0)
+        self.declare_parameter('tick_seconds', 1.0)
+        self.declare_parameter('map_directory', map_directory or DEFAULT_DIRECTORY)
 
         self._frame_id = str(self.get_parameter('frame_id').value)
         self._grid = ElevationGrid()
-        self._last_published = None
-        self._last_publish_time = None
+        self._scheduler = TileScheduler()
+        self._store = MapStore(str(self.get_parameter('map_directory').value))
+        self._loaded = None
+        self._last_command = None
         self._warned_about_cap = False
 
-        # Default QoS on both sides: reliable, volatile, depth 1. Not
-        # transient-local, deliberately - sim_bridge relays this topic with
-        # a generic subscription, and a durability mismatch there would mean
-        # no data at all rather than late data. A late-joining simulation
-        # gets the map on the next publish, at most two seconds later.
-        self._publisher = self.create_publisher(GridMap, MAP_TOPIC, 1)
+        # Default QoS: reliable, volatile, depth 1 - sim_bridge relays this
+        # topic with a generic subscription and a durability mismatch there
+        # would mean no data at all. Late joiners get the keepalive.
+        self._tile_publisher = self.create_publisher(GridMap, MAP_TILE_TOPIC, 8)
+        self._status_publisher = self.create_publisher(String, MAP_STATUS_TOPIC, 1)
         self.create_subscription(
-            PointCloud2, str(self.get_parameter('cloud_topic').value),
-            self._on_cloud, 1)
-        self.create_timer(
-            float(self.get_parameter('publish_interval_seconds').value),
-            self._publish_if_changed)
+            PointCloud2, str(self.get_parameter('cloud_topic').value), self._on_cloud, 1)
+        self.create_subscription(String, MAP_COMMAND_TOPIC, self._on_command, 4)
+        self.create_timer(float(self.get_parameter('tick_seconds').value), self._tick)
+        self.create_timer(1.0, self._publish_status)
 
         self.get_logger().info(
-            f"mapping {self.get_parameter('cloud_topic').value} into "
-            f"{MAP_TOPIC} at {RESOLUTION} m cells")
+            f"mapping {self.get_parameter('cloud_topic').value} into {MAP_TILE_TOPIC} "
+            f"({RESOLUTION} m cells, 2.5 m tiles); maps under {self._store.directory}")
+
+    # -- mapping ----------------------------------------------------------
+
+    def _now(self) -> float:
+        return self.get_clock().now().nanoseconds / 1e9
 
     def _on_cloud(self, message: PointCloud2) -> None:
         try:
@@ -158,27 +157,96 @@ class ElevationMapper(Node):
                 f"{self._grid.points_outside_cap} points fell outside the "
                 "60 x 60 m map and were dropped; the map stays where it "
                 "started rather than sliding and forgetting ground")
+        self._offer(self._now())
 
-    def _publish_if_changed(self) -> None:
+    def _offer(self, now: float) -> None:
+        snapshot = self._grid.snapshot()
+        if snapshot is not None:
+            self._scheduler.offer(tiles_of_snapshot(snapshot), now)
+
+    def _tick(self, now: float = None) -> None:
+        now = self._now() if now is None else now
+        stamp = self.get_clock().now().to_msg()
+        for key, tile in self._scheduler.due(now):
+            self._tile_publisher.publish(build_tile_message(key, tile, self._frame_id, stamp))
+            self._scheduler.published(key, tile, now)
+
+    # -- commands ---------------------------------------------------------
+
+    def _on_command(self, message: String) -> None:
+        command = {}
+        try:
+            command = json.loads(message.data)
+            if not isinstance(command, dict):
+                raise ValueError("command is not a JSON object")
+            action = str(command.get('action', ''))
+            name = command.get('name')
+            if action == 'save':
+                self._save(name, bool(command.get('overwrite', False)))
+            elif action == 'load':
+                self._load(name)
+            elif action == 'clear':
+                self._clear()
+            else:
+                raise ValueError(f"unknown action {action!r}; save, load or clear")
+            self._record(action, name, None)
+        except (ValueError, MapStoreError, json.JSONDecodeError) as error:
+            self.get_logger().error(f"map command refused: {error}")
+            self._record(command.get('action') if isinstance(command, dict) else None,
+                         command.get('name') if isinstance(command, dict) else None,
+                         str(error))
+
+    def _record(self, action, name, error) -> None:
+        self._last_command = {
+            'action': action, 'name': name, 'ok': error is None, 'error': error,
+            'at': datetime.now(timezone.utc).isoformat(timespec='seconds')}
+
+    def _save(self, name, overwrite: bool) -> None:
+        state = self._grid.state()
+        if state is None:
+            raise ValueError("nothing to save: the map is empty")
+        path = self._store.save(name, state, overwrite=overwrite)
+        self.get_logger().info(f"map saved to {path}")
+
+    def _load(self, name) -> None:
+        state = self._store.load(name)
+        self._grid.replace(state)
+        self._loaded = name
+        # A load replaces the grid outright, so the scheduler's memory of
+        # the previous grid is dropped too: without this, a tile the live
+        # map had touched but the loaded map does not cover would stay in
+        # _latest/_round_robin and be marked dirty below, republishing a
+        # tile that no longer belongs to the map at all.
+        self._scheduler.forget_all()
+        self._offer(self._now())
+        self._scheduler.mark_all_dirty()
+        self.get_logger().info(f"map {name!r} loaded; republishing every tile")
+
+    def _clear(self) -> None:
+        self._grid.clear()
+        self._loaded = None
+        stamp = self.get_clock().now().to_msg()
+        empty = np.full((TILE_SAMPLES, TILE_SAMPLES), np.nan, dtype=np.float32)
+        for key in self._scheduler.forget_all():
+            self._tile_publisher.publish(build_tile_message(key, empty, self._frame_id, stamp))
+        self.get_logger().info("map cleared")
+
+    # -- status -----------------------------------------------------------
+
+    def _publish_status(self) -> None:
         snapshot = self._grid.snapshot()
         if snapshot is None:
-            return
-        now = self.get_clock().now().nanoseconds / 1e9
-        keepalive = float(self.get_parameter('keepalive_seconds').value)
-        stale = (self._last_publish_time is None or
-                 now - self._last_publish_time >= keepalive)
-        if snapshot.equals(self._last_published) and not stale:
-            return
-        if self._last_published is None or \
-                snapshot.elevation.shape != self._last_published.elevation.shape:
+            cells, extent, tiles = 0, [0.0, 0.0], 0
+        else:
+            seen = np.isfinite(snapshot.elevation)
+            cells = int(seen.sum())
             rows, cols = snapshot.elevation.shape
-            self.get_logger().info(
-                f"map is now {cols * snapshot.resolution:.1f} x "
-                f"{rows * snapshot.resolution:.1f} m ({cols} x {rows} cells)")
-        self._publisher.publish(build_grid_map_message(
-            snapshot, self._frame_id, self.get_clock().now().to_msg()))
-        self._last_published = snapshot
-        self._last_publish_time = now
+            extent = [round(cols * RESOLUTION, 2), round(rows * RESOLUTION, 2)]
+            tiles = len(tiles_of_snapshot(snapshot))
+        self._status_publisher.publish(String(data=json.dumps({
+            'resolution': RESOLUTION, 'cells_seen': cells, 'extent_m': extent,
+            'tiles': tiles, 'loaded': self._loaded, 'maps': self._store.list_names(),
+            'last_command': self._last_command})))
 
 
 def main(args=None) -> None:
