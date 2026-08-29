@@ -11,11 +11,13 @@ import numpy as np
 import pytest
 import rclpy
 from grid_map_msgs.msg import GridMap
+from sensor_msgs.msg import PointCloud2, PointField
 from std_msgs.msg import Float32MultiArray, MultiArrayDimension
 
 from navi_sim_bringup.terrain_writer import (
     LAYER, LEFTOVER_MODEL_RE, TerrainWriter, TileRespawnPolicy,
-    elevation_from_message, model_name, tile_index_of)
+    elevation_from_message, model_name, obstacle_centres_from_message,
+    obstacle_key_from_frame_id, tile_index_of)
 
 
 def message(grid_rows, grid_cols, values, resolution=0.10,
@@ -79,9 +81,15 @@ def test_a_circular_buffer_message_is_refused_rather_than_read_wrongly():
 
 
 def test_model_names_are_unique_per_generation():
-    assert model_name((3, -2), 0, 'a1b2c3') == 'terrain_3_-2_a1b2c3_g0'
-    assert model_name((3, -2), 1, 'a1b2c3') == 'terrain_3_-2_a1b2c3_g1'
-    assert model_name((3, -2), 2, 'a1b2c3') == 'terrain_3_-2_a1b2c3_g2'
+    assert model_name(('terrain', 3, -2), 0, 'a1b2c3') == 'terrain_3_-2_a1b2c3_g0'
+    assert model_name(('terrain', 3, -2), 1, 'a1b2c3') == 'terrain_3_-2_a1b2c3_g1'
+    assert model_name(('terrain', 3, -2), 2, 'a1b2c3') == 'terrain_3_-2_a1b2c3_g2'
+
+
+def test_obstacle_model_names_use_the_obst_kind():
+    assert model_name(('obst', 3, -2), 0, 'a1b2c3') == 'obst_3_-2_a1b2c3_g0'
+    assert (model_name(('obst', 3, -2), 0, 'a1b2c3')
+            != model_name(('terrain', 3, -2), 0, 'a1b2c3'))
 
 
 def test_model_names_from_different_runs_never_collide():
@@ -89,8 +97,8 @@ def test_model_names_from_different_runs_never_collide():
     # only thing keeping a fresh spawn off a leftover of the same tile whose
     # delete has not confirmed yet.
     for generation in range(3):
-        assert (model_name((3, -2), generation, 'a1b2c3')
-                != model_name((3, -2), generation, 'd4e5f6'))
+        assert (model_name(('terrain', 3, -2), generation, 'a1b2c3')
+                != model_name(('terrain', 3, -2), generation, 'd4e5f6'))
 
 
 def test_the_leftover_sweep_matches_tile_models_from_any_run_and_any_build():
@@ -99,6 +107,8 @@ def test_the_leftover_sweep_matches_tile_models_from_any_run_and_any_build():
     assert LEFTOVER_MODEL_RE.match('terrain_3_-2_g0')            # before run ids
     assert LEFTOVER_MODEL_RE.match('terrain_3_-2_a')             # the a/b build
     assert LEFTOVER_MODEL_RE.match('terrain_3_-2_b')
+    assert LEFTOVER_MODEL_RE.match('obst_3_-2_a1b2c3_g0')        # the obstacle kind
+    assert LEFTOVER_MODEL_RE.match('obst_-4_11_ffffff_g137')
     assert not LEFTOVER_MODEL_RE.match('terrain_of_someone_else')
     assert not LEFTOVER_MODEL_RE.match('rover')
     assert not LEFTOVER_MODEL_RE.match('ground_plane')
@@ -111,8 +121,8 @@ def test_two_writers_never_name_the_same_tile_generation_alike(tmp_path):
     try:
         assert first._run_id != second._run_id
         for generation in range(3):
-            assert (model_name((0, 0), generation, first._run_id)
-                    != model_name((0, 0), generation, second._run_id))
+            assert (model_name(('terrain', 0, 0), generation, first._run_id)
+                    != model_name(('terrain', 0, 0), generation, second._run_id))
     finally:
         first.destroy_node()
         second.destroy_node()
@@ -253,13 +263,13 @@ def writer(tmp_path):
     rclpy.shutdown()
 
 
-def tile_name(writer, generation, key=(0, 0)):
+def tile_name(writer, generation, key=(0, 0), kind='terrain'):
     """The model name `writer` gives `key`'s `generation`-th spawn.
 
     Not a literal: the name carries the writer's own random run id, which
     is what keeps a restarted node's spawns off a previous run's leftovers.
     """
-    return model_name(key, generation, writer._run_id)
+    return model_name((kind,) + tuple(key), generation, writer._run_id)
 
 
 def tile_message(key, value=1.0):
@@ -267,6 +277,28 @@ def tile_message(key, value=1.0):
     cx, cy = tile_center(*key)
     values = [value] * (TILE_SAMPLES * TILE_SAMPLES)
     return message(TILE_SAMPLES, TILE_SAMPLES, values, resolution=0.05, center=(cx, cy))
+
+
+def obstacle_tile_message(ix, iy, centres=()):
+    """A PointCloud2 laid out the way the rover's obstacle-tile publisher
+    writes it: x/y/z float32 tightly packed, frame_id 'map|<ix>|<iy>' -
+    the only place tile identity can travel for an empty (all-clear) tile."""
+    centres = np.asarray(list(centres), dtype='<f4').reshape(-1, 3)
+    out = PointCloud2()
+    out.header.frame_id = f'map|{ix}|{iy}'
+    out.height = 1
+    out.width = centres.shape[0]
+    out.is_bigendian = False
+    out.is_dense = True
+    out.point_step = 12
+    out.row_step = out.point_step * out.width
+    out.fields = [
+        PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
+        PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
+        PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
+    ]
+    out.data = centres.tobytes()
+    return out
 
 
 def test_the_replacement_is_spawned_before_the_old_tile_is_deleted(writer):
@@ -302,7 +334,7 @@ def test_a_failed_spawn_leaves_the_old_tile_and_deletes_nothing(writer):
     writer._clock_fn.set(2.0)
     writer._spawn.calls[1][1].resolve(Response(False, 'nope'))
     assert writer._delete.calls == []
-    assert writer._current[(0, 0)] == tile_name(writer, 0)
+    assert writer._current[('terrain', 0, 0)] == tile_name(writer, 0)
 
 
 def test_an_all_nan_tile_deletes_the_model(writer):
@@ -349,7 +381,7 @@ def test_a_dispatch_error_does_not_strand_the_tile_in_flight(writer):
     assert writer._policy._in_flight == set()
     due = writer._policy.next_due(now=1.0)
     assert len(due) == 1
-    assert due[0][0] == (0, 0)
+    assert due[0][0] == ('terrain', 0, 0)
 
 
 class CollidingSpawnService(FakeService):
@@ -425,7 +457,7 @@ def test_a_delete_is_untracked_and_the_mesh_unlinked_once_the_model_list_confirm
     writer._pump(now=0.0)
     writer._clock_fn.set(0.0)
     writer._spawn.calls[0][1].resolve(Response())
-    old_mesh = writer._mesh_file[(0, 0)]
+    old_mesh = writer._mesh_file[('terrain', 0, 0)]
     old_mesh_path = os.path.join(writer._mesh_dir, old_mesh)
     assert os.path.exists(old_mesh_path)
 
@@ -595,10 +627,10 @@ def test_no_more_than_four_factory_requests_are_outstanding_at_once_under_a_burs
         assert_budget_ok()
         resolve_pending()
         t += 1.1
-        if all(writer._generation.get((i, 0)) == 1 for i in range(10)) and not writer._doomed:
+        if all(writer._generation.get(('terrain', i, 0)) == 1 for i in range(10)) and not writer._doomed:
             break
 
-    assert all(writer._generation.get((i, 0)) == 1 for i in range(10))
+    assert all(writer._generation.get(('terrain', i, 0)) == 1 for i in range(10))
     assert writer._doomed == {}
 
 
@@ -613,7 +645,7 @@ def test_deletes_and_spawns_share_one_factory_budget_not_one_each(writer):
     requests chasing one shared budget of four - all in a single `_pump`.
     """
     for i in range(3):
-        writer._doomed[model_name((i, 0), 0, writer._run_id)] = {
+        writer._doomed[model_name(('terrain', i, 0), 0, writer._run_id)] = {
             'mesh_name': None, 'attempts': 0, 'last_attempt': float('-inf'),
             'in_flight': False, 'confirmed_at': None,
         }
@@ -644,7 +676,7 @@ def test_leftover_terrain_models_from_a_previous_run_are_deleted_through_the_bou
             'terrain_5_5_g0',                   # a build from before run ids
             'terrain_-2_4_b',                   # the original a/b build
         ]
-        mine = model_name((0, 0), 0, node._run_id)
+        mine = model_name(('terrain', 0, 0), 0, node._run_id)
 
         node._pump(now=0.0)                    # triggers the start-up leftover scan
         assert len(node._model_list.calls) == 1
@@ -775,7 +807,7 @@ def test_a_late_answer_after_the_timeout_does_not_release_a_second_slot(writer):
     writer._clock_fn.set(11.1)
     writer._spawn.calls[1][1].resolve(Response())   # the retry lands normally
     assert writer._factory_in_flight == 0
-    assert writer._current[(0, 0)] == tile_name(writer, 1)
+    assert writer._current[('terrain', 0, 0)] == tile_name(writer, 1)
 
 
 def test_a_late_delete_answer_after_the_timeout_does_not_double_release(writer):
@@ -873,7 +905,7 @@ def test_giving_up_on_a_delete_still_unlinks_its_mesh(writer):
     writer._pump(now=0.0)
     writer._clock_fn.set(0.0)
     writer._spawn.calls[0][1].resolve(Response())
-    mesh_path = os.path.join(writer._mesh_dir, writer._mesh_file[(0, 0)])
+    mesh_path = os.path.join(writer._mesh_dir, writer._mesh_file[('terrain', 0, 0)])
     assert os.path.exists(mesh_path)
 
     writer._on_tile(tile_message((0, 0), float('nan')))     # the tile goes away
@@ -904,3 +936,148 @@ def test_a_tile_message_with_no_layout_is_logged_not_raised(writer):
     writer._on_tile(broken)                                  # IndexError, not ValueError
 
     assert writer._policy._pending == {}
+
+
+def test_obstacle_key_from_frame_id_parses_map_ix_iy():
+    assert obstacle_key_from_frame_id('map|3|-2') == ('obst', 3, -2)
+
+
+def test_obstacle_key_from_frame_id_refuses_anything_else():
+    with pytest.raises(ValueError):
+        obstacle_key_from_frame_id('map')
+    with pytest.raises(ValueError):
+        obstacle_key_from_frame_id('odom|3|-2')
+    with pytest.raises(ValueError):
+        obstacle_key_from_frame_id('map|three|-2')
+
+
+def test_obstacle_centres_from_message_reads_xyz_back():
+    centres = obstacle_centres_from_message(
+        obstacle_tile_message(0, 0, [(0.025, 0.075, 0.125), (1.0, 2.0, 3.0)]))
+    assert centres.shape == (2, 3)
+    assert centres[0] == pytest.approx([0.025, 0.075, 0.125])
+    assert centres[1] == pytest.approx([1.0, 2.0, 3.0])
+
+
+def test_obstacle_centres_from_message_is_empty_for_an_empty_tile():
+    centres = obstacle_centres_from_message(obstacle_tile_message(0, 0, []))
+    assert centres.shape == (0, 3)
+
+
+def test_obstacle_centres_from_message_refuses_the_wrong_point_step():
+    broken = obstacle_tile_message(0, 0, [(0.025, 0.025, 0.025)])
+    broken.point_step = 16
+    with pytest.raises(ValueError):
+        obstacle_centres_from_message(broken)
+
+
+def test_obstacle_centres_from_message_refuses_the_wrong_fields():
+    broken = obstacle_tile_message(0, 0, [(0.025, 0.025, 0.025)])
+    broken.fields = [PointField(name='x', offset=0, datatype=PointField.FLOAT64, count=1)]
+    with pytest.raises(ValueError):
+        obstacle_centres_from_message(broken)
+
+
+def test_an_obstacle_tile_spawns_a_grey_obst_model_with_its_mesh_file(writer):
+    writer._on_obstacle_tile(obstacle_tile_message(0, 0, [(0.025, 0.025, 0.025)]))
+    writer._pump(now=0.0)
+
+    assert len(writer._spawn.calls) == 1
+    request, future = writer._spawn.calls[0]
+    assert request.name == tile_name(writer, 0, kind='obst')
+    assert '0.55 0.55 0.58' in request.xml          # obstacle_sdf's grey material
+
+    writer._clock_fn.set(0.0)
+    future.resolve(Response())
+
+    assert writer._current[('obst', 0, 0)] == tile_name(writer, 0, kind='obst')
+    mesh_name = writer._mesh_file[('obst', 0, 0)]
+    assert mesh_name.startswith('obst_0_0_v')
+    assert os.path.exists(os.path.join(writer._mesh_dir, mesh_name))
+
+
+def test_an_empty_obstacle_tile_removes_the_model(writer):
+    writer._on_obstacle_tile(obstacle_tile_message(0, 0, [(0.025, 0.025, 0.025)]))
+    writer._pump(now=0.0)
+    writer._clock_fn.set(0.0)
+    writer._spawn.calls[0][1].resolve(Response())
+    assert ('obst', 0, 0) in writer._current
+
+    writer._on_obstacle_tile(obstacle_tile_message(0, 0, []))
+    writer._clock_fn.set(1.0)
+    writer._pump(now=1.0)
+
+    assert ('obst', 0, 0) not in writer._current
+    assert tile_name(writer, 0, kind='obst') in writer._doomed
+
+
+def test_terrain_and_obstacle_tiles_at_the_same_index_are_independent_models(writer):
+    writer._on_tile(tile_message((0, 0), 1.0))
+    writer._on_obstacle_tile(obstacle_tile_message(0, 0, [(0.025, 0.025, 0.025)]))
+    writer._pump(now=0.0)
+
+    names = {request.name for request, _ in writer._spawn.calls}
+    assert names == {tile_name(writer, 0, kind='terrain'), tile_name(writer, 0, kind='obst')}
+
+    writer._clock_fn.set(0.0)
+    for _, future in writer._spawn.calls:
+        future.resolve(Response())
+
+    assert writer._current[('terrain', 0, 0)] == tile_name(writer, 0, kind='terrain')
+    assert writer._current[('obst', 0, 0)] == tile_name(writer, 0, kind='obst')
+
+
+def test_the_startup_sweep_dooms_leftover_obst_models_from_another_run(tmp_path):
+    rclpy.init()
+    node = TerrainWriter(model_dir=str(tmp_path))
+    node._spawn = FakeService()
+    node._delete = FakeService()
+    node._model_list = FakeService()
+    node._clock_fn = FakeClock(0.0)
+    try:
+        other_run = 'a1b2c3' if node._run_id != 'a1b2c3' else 'd4e5f6'
+        leftover = f'obst_2_3_{other_run}_g0'
+
+        node._pump(now=0.0)                    # triggers the start-up leftover scan
+        node._model_list.calls[0][1].resolve(
+            Response(model_names=[leftover, 'rover', 'ground_plane']))
+
+        assert leftover in node._doomed
+        assert node._delete.calls == []             # registered, not dispatched yet
+
+        node._pump(now=1.0)                          # dispatches the bounded delete
+        assert {r.name for r, _ in node._delete.calls} == {leftover}
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_a_malformed_obstacle_cloud_is_logged_not_raised(writer):
+    broken = obstacle_tile_message(0, 0, [(0.025, 0.025, 0.025)])
+    broken.point_step = 16                      # wrong layout, refused
+
+    writer._on_obstacle_tile(broken)             # must not raise
+
+    assert writer._policy._pending == {}
+    assert writer._spawn.calls == []
+
+
+def test_an_obstacle_cloud_with_a_bad_frame_id_is_logged_not_raised(writer):
+    broken = obstacle_tile_message(0, 0, [])
+    broken.header.frame_id = 'not_the_right_format'
+
+    writer._on_obstacle_tile(broken)             # must not raise
+
+    assert writer._policy._pending == {}
+
+
+def test_the_shared_factory_budget_counts_both_kinds(writer):
+    for i in range(3):
+        writer._on_tile(tile_message((i, 0), float(i)))
+    for i in range(3):
+        writer._on_obstacle_tile(obstacle_tile_message(i, 1, [(0.025, 0.025, 0.025)]))
+
+    writer._pump(now=0.0)
+
+    assert writer._factory_in_flight == 4
+    assert len(writer._spawn.calls) == 4

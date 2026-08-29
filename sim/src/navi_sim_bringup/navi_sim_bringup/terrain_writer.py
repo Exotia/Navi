@@ -86,7 +86,10 @@ from gazebo_msgs.srv import DeleteEntity, GetModelList, SpawnEntity
 from rclpy.executors import ExternalShutdownException
 from grid_map_msgs.msg import GridMap
 from rclpy.node import Node
+from sensor_msgs.msg import PointCloud2, PointField
 
+from navi_sim_bringup.obstacle_mesh import (
+    obj_bytes as obstacle_obj_bytes, obstacle_mesh_from_voxels, obstacle_sdf)
 from navi_sim_bringup.terrain_mesh import (
     GAZEBO_MODEL_NAME, model_config_xml, obj_bytes, terrain_sdf,
     terrain_mesh_from_grid)
@@ -112,6 +115,10 @@ def model_name(key, generation: int, run_id: str) -> str:
     """Every generation of every tile gets its own name, for this run and
     for any run that overlaps a leftover of a previous one.
 
+    `key` is `(kind, ix, iy)` with `kind` one of `"terrain"`/`"obst"` -
+    terrain and obstacle tiles at the same `(ix, iy)` are independent
+    models, named `terrain_<ix>_<iy>_<run>_g<N>` / `obst_<ix>_<iy>_<run>_g<N>`.
+
     Not a/b alternation: that reused a name every other replacement, and a
     name can only safely be reused once Gazebo has confirmed the old model
     holding it is gone. A delete that is still stuck (see `_doomed`)
@@ -129,15 +136,19 @@ def model_name(key, generation: int, run_id: str) -> str:
     than a random run id would survive an unclean restart at all, because
     generation numbers restart at 0.
     """
-    return f"terrain_{key[0]}_{key[1]}_{run_id}_g{generation}"
+    kind, ix, iy = key
+    return f"{kind}_{ix}_{iy}_{run_id}_g{generation}"
 
 
 # Names this node may have spawned, in any build: the current
-# terrain_<ix>_<iy>_<runid>_g<N>, the run-id-less form that preceded it, and
-# the original a/b alternation. Used by the start-up sweep, which must clean
-# up leftovers from *any* previous run, not just ones this build wrote.
+# terrain_<ix>_<iy>_<runid>_g<N> / obst_<ix>_<iy>_<runid>_g<N>, the
+# run-id-less form that preceded it, and the original a/b alternation (both
+# pre-date the obst_ kind, so they only ever apply to terrain_ leftovers, but
+# matching them under either prefix is harmless - no obst_ model has ever
+# been spawned in those older forms). Used by the start-up sweep, which must
+# clean up leftovers from *any* previous run, not just ones this build wrote.
 LEFTOVER_MODEL_RE = re.compile(
-    r'^terrain_-?\d+_-?\d+_(?:[0-9a-f]{6}_g\d+|g\d+|[ab])$')
+    r'^(?:terrain|obst)_-?\d+_-?\d+_(?:[0-9a-f]{6}_g\d+|g\d+|[ab])$')
 
 
 def elevation_from_message(message: GridMap):
@@ -167,6 +178,76 @@ def elevation_from_message(message: GridMap):
     return (elevation, float(message.info.resolution),
             float(message.info.pose.position.x),
             float(message.info.pose.position.y))
+
+
+# The exact PointCloud2 layout the rover's obstacle-tile publisher writes
+# (see sub-project 2 / Task 3-4): x/y/z float32 at these offsets, tightly
+# packed with no per-point padding.
+_OBSTACLE_FIELD_OFFSETS = {'x': 0, 'y': 4, 'z': 8}
+_OBSTACLE_POINT_STEP = 12
+
+
+def obstacle_key_from_frame_id(frame_id: str):
+    """("obst", ix, iy) from a "map|<ix>|<iy>" frame_id.
+
+    That odd home for the tile index is the spec's, not this node's choice:
+    a PointCloud2 has nowhere else that can carry identity for an *empty*
+    tile (width 0, no points to read an index back out of), which an
+    obstacle tile going fully clear must still be able to publish.
+    """
+    parts = frame_id.split('|')
+    if len(parts) != 3 or parts[0] != 'map':
+        raise ValueError(
+            f"obstacle tile frame_id {frame_id!r} is not 'map|<ix>|<iy>'")
+    try:
+        ix, iy = int(parts[1]), int(parts[2])
+    except ValueError as error:
+        raise ValueError(
+            f"obstacle tile frame_id {frame_id!r} has non-integer indices"
+        ) from error
+    return ('obst', ix, iy)
+
+
+def obstacle_centres_from_message(message: PointCloud2) -> np.ndarray:
+    """(N, 3) float32 voxel centres from an obstacle-tile PointCloud2.
+
+    Refuses (ValueError) anything but the exact layout this topic is
+    specified to carry - fields x/y/z FLOAT32 at offsets 0/4/8, point_step
+    12, height 1, little-endian - matched by name/offset/datatype rather
+    than trusting point_step alone, so a message that merely happens to
+    share point_step with some other layout is not silently misread as
+    voxel centres. An empty tile (width 0) is a valid, empty result, not a
+    malformed one - that is how a tile going fully clear is published.
+    """
+    if message.height != 1:
+        raise ValueError(f"obstacle tile height {message.height} != 1")
+    if message.is_bigendian:
+        raise ValueError("obstacle tile is big-endian; not supported")
+    if message.point_step != _OBSTACLE_POINT_STEP:
+        raise ValueError(
+            f"obstacle tile point_step {message.point_step} != "
+            f"{_OBSTACLE_POINT_STEP}")
+    fields = {field.name: field for field in message.fields}
+    if set(fields) != set(_OBSTACLE_FIELD_OFFSETS):
+        raise ValueError(
+            f"obstacle tile fields {sorted(fields)} != x/y/z")
+    for name, expected_offset in _OBSTACLE_FIELD_OFFSETS.items():
+        field = fields[name]
+        if field.datatype != PointField.FLOAT32:
+            raise ValueError(f"obstacle tile field {name!r} is not FLOAT32")
+        if field.offset != expected_offset:
+            raise ValueError(
+                f"obstacle tile field {name!r} at offset {field.offset}, "
+                f"expected {expected_offset}")
+    if message.width == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+    data = bytes(message.data)
+    expected_bytes = message.width * message.point_step
+    if len(data) != expected_bytes:
+        raise ValueError(
+            f"obstacle tile data is {len(data)} bytes, expected "
+            f"{expected_bytes}")
+    return np.frombuffer(data, dtype='<f4').reshape(-1, 3)
 
 
 class TileRespawnPolicy:
@@ -320,6 +401,8 @@ class TerrainWriter(Node):
         self._model_list = self.create_client(GetModelList, '/get_model_list')
         self.create_subscription(
             GridMap, str(self.get_parameter('tile_topic').value), self._on_tile, 64)
+        self.create_subscription(
+            PointCloud2, '/localization/obstacle_tile', self._on_obstacle_tile, 64)
         self.create_timer(0.25, self._pump)
         self.get_logger().info(
             f"terrain tiles under {self._model_dir}; one model per 2.5 m tile, "
@@ -401,7 +484,7 @@ class TerrainWriter(Node):
             # it ends the node and takes the terrain view with it.
             self.get_logger().error(f"unreadable tile message: {error!r}")
             return
-        key = tile_index_of(center_x, center_y)
+        key = ('terrain',) + tile_index_of(center_x, center_y)
         if not np.isfinite(elevation).any():
             payload = b''                       # the tile is gone
         else:
@@ -409,6 +492,23 @@ class TerrainWriter(Node):
             mesh = terrain_mesh_from_grid(elevation[::stride, ::stride], resolution * stride,
                                           center_x, center_y)
             payload = obj_bytes(mesh) if mesh is not None else b''
+        self._policy.offer(key, payload, self._clock_fn())
+
+    def _on_obstacle_tile(self, message: PointCloud2) -> None:
+        try:
+            key = obstacle_key_from_frame_id(message.header.frame_id)
+            centres = obstacle_centres_from_message(message)
+        except (ValueError, IndexError) as error:
+            # Same reasoning as _on_tile: this is a subscription callback,
+            # and anything that escapes it ends the node and takes the
+            # terrain/obstacle view down with it.
+            self.get_logger().error(f"unreadable obstacle tile message: {error!r}")
+            return
+        if centres.shape[0] == 0:
+            payload = b''                       # the tile is gone
+        else:
+            mesh = obstacle_mesh_from_voxels(centres)
+            payload = obstacle_obj_bytes(mesh) if mesh is not None else b''
         self._policy.offer(key, payload, self._clock_fn())
 
     def _pump(self, now: float = None) -> None:
@@ -478,8 +578,13 @@ class TerrainWriter(Node):
                 self._policy.finished(key, payload, self._clock_fn(), ok=False)
 
     def _replace(self, key, payload: bytes, now: float = None) -> None:
+        kind, ix, iy = key
         self._version += 1
-        name = f"tile_{key[0]}_{key[1]}_v{self._version:05d}.obj"
+        # Mesh file prefix is not the same as the model-name prefix
+        # (`tile_` predates the `terrain_`/`obst_` model-name split and stays
+        # as-is for terrain; `obst_` is the new kind's own).
+        prefix = 'tile' if kind == 'terrain' else 'obst'
+        name = f"{prefix}_{ix}_{iy}_v{self._version:05d}.obj"
         generation = self._generation.get(key, -1) + 1
         # Committed here, at dispatch, not in `_on_spawned` on success. A
         # spawn that fails or is never answered may still have created the
@@ -496,7 +601,9 @@ class TerrainWriter(Node):
             # otherwise leave a truncated .obj behind for good.
             with open(os.path.join(self._mesh_dir, name), 'wb') as handle:
                 handle.write(payload)
-            sdf = terrain_sdf(f"model://{GAZEBO_MODEL_NAME}/meshes/{name}", model)
+            mesh_uri = f"model://{GAZEBO_MODEL_NAME}/meshes/{name}"
+            sdf = (terrain_sdf(mesh_uri, model) if kind == 'terrain'
+                   else obstacle_sdf(mesh_uri, model))
             request = SpawnEntity.Request()
             request.name = model
             request.xml = sdf
