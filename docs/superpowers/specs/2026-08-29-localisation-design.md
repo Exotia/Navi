@@ -147,9 +147,13 @@ closures applied), `/zed_front/zed_node/pose_with_covariance` and
 - `/localization/status` — `std_msgs/String` carrying JSON, the same
   convention as `/video_status`, so the ground station reads it over
   rosbridge without a custom type: `{"state": "OK" | "SEARCHING" | "OFF",
-  "seconds_since_ok": float, "source": "zed_vio", "distance_travelled":
-  float, "mount_offset_verified": true}`. Published at 2 Hz and on every
-  state change. While `SEARCHING`, `/localization/pose` keeps publishing the
+  "seconds_since_ok": float | null, "source": "zed_vio",
+  "distance_travelled": float, "mount_offset_verified": true}`.
+  `seconds_since_ok` is `null` until the first OK, because there is no
+  honest number for "how long since something that never happened" - a 0
+  would read as tracking that is fine right now, and a large number as
+  tracking that was fine once. Published at 2 Hz and on every state
+  change. While `SEARCHING`, `/localization/pose` keeps publishing the
   **last good** pose with its stamp frozen, so consumers can see it is
   stale. Nothing is extrapolated. `OFF` after 2 s without any wrapper pose.
 
@@ -166,9 +170,13 @@ refusal logic (`video_request.py` is untouched). Its source changes from
 whose frames are written into `gst-launch-1.0` through stdin — the exact
 `fdsrc blocksize=... ! rawvideoparse` front end `navi_sim_video` uses, which
 is the one that was verified to frame a byte stream correctly. The request's
-`device` field is ignored with a logged note; width/height come from the
-image, and a request whose geometry differs from the published image is
-refused with the reason in `/video_status`, not silently rescaled.
+`device` field is still validated against `allowed_device` on both sources -
+one validator, no source-dependent holes in it - though nothing on this path
+opens a device. Width and height come from the image: the wrapper owns the
+camera, so the geometry it publishes is the only geometry there is, the
+request's is advisory, and the stream adopts it rather than refusing a
+mismatch the ground station has no way to fix. The geometry actually being
+sent is reported in `/video_status`'s detail. Nothing is rescaled.
 
 When the wrapper is not running (`--no-localization`), the old `v4l2src` path
 is still available: `video_sender` gains a `source` parameter, `zed_topic`
@@ -189,8 +197,14 @@ that disagrees flips it.
 
 - `--no-localization` skips the wrapper and `localization_status`; `video_sender` is then launched with `source:=v4l2`.
 - Stale-process cleanup gains `component_container_isolated`.
-- Readiness waits for `/localization/status` to be **received** on a
-  subscription, with a 60 s timeout that fails the launcher loudly.
+- Readiness waits for `/localization/status` to be **received** *and* to
+  report a state other than `OFF`: `localization_status` publishes an
+  initial `OFF` from its constructor, so a message alone would pass with an
+  unplugged camera behind it. ~90 s for the first message, and failing that
+  the launcher stops loudly. A further ~60 s for a non-`OFF` state, and
+  failing *that* a loud warning and the bring-up continues - an indoor run
+  with nothing to track must still work, and manual driving does not depend
+  on the pose.
 
 ### Testing
 
