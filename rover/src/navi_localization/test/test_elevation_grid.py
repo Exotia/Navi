@@ -78,6 +78,40 @@ def test_a_later_cloud_replaces_the_cells_it_covers_and_keeps_the_rest():
     assert elevation[0, 2] == pytest.approx(5.0)
 
 
+def test_growth_clips_to_the_cap_instead_of_freezing_short_of_it():
+    # Regression: the growth branch used to abort - and leave the window
+    # frozen at its old size forever - the instant a single batch's
+    # required extent overshot max_cells by even one cell, even though
+    # there was still room to grow up to the cap. It must clip to exactly
+    # max_cells instead, keeping the cells already mapped.
+    grid = ElevationGrid(max_cells=5)
+    grid.update([(0.05, 0.05, 1.0), (0.25, 0.05, 2.0)])   # cols 0, 2 -> 3 cols
+    assert grid.snapshot().elevation.shape == (1, 3)
+
+    # This point's column index is 5, so the union with the existing
+    # window (cols 0-2) needs 6 columns - one past the cap of 5.
+    grid.update([(0.55, 0.05, 3.0)])
+
+    snapshot = grid.snapshot()
+    elevation = snapshot.elevation
+    assert elevation.shape == (1, 5)              # clipped to the cap, not frozen at 3
+    assert elevation[0, 0] == pytest.approx(1.0)   # existing cells kept
+    assert elevation[0, 2] == pytest.approx(2.0)
+    assert np.isnan(elevation[0, 1])
+    # Column 5 still doesn't fit in a 5-wide window anchored at column 0
+    # (columns 0-4), so this point is genuinely past the 60-cell budget.
+    assert grid.points_outside_cap == 1
+
+    # A later point at column 4 now falls inside the grown-to-cap window,
+    # proving the window is not frozen: it must be binned, not counted
+    # outside.
+    grid.update([(0.45, 0.05, 4.0)])
+    elevation = grid.snapshot().elevation
+    assert elevation.shape == (1, 5)
+    assert elevation[0, 4] == pytest.approx(4.0)
+    assert grid.points_outside_cap == 1            # unchanged: this one fit
+
+
 def test_the_grid_never_grows_past_sixty_metres():
     grid = ElevationGrid()
     grid.update([(0.05, 0.05, 1.0)])

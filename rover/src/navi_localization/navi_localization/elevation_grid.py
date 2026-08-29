@@ -129,16 +129,9 @@ class ElevationGrid:
             return
 
         rows, cols = self._sum.shape
-        new_ox = min(self._origin_ix, low_x)
-        new_oy = min(self._origin_iy, low_y)
-        new_cols = max(self._origin_ix + cols, high_x + 1) - new_ox
-        new_rows = max(self._origin_iy + rows, high_y + 1) - new_oy
+        new_ox, new_cols = self._clipped_axis(self._origin_ix, cols, low_x, high_x)
+        new_oy, new_rows = self._clipped_axis(self._origin_iy, rows, low_y, high_y)
 
-        if new_cols > self.max_cells or new_rows > self.max_cells:
-            # At the ceiling the honest thing is to keep the ground already
-            # mapped rather than slide the window and silently forget it.
-            # The points that fall outside are counted, not hidden.
-            return
         if (new_rows, new_cols) == (rows, cols):
             return
 
@@ -150,6 +143,31 @@ class ElevationGrid:
         grown_count[r0:r0 + rows, c0:c0 + cols] = self._count
         self._sum, self._count = grown_sum, grown_count
         self._origin_ix, self._origin_iy = new_ox, new_oy
+
+    def _clipped_axis(self, origin: int, size: int, low: int, high: int):
+        """New (origin, size) for one axis, grown to cover [low, high] but
+        never past max_cells.
+
+        Existing cells are never dropped, so when the full union would
+        overshoot the cap this clips rather than aborting: whichever side
+        still has room is extended - the low side first, then whatever
+        budget is left goes to the high side, the same anchor-low,
+        clip-high bias the very first window uses (`min(required,
+        max_cells)`). A point that still falls outside the clipped window
+        is left for update()'s own inside-check to count as outside the
+        60 m cap, rather than silently frozen out by a window that never
+        grew at all.
+        """
+        low_deficit = max(0, origin - low)
+        high_deficit = max(0, (high + 1) - (origin + size))
+        available = self.max_cells - size
+
+        if low_deficit + high_deficit <= available:
+            return origin - low_deficit, size + low_deficit + high_deficit
+
+        low_ext = min(low_deficit, available)
+        high_ext = min(high_deficit, available - low_ext)
+        return origin - low_ext, size + low_ext + high_ext
 
     def snapshot(self):
         if self._origin_ix is None:
