@@ -684,13 +684,20 @@ def test_a_spawn_that_is_never_answered_frees_its_slot_and_is_retried(writer):
     writer._clock_fn.set(10.0)
     writer._pump(now=10.0)                       # written off, slot freed
     assert writer._factory_in_flight == 0
-    assert not os.path.exists(mesh_path)          # nothing will ever load it
     assert len(writer._spawn.calls) == 1
     assert writer._current == {}                  # nothing is on screen
+    # The mesh stays until the model this spawn may or may not have created
+    # is known to be gone - see
+    # test_a_written_off_spawn_that_never_reached_gazebo_costs_one_poll.
+    assert os.path.exists(mesh_path)
+    writer._model_list.calls[-1][1].resolve(Response(model_names=[]))
+    assert not os.path.exists(mesh_path)
 
     writer._pump(now=11.0)                        # retried, once the 1 s/tile cap allows
     assert len(writer._spawn.calls) == 2
-    assert writer._spawn.calls[1][0].name == tile_name(writer, 0)   # same generation
+    # A new generation, never the old name: Gazebo may have created that
+    # model without answering, and then it can never be spawned again.
+    assert writer._spawn.calls[1][0].name == tile_name(writer, 1)
     assert writer._factory_in_flight == 1
 
 
@@ -707,9 +714,15 @@ def test_four_stalled_spawns_do_not_wedge_the_budget_forever(writer):
     writer._pump(now=10.0)                         # the four stalled ones are written off
     assert len(writer._spawn.calls) == 6           # the two tiles that never got a turn
     assert writer._factory_in_flight == 2
+    # Their names are doomed rather than dropped, but the poll gets the
+    # first word and finds Gazebo never created them - so they cost no
+    # DeleteEntity call and free the budget again straight away.
+    writer._model_list.calls[-1][1].resolve(Response(model_names=[]))
+    assert writer._doomed == {}
 
     writer._pump(now=11.0)                          # and the written-off four come back
     assert len(writer._spawn.calls) == 8
+    assert writer._delete.calls == []
     assert writer._factory_in_flight == 4
 
 
@@ -747,6 +760,7 @@ def test_a_late_answer_after_the_timeout_does_not_release_a_second_slot(writer):
 
     writer._clock_fn.set(10.0)
     writer._pump(now=10.0)                        # written off
+    writer._model_list.calls[-1][1].resolve(Response(model_names=[]))  # never existed
     writer._clock_fn.set(11.0)
     writer._pump(now=11.0)                        # and retried, taking a fresh slot
     assert writer._factory_in_flight == 1
@@ -761,7 +775,7 @@ def test_a_late_answer_after_the_timeout_does_not_release_a_second_slot(writer):
     writer._clock_fn.set(11.1)
     writer._spawn.calls[1][1].resolve(Response())   # the retry lands normally
     assert writer._factory_in_flight == 0
-    assert writer._current[(0, 0)] == tile_name(writer, 0)
+    assert writer._current[(0, 0)] == tile_name(writer, 1)
 
 
 def test_a_late_delete_answer_after_the_timeout_does_not_double_release(writer):
@@ -782,3 +796,111 @@ def test_a_late_delete_answer_after_the_timeout_does_not_double_release(writer):
 
     assert writer._factory_in_flight == 1           # the re-attempt keeps its slot
     assert writer._doomed[tile_name(writer, 0)]['confirmed_at'] is None
+
+
+def test_a_model_list_poll_that_is_never_answered_is_re_issued(writer):
+    """The poll is the only ground truth for whether a delete happened.
+
+    Its in-flight flag was cleared by the answer alone, so one poll Gazebo
+    never came back from disabled delete verification for the rest of the
+    run - silently, since every other part of the node kept working.
+    """
+    writer._doomed[tile_name(writer, 0)] = {
+        'mesh_name': None, 'attempts': 0, 'last_attempt': float('-inf'),
+        'in_flight': False, 'confirmed_at': None,
+    }
+    writer._pump(now=0.0)
+    assert len(writer._model_list.calls) == 1
+    stalled = writer._model_list.calls[0][1]
+
+    writer._pump(now=5.0)
+    assert len(writer._model_list.calls) == 1              # still waiting on it
+
+    writer._clock_fn.set(10.0)
+    writer._pump(now=10.0)                                  # written off, polled again
+    assert len(writer._model_list.calls) == 2
+
+    stalled.resolve(Response(model_names=[]))               # far too late
+    assert tile_name(writer, 0) in writer._doomed           # the late answer decided nothing
+
+    writer._model_list.calls[1][1].resolve(Response(model_names=[]))
+    assert tile_name(writer, 0) not in writer._doomed       # the live poll still works
+
+
+def test_a_written_off_spawn_is_retried_under_a_new_name(writer):
+    """Gazebo may have spawned the model and simply not answered.
+
+    Retrying the same name then fails forever with "already exists", so the
+    generation is burned at dispatch and the unanswered name is doomed
+    rather than forgotten - if it never existed, the model-list poll
+    untracks it for free.
+    """
+    writer._on_tile(tile_message((0, 0), 1.0))
+    writer._pump(now=0.0)
+    first = writer._spawn.calls[0][0].name
+    assert first == tile_name(writer, 0)
+
+    writer._clock_fn.set(10.0)
+    writer._pump(now=10.0)                                  # written off
+    assert first in writer._doomed
+    assert writer._current == {}
+
+    writer._clock_fn.set(11.0)
+    writer._pump(now=11.0)                                   # retried
+    assert len(writer._spawn.calls) == 2
+    assert writer._spawn.calls[1][0].name == tile_name(writer, 1)
+    assert writer._spawn.calls[1][0].name != first
+
+
+def test_a_written_off_spawn_that_never_reached_gazebo_costs_one_poll(writer):
+    writer._on_tile(tile_message((0, 0), 1.0))
+    writer._pump(now=0.0)
+    mesh_path = os.path.join(
+        writer._mesh_dir, f'tile_0_0_v{writer._version:05d}.obj')
+
+    writer._clock_fn.set(10.0)
+    writer._pump(now=10.0)
+    assert os.path.exists(mesh_path)          # kept until the model is known gone
+
+    writer._model_list.calls[-1][1].resolve(Response(model_names=[]))
+    assert writer._doomed == {}                # never existed, nothing to delete
+    assert writer._delete.calls == []
+    assert not os.path.exists(mesh_path)
+
+
+def test_giving_up_on_a_delete_still_unlinks_its_mesh(writer):
+    writer._on_tile(tile_message((0, 0), 1.0))
+    writer._pump(now=0.0)
+    writer._clock_fn.set(0.0)
+    writer._spawn.calls[0][1].resolve(Response())
+    mesh_path = os.path.join(writer._mesh_dir, writer._mesh_file[(0, 0)])
+    assert os.path.exists(mesh_path)
+
+    writer._on_tile(tile_message((0, 0), float('nan')))     # the tile goes away
+    writer._clock_fn.set(2.0)
+    writer._pump(now=2.0)
+    doomed = tile_name(writer, 0)
+    assert doomed in writer._doomed
+
+    now = 2.0
+    while doomed in writer._doomed:
+        now += 1.0
+        writer._clock_fn.set(now)
+        writer._pump(now=now)
+        for _, future in writer._delete.calls:
+            if not future._done:
+                future.resolve(Response(False, 'nope'))
+    # Given up on: the model stays in Gazebo, but its mesh file must not
+    # stay on disk forever - nothing will ever load it again.
+    assert not os.path.exists(mesh_path)
+
+
+def test_a_tile_message_with_no_layout_is_logged_not_raised(writer):
+    broken = GridMap()
+    broken.layers = [LAYER]
+    broken.basic_layers = [LAYER]
+    broken.data = [Float32MultiArray()]                     # no dimensions at all
+
+    writer._on_tile(broken)                                  # IndexError, not ValueError
+
+    assert writer._policy._pending == {}

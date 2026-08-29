@@ -60,6 +60,20 @@ Every dispatched request therefore carries its dispatch time and a token;
 frees its slot and retries it, and the token makes a late resolution a
 no-op so a slot is never released twice. Without that watchdog, four
 stalled requests wedged the shared budget shut forever.
+
+Round 5 closed the two places that watchdog did not reach. The
+/get_model_list poll had a watchdog of its own missing entirely: its
+in-flight flag was cleared only by an answer, so one unanswered poll
+stopped every further poll for the rest of the run - and since spawning
+and deleting carried on regardless, the only thing lost was the
+verification that deletes actually happened, silently. And a written-off
+spawn used to be retried under the *same* model name and its mesh
+unlinked, on the assumption that a request without an answer is a request
+that did not happen. It may well have happened: `_generation[key]` is now
+committed at dispatch, so a retry always carries a fresh name, and the
+unanswered name is doomed like any other superseded model - if Gazebo
+never created it, the model-list poll finds it absent and untracks it for
+free.
 """
 
 import os
@@ -285,7 +299,14 @@ class TerrainWriter(Node):
         self._model_list_interval = self.MODEL_LIST_POLL_INTERVAL_S
         self._delete_confirm_grace = self.DELETE_CONFIRM_GRACE_S
         self._last_list_poll = None
-        self._model_list_in_flight = False
+        # The token of the /get_model_list poll that is outstanding, or None.
+        # A token rather than a bare flag for the same reason the factory
+        # requests carry one: a poll Gazebo never answers is written off
+        # after `_factory_timeout`, and the answer that turns up afterwards
+        # must not be mistaken for the answer to the poll that replaced it.
+        self._model_list_token = None
+        self._model_list_dispatched_at = None
+        self._next_model_list_token = 0
         self._startup_scan_done = False
         self._version = 0
         self._warned_no_service = False
@@ -352,7 +373,16 @@ class TerrainWriter(Node):
                 f"Gazebo ({waited:.1f}s); treating it as failed and freeing "
                 "the factory slot")
             if entry['kind'] == 'spawn':
-                self._unlink(entry['mesh_name'])       # nothing will load it
+                # An unanswered spawn is not a spawn that did not happen:
+                # Gazebo may well have created the model and merely lost
+                # the reply. Dropping the name here left a model nothing
+                # would ever delete, so it is doomed like any other
+                # superseded model - and if it truly never existed, the
+                # /get_model_list poll finds it absent and untracks it (and
+                # unlinks the mesh) at no cost. `due_at` gives the poll
+                # that first word, so the common case costs no DeleteEntity
+                # traffic at all.
+                self._delete_model(entry['model'], entry['mesh_name'], due_at=now)
                 self._policy.finished(
                     entry['key'], entry['payload'], self._clock_fn(), ok=False)
                 continue
@@ -364,8 +394,12 @@ class TerrainWriter(Node):
     def _on_tile(self, message: GridMap) -> None:
         try:
             elevation, resolution, center_x, center_y = elevation_from_message(message)
-        except ValueError as error:
-            self.get_logger().error(str(error))
+        except (ValueError, IndexError) as error:
+            # IndexError too: a message whose layout carries fewer than two
+            # dimensions indexes off the end rather than failing a check,
+            # and this is a subscription callback - anything that escapes
+            # it ends the node and takes the terrain view with it.
+            self.get_logger().error(f"unreadable tile message: {error!r}")
             return
         key = tile_index_of(center_x, center_y)
         if not np.isfinite(elevation).any():
@@ -383,8 +417,17 @@ class TerrainWriter(Node):
                 and self._model_list.service_is_ready()):
             if not self._warned_no_service:
                 self._warned_no_service = True
-                self.get_logger().warn("/spawn_entity is not up yet - is gazebo running "
-                                       "with libgazebo_ros_factory.so? Retrying.")
+                missing = [name for name, client in
+                           (('/spawn_entity', self._spawn),
+                            ('/delete_entity', self._delete),
+                            ('/get_model_list', self._model_list))
+                           if not client.service_is_ready()]
+                self.get_logger().warn(
+                    f"waiting for {', '.join(missing)}: this node needs all three "
+                    "and draws nothing until every one is up. /spawn_entity and "
+                    "/delete_entity come from libgazebo_ros_factory.so, "
+                    "/get_model_list from libgazebo_ros_state.so - is gazebo "
+                    "running with both plugins? Retrying.")
             return
         self._warned_no_service = False
 
@@ -393,6 +436,7 @@ class TerrainWriter(Node):
             self._scan_for_leftover_models()
 
         self._expire_stalled_factory_requests(now)
+        self._expire_stalled_model_list_poll(now)
         self._maybe_poll_model_list(now)
 
         for model, entry in list(self._doomed.items()):
@@ -436,13 +480,22 @@ class TerrainWriter(Node):
     def _replace(self, key, payload: bytes, now: float = None) -> None:
         self._version += 1
         name = f"tile_{key[0]}_{key[1]}_v{self._version:05d}.obj"
-        with open(os.path.join(self._mesh_dir, name), 'wb') as handle:
-            handle.write(payload)
         generation = self._generation.get(key, -1) + 1
+        # Committed here, at dispatch, not in `_on_spawned` on success. A
+        # spawn that fails or is never answered may still have created the
+        # model in Gazebo, and retrying under the same name then fails for
+        # good with "already exists" - so the number is burned whatever
+        # happens. Generations are free; a name that can never be spawned
+        # again is not.
+        self._generation[key] = generation
         model = model_name(key, generation, self._run_id)
         token = self._claim_factory_slot(
             'spawn', now, model=model, key=key, payload=payload, mesh_name=name)
         try:
+            # Inside the try: an ENOSPC halfway through the write would
+            # otherwise leave a truncated .obj behind for good.
+            with open(os.path.join(self._mesh_dir, name), 'wb') as handle:
+                handle.write(payload)
             sdf = terrain_sdf(f"model://{GAZEBO_MODEL_NAME}/meshes/{name}", model)
             request = SpawnEntity.Request()
             request.name = model
@@ -453,11 +506,9 @@ class TerrainWriter(Node):
             self._unlink(name)                          # nothing will load it now
             raise
         future.add_done_callback(
-            lambda done: self._on_spawned(
-                done, token, key, payload, model, name, generation))
+            lambda done: self._on_spawned(done, token, key, payload, model, name))
 
-    def _on_spawned(self, future, token, key, payload, model, mesh_name,
-                    generation) -> None:
+    def _on_spawned(self, future, token, key, payload, model, mesh_name) -> None:
         if not self._release_factory_slot(token):
             # The watchdog already wrote this request off and handed the
             # tile back to the policy; doing any of that again here would
@@ -484,7 +535,9 @@ class TerrainWriter(Node):
             self._policy.finished(key, payload, now, ok=False)
             return
         previous_model, previous_mesh = self._current.get(key), self._mesh_file.get(key)
-        self._current[key], self._mesh_file[key], self._generation[key] = model, mesh_name, generation
+        # `_generation[key]` was already committed at dispatch (see
+        # `_replace`); only what is actually on screen is recorded here.
+        self._current[key], self._mesh_file[key] = model, mesh_name
         self._policy.finished(key, payload, now, ok=True)
         if previous_model:
             self._delete_model(previous_model, previous_mesh)
@@ -495,7 +548,7 @@ class TerrainWriter(Node):
             self._delete_model(model, mesh)
         self._policy.finished(key, payload, self._clock_fn(), ok=True)
 
-    def _delete_model(self, model: str, mesh_name) -> None:
+    def _delete_model(self, model: str, mesh_name, due_at: float = None) -> None:
         """Marks `model` doomed; never dispatches DeleteEntity itself.
 
         The instant a spawn confirms, its superseded model must be deleted -
@@ -507,11 +560,17 @@ class TerrainWriter(Node):
         a factory-request slot exactly like a spawn does, and the combined
         spawn+delete rate stays under `_max_factory_in_flight` regardless
         of how many tiles change at once.
+
+        `due_at` holds the first delete attempt back by one retry interval,
+        for a model that probably does not exist at all (a spawn Gazebo
+        never answered): the model-list poll gets to say so first, and no
+        DeleteEntity call is spent on it.
         """
         self._doomed[model] = {
             'mesh_name': mesh_name,
             'attempts': 0,
-            'last_attempt': float('-inf'),              # due the moment a slot is free
+            # -inf: due the moment a slot is free.
+            'last_attempt': float('-inf') if due_at is None else due_at,
             'in_flight': False,
             'confirmed_at': None,
         }
@@ -571,29 +630,66 @@ class TerrainWriter(Node):
                 f"giving up deleting {model} after {entry['attempts']} attempts; "
                 "it will stay in Gazebo until removed manually")
             del self._doomed[model]
+            # The model is beyond help, but its mesh is not: this entry was
+            # the last reference to that file, so leaving it would grow
+            # ~/.gazebo/models without limit over a long run. Gazebo keeps
+            # what it has already loaded in memory, so the stranded model
+            # on screen does not need the file.
+            self._unlink(entry['mesh_name'])
 
     def _maybe_poll_model_list(self, now: float) -> None:
         """Polls /get_model_list at most once a second while anything is
         doomed - the sole ground truth for whether a delete actually
         happened, since DeleteEntity's own response has been observed to
         lie under load (see `_on_deleted`)."""
-        if not self._doomed or self._model_list_in_flight:
+        if not self._doomed or self._model_list_token is not None:
             return
         if (self._last_list_poll is not None
                 and now - self._last_list_poll < self._model_list_interval):
             return
         self._last_list_poll = now
-        self._model_list_in_flight = True
+        self._next_model_list_token += 1
+        token = self._next_model_list_token
+        self._model_list_token = token
+        self._model_list_dispatched_at = now
         try:
             future = self._model_list.call_async(GetModelList.Request())
         except Exception as exc:                        # noqa: BLE001
-            self._model_list_in_flight = False
+            self._model_list_token = None
+            self._model_list_dispatched_at = None
             self.get_logger().warn(f"listing Gazebo's models failed to dispatch: {exc}")
             return
-        future.add_done_callback(self._on_model_list)
+        future.add_done_callback(lambda done: self._on_model_list(done, token))
 
-    def _on_model_list(self, future) -> None:
-        self._model_list_in_flight = False
+    def _expire_stalled_model_list_poll(self, now: float) -> None:
+        """Frees the poll slot when Gazebo never answers a /get_model_list.
+
+        The in-flight flag used to be cleared only by an answer, so one
+        poll that never came back stopped every further poll for the life
+        of the process. Nothing else broke - spawns and deletes carried on -
+        which is what made it invisible: only the *verification* of deletes
+        was gone, and that verification is the only thing that ever
+        untracks a doomed model or unlinks its mesh.
+        """
+        if self._model_list_token is None or self._model_list_dispatched_at is None:
+            return
+        waited = now - self._model_list_dispatched_at
+        if waited < self._factory_timeout:
+            return
+        self.get_logger().warn(
+            f"/get_model_list was never answered by Gazebo ({waited:.1f}s); "
+            "polling again - verifying deletes depends on it")
+        self._model_list_token = None                   # a late answer is ignored
+        self._model_list_dispatched_at = None
+
+    def _on_model_list(self, future, token: int = None) -> None:
+        if token is not None and token != self._model_list_token:
+            self.get_logger().warn(
+                "/get_model_list was answered after it had already timed out; "
+                "ignoring the late answer")
+            return
+        self._model_list_token = None
+        self._model_list_dispatched_at = None
         try:
             response = future.result()
             names = set(response.model_names)
