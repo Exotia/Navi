@@ -38,14 +38,14 @@ from rosidl_runtime_py.utilities import get_message
 
 #: Everything semi-autonomous mode needs out of the rover's graph.
 #: /manual_twist so the IK still steers the wheels in the picture; the two
-#: localisation topics so the model is placed and gated; /localization/map so
-#: sub-project 3's terrain_writer has something to write. Nothing else, and
-#: nothing in the other direction.
+#: localisation topics so the model is placed and gated; map tiles so
+#: terrain_writer has something to write. Nothing else, and nothing in the
+#: other direction.
 DEFAULT_TOPICS = [
     "/manual_twist:geometry_msgs/msg/Twist",
     "/localization/pose:nav_msgs/msg/Odometry",
     "/localization/status:std_msgs/msg/String",
-    "/localization/map:grid_map_msgs/msg/GridMap",
+    "/localization/map_tile:grid_map_msgs/msg/GridMap",
 ]
 
 QUEUE_DEPTH = 10

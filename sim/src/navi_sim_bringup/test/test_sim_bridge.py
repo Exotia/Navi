@@ -162,8 +162,6 @@ def test_the_sim_side_node_has_no_subscriptions_at_all():
         bridge.shutdown()
 
 
-def test_the_built_map_is_among_the_topics_the_bridge_carries_by_default():
-    # Sub-project 3: terrain_writer on the simulation's domain reads the
-    # elevation map the rover publishes on its own. If this entry went
-    # missing the terrain would silently never appear.
-    assert "/localization/map:grid_map_msgs/msg/GridMap" in sim_bridge.DEFAULT_TOPICS
+def test_the_map_tiles_are_among_the_topics_the_bridge_carries_by_default():
+    assert "/localization/map_tile:grid_map_msgs/msg/GridMap" in sim_bridge.DEFAULT_TOPICS
+    assert not any(spec.startswith("/localization/map:") for spec in sim_bridge.DEFAULT_TOPICS)
