@@ -113,4 +113,14 @@ def generate_launch_description():
         output='screen',
     )
 
-    return LaunchDescription([zed, status])
+    # The mapper's subscription is what makes the SDK extract the fused
+    # cloud at all, so it belongs in the same launch as the wrapper rather
+    # than being something an operator has to remember to start.
+    mapper = Node(
+        package='navi_localization',
+        executable='elevation_mapper',
+        name='elevation_mapper',
+        output='screen',
+    )
+
+    return LaunchDescription([zed, status, mapper])

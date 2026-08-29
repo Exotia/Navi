@@ -45,3 +45,36 @@ def test_every_topic_is_pinned_to_raw_only():
 def test_the_override_file_the_launch_file_points_at_is_the_one_tested():
     source = LAUNCH_FILE.read_text()
     assert f"'config', '{CONFIG_FILE.name}'" in source
+
+
+def _parameters():
+    return yaml.safe_load(CONFIG_FILE.read_text())['/**']['ros__parameters']
+
+
+def test_spatial_mapping_is_on_with_the_numbers_the_map_was_designed_for():
+    mapping = _parameters()['mapping']
+
+    assert mapping['mapping_enabled'] is True
+    assert mapping['resolution'] == 0.10
+    assert mapping['max_mapping_range'] == 8.0
+    assert mapping['fused_pointcloud_freq'] == 0.5
+
+
+def test_the_mapping_resolution_matches_the_grid_the_mapper_bins_into():
+    # A grid finer than the cloud is a comb of empty cells; a grid coarser
+    # than the cloud throws measurements away. They have to be one number.
+    from navi_localization.elevation_grid import RESOLUTION
+
+    assert _parameters()['mapping']['resolution'] == RESOLUTION
+
+
+def test_mapping_never_reaches_further_than_the_depth_that_is_published():
+    parameters = _parameters()
+
+    assert parameters['mapping']['max_mapping_range'] <= parameters['depth']['max_depth']
+
+
+def test_the_launch_file_starts_the_elevation_mapper():
+    source = LAUNCH_FILE.read_text()
+
+    assert "executable='elevation_mapper'" in source

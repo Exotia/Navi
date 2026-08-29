@@ -33,7 +33,14 @@
             publish_imu_tf: true
             sensors_pub_rate: 100.0
         mapping:
-            mapping_enabled: false        # sub-project 3
+            # Sub-project 3. The wrapper only spends GPU time on this while
+            # elevation_mapper is subscribed to mapping/fused_cloud
+            # (the count_subscribers guard in callback_pubFusedPc), so
+            # leaving it enabled costs nothing when nothing is mapping.
+            mapping_enabled: true
+            resolution: 0.10              # SDK range 0.01 - 0.2; the grid's cell size
+            max_mapping_range: 8.0        # SDK range 2.0 - 20.0; inside depth.max_depth (10.0)
+            fused_pointcloud_freq: 0.5    # Hz - the map is published at the rate it changes
         object_detection:
             od_enabled: false
         body_tracking:

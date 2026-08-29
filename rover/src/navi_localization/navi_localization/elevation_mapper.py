@@ -17,6 +17,11 @@ The wrapper only extracts the fused cloud when the topic has a subscriber
 running is what makes the SDK do the mapping work at all. When it is not
 running, the topic is silent and the GPU is not spending anything on it -
 that is by design, not a fault.
+
+Measured on the Orin 2026-08-29 with the camera on the bench: fused cloud
+0.50 Hz / ~0.2 MB per message (99 KB/s), map published at 0.50 Hz while
+the scene was still being explored, 6.4 x 7.3 m (64 x 73 cells) after
+about 60 s. Mapper CPU not captured (the measurement was cut short).
 """
 
 import numpy as np
