@@ -55,9 +55,9 @@ def test_spatial_mapping_is_on_with_the_numbers_the_map_was_designed_for():
     mapping = _parameters()['mapping']
 
     assert mapping['mapping_enabled'] is True
-    assert mapping['resolution'] == 0.10
+    assert mapping['resolution'] == 0.05
     assert mapping['max_mapping_range'] == 8.0
-    assert mapping['fused_pointcloud_freq'] == 0.5
+    assert mapping['fused_pointcloud_freq'] == 1.0
 
 
 def test_the_mapping_resolution_matches_the_grid_the_mapper_bins_into():
@@ -72,6 +72,17 @@ def test_mapping_never_reaches_further_than_the_depth_that_is_published():
     parameters = _parameters()
 
     assert parameters['mapping']['max_mapping_range'] <= parameters['depth']['max_depth']
+
+
+def test_depth_is_neural_at_fifteen_frames_the_calibration_picked():
+    # 2026-08-29 calibration on the Orin at 25 W: NEURAL at 30 fps dropped
+    # to 25/23 Hz (model latency), NEURAL_PLUS to 6.7 Hz; NEURAL at 15 fps
+    # holds 15/15 Hz at 29 % GPU with 5-10x less depth noise than
+    # PERFORMANCE. See docs/superpowers/specs/2026-08-29-tiled-map-design.md.
+    parameters = _parameters()
+    assert parameters['depth']['depth_mode'] == 'NEURAL'
+    assert parameters['general']['grab_frame_rate'] == 15
+    assert parameters['general']['pub_frame_rate'] == 15.0
 
 
 def test_the_launch_file_starts_the_elevation_mapper():

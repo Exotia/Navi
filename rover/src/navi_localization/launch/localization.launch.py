@@ -4,31 +4,10 @@ Includes the wrapper's own zed_camera.launch.py so its container, its
 URDF publisher and its parameter loading stay the wrapper's business; we
 add one override file and one node.
 
-Startup, measured 2026-08-29 on the Orin, time from launch to
-/zed_front/zed_node/odom being advertised and to the first
-/localization/status message, each run from a verified-clean Orin
-(no component container; note that `pkill -x component_container_isolated`
-is a no-op because comm is truncated to 15 characters - the name that
-works is `component_conta`):
-
-    this launch file, quiet domain 0    run 1   4.5 s odom / 4.6 s status
-                                        run 2   4.4 s odom / 4.6 s status
-                                        run 3   4.4 s odom / 4.6 s status
-    wrapper defaults, quiet domain 0            4.9 s odom
-    wrapper defaults, domain 0 with a
-      foreign participant present              88.6 s odom
-
-What costs the time is not libx264 - the ffmpeg publishers this file turns
-off initialise in well under a second each, which is why the wrapper's own
-defaults also reach odometry in 4.9 s on a quiet domain. It is ROS 2
-discovery: when a foreign participant shares the domain, creating a
-publisher stalls about 3 s per ten publishers (a bare rclpy node making 60
-publishers took 0.1 s on a quiet domain and 17.9 s against one stale
-laptop bringup), so the wrapper's ~100 publishers dominate everything else
-and the 88.6 s figure above is a measurement of that, not of this package.
-
-Pinning the image topics to raw is therefore worth keeping because nothing
-on the rover reads those topics, not because it buys seconds.
+Measured on the Orin 2026-08-29 (nvpmodel 25 W, camera on the bench,
+NEURAL depth at 15 fps): pose 15.0 Hz, depth 15.0 Hz, GPU 29 %, CPU 15 %,
+fused cloud 1.0 Hz. Tile rate and bytes/s while driving: filled in by the
+plan's Task 10.
 """
 
 import os
