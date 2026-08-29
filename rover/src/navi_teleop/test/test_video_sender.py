@@ -275,6 +275,31 @@ def test_zed_topic_source_starts_a_stdin_pipeline_on_the_first_frame():
         node.destroy_node()
 
 
+def test_malformed_request_while_pending_leaves_the_pending_request_alone():
+    # Regression test: a malformed request must not disturb a request still
+    # waiting on its first frame any more than it disturbs an already
+    # healthy stream - otherwise /video_status briefly lies 'failed' while
+    # the pending request is still live, and a matching frame right after
+    # would start streaming anyway, contradicting the status it just sent.
+    node, launcher = make_node()
+    try:
+        node._on_request(request())
+        assert node._state == "starting"
+
+        bad = String()
+        bad.data = json.dumps({"enable": True, "host": "127.0.0.1", "bitrate_kbps": 99000})
+        node._on_request(bad)
+
+        assert node._state == "starting"
+        assert node._pending is not None
+        assert launcher.calls == []
+
+        node._on_image(image())
+        assert node._state == "streaming"
+    finally:
+        node.destroy_node()
+
+
 def test_zed_topic_source_refuses_a_frame_of_the_wrong_size_with_the_reason():
     node, launcher = make_node()
     try:

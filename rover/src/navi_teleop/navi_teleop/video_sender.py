@@ -127,8 +127,12 @@ class VideoSender(Node):
             self.get_logger().warn(f"rejected video request: {exc}")
             # A healthy stream keeps reporting streaming through a bad
             # request that arrives later - refusing it must not make the
-            # operator believe video stopped when it did not.
-            if self._state != 'streaming':
+            # operator believe video stopped when it did not. The same
+            # protection extends to a request still waiting on its first
+            # frame (_pending): that frame's arrival would otherwise start
+            # a stream this rejection had already marked failed, so a bad
+            # ask here must not disturb it either.
+            if self._state != 'streaming' and self._pending is None:
                 self._set_state('failed', str(exc))
             return
 

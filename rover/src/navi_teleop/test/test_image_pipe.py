@@ -35,7 +35,8 @@ def test_the_pipeline_keeps_the_rover_encoder_settings():
     assert "host=10.0.0.5" in argv and "port=5600" in argv
 
 
-@pytest.mark.parametrize("encoding,fmt,bpp", [("bgra8", "bgra", 4), ("rgb8", "rgb", 3), ("bgr8", "bgr", 3)])
+@pytest.mark.parametrize("encoding,fmt,bpp", [
+    ("bgra8", "bgra", 4), ("rgb8", "rgb", 3), ("bgr8", "bgr", 3)])
 def test_encodings_map_to_gstreamer_formats(encoding, fmt, bpp):
     assert gst_format_for(encoding) == fmt
     assert bytes_per_pixel(encoding) == bpp
