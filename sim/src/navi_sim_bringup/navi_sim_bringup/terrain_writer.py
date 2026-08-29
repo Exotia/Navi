@@ -328,6 +328,7 @@ class TerrainWriter(Node):
     def __init__(self, model_dir: str = None) -> None:
         super().__init__('terrain_writer')
         self.declare_parameter('tile_topic', '/localization/map_tile')
+        self.declare_parameter('obstacle_tile_topic', '/localization/obstacle_tile')
         self.declare_parameter('draw_resolution', 0.05)
         self.declare_parameter(
             'model_dir', model_dir or os.path.join(
@@ -402,7 +403,8 @@ class TerrainWriter(Node):
         self.create_subscription(
             GridMap, str(self.get_parameter('tile_topic').value), self._on_tile, 64)
         self.create_subscription(
-            PointCloud2, '/localization/obstacle_tile', self._on_obstacle_tile, 64)
+            PointCloud2, str(self.get_parameter('obstacle_tile_topic').value),
+            self._on_obstacle_tile, 64)
         self.create_timer(0.25, self._pump)
         self.get_logger().info(
             f"terrain tiles under {self._model_dir}; one model per 2.5 m tile, "
