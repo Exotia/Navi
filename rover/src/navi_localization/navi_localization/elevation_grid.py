@@ -19,9 +19,9 @@ import numpy as np
 # mapping.resolution in config/zed_front.yaml - a grid finer than the cloud
 # would produce a comb of empty cells - and test_localization_launch.py
 # checks that it does.
-RESOLUTION = 0.10
+RESOLUTION = 0.05
 MAX_EXTENT_M = 60.0
-MAX_CELLS = int(round(MAX_EXTENT_M / RESOLUTION))   # 600
+MAX_CELLS = int(round(MAX_EXTENT_M / RESOLUTION))   # 1200
 
 
 def finite_points(points) -> np.ndarray:
@@ -47,6 +47,17 @@ def finite_points(points) -> np.ndarray:
     return points[finite & nonzero]
 
 
+@dataclass(frozen=True, eq=False)
+class GridState:
+    """Everything a grid is, for saving and for replacing another grid."""
+
+    elevation: np.ndarray      # (rows, cols) float32, NaN where unseen
+    count: np.ndarray          # (rows, cols) int32, points behind each mean
+    origin_ix: int
+    origin_iy: int
+    resolution: float
+
+
 # eq=False: a generated __eq__ would compare numpy arrays with ==, which
 # returns an array and then raises when the dataclass takes its truth value.
 # Comparison goes through equals(), which knows about NaN.
@@ -58,6 +69,8 @@ class GridSnapshot:
     center_x: float
     center_y: float
     resolution: float
+    origin_ix: int             # lattice index of column 0
+    origin_iy: int             # lattice index of row 0
 
     def equals(self, other) -> bool:
         if other is None:
@@ -144,6 +157,41 @@ class ElevationGrid:
         self._sum, self._count = grown_sum, grown_count
         self._origin_ix, self._origin_iy = new_ox, new_oy
 
+    def clear(self) -> None:
+        self._origin_ix = self._origin_iy = None
+        self._sum = np.zeros((0, 0), dtype=np.float64)
+        self._count = np.zeros((0, 0), dtype=np.int64)
+        self.points_outside_cap = 0
+
+    def state(self):
+        if self._origin_ix is None:
+            return None
+        snapshot = self.snapshot()
+        return GridState(elevation=snapshot.elevation,
+                         count=self._count.astype(np.int32),
+                         origin_ix=int(self._origin_ix), origin_iy=int(self._origin_iy),
+                         resolution=self.resolution)
+
+    def replace(self, state) -> None:
+        """The grid becomes `state`, exactly. `_sum` is rebuilt from
+        mean * count, so the internal state - not just the visible mean -
+        matches what it would be had this grid built `state` itself, and a
+        later update() replaces a touched cell exactly as it would have on
+        the original."""
+        if state.resolution != self.resolution:
+            raise ValueError(
+                f"map was built at {state.resolution} m cells, this grid "
+                f"uses {self.resolution} m; refusing to mix them")
+        rows, cols = state.elevation.shape
+        if max(rows, cols) > self.max_cells:
+            raise ValueError(f"map is {cols} x {rows} cells, above the cap {self.max_cells}")
+        count = state.count.astype(np.int64)
+        elevation = np.nan_to_num(state.elevation.astype(np.float64), nan=0.0)
+        self._origin_ix, self._origin_iy = int(state.origin_ix), int(state.origin_iy)
+        self._count = count.copy()
+        self._sum = elevation * count
+        self.points_outside_cap = 0
+
     def _clipped_axis(self, origin: int, size: int, low: int, high: int):
         """New (origin, size) for one axis, grown to cover [low, high] but
         never past max_cells.
@@ -180,4 +228,5 @@ class ElevationGrid:
             elevation=elevation,
             center_x=(self._origin_ix + cols / 2.0) * self.resolution,
             center_y=(self._origin_iy + rows / 2.0) * self.resolution,
-            resolution=self.resolution)
+            resolution=self.resolution,
+            origin_ix=int(self._origin_ix), origin_iy=int(self._origin_iy))

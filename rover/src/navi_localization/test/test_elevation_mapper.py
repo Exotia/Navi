@@ -84,7 +84,7 @@ def snapshot():
     elevation = np.array([[1.0, 2.0, 3.0],
                           [4.0, 5.0, np.nan]], dtype=np.float32)
     return GridSnapshot(elevation=elevation, center_x=10.0, center_y=-5.0,
-                        resolution=0.10)
+                        resolution=RESOLUTION, origin_ix=0, origin_iy=0)
 
 
 def test_the_message_carries_one_elevation_layer_in_the_map_frame():
@@ -99,11 +99,11 @@ def test_the_message_carries_one_elevation_layer_in_the_map_frame():
 def test_the_message_geometry_is_the_snapshots():
     message = build_grid_map_message(snapshot(), 'map', Time())
 
-    assert message.info.resolution == pytest.approx(0.10)
+    assert message.info.resolution == pytest.approx(RESOLUTION)
     # grid_map's length_x counts the rows of its own matrix, which run along
-    # x - three columns of the snapshot, so 0.30 m.
-    assert message.info.length_x == pytest.approx(0.30)
-    assert message.info.length_y == pytest.approx(0.20)
+    # x - three columns of the snapshot, so 3 * RESOLUTION.
+    assert message.info.length_x == pytest.approx(3 * RESOLUTION)
+    assert message.info.length_y == pytest.approx(2 * RESOLUTION)
     assert message.info.pose.position.x == pytest.approx(10.0)
     assert message.info.pose.position.y == pytest.approx(-5.0)
     assert message.info.pose.orientation.w == pytest.approx(1.0)

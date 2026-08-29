@@ -16,28 +16,28 @@ from navi_localization.elevation_grid import (
 
 def test_a_single_point_makes_a_single_cell_holding_its_height():
     grid = ElevationGrid()
-    grid.update([(0.05, 0.05, 1.25)])
+    grid.update([(0.02, 0.02, 1.25)])
 
     snapshot = grid.snapshot()
     assert snapshot.elevation.shape == (1, 1)
     assert snapshot.elevation[0, 0] == pytest.approx(1.25)
-    # The cell spans [0.0, 0.1) in both axes, so its centre - and the
-    # one-cell grid's centre - is at (0.05, 0.05).
-    assert snapshot.center_x == pytest.approx(0.05)
-    assert snapshot.center_y == pytest.approx(0.05)
+    # The cell spans [0.0, 0.05) in both axes, so its centre - and the
+    # one-cell grid's centre - is at (0.025, 0.025).
+    assert snapshot.center_x == pytest.approx(0.025)
+    assert snapshot.center_y == pytest.approx(0.025)
     assert snapshot.resolution == pytest.approx(RESOLUTION)
 
 
 def test_a_cell_holds_the_mean_of_the_points_in_it():
     grid = ElevationGrid()
-    grid.update([(0.01, 0.01, 1.0), (0.09, 0.09, 2.0), (0.05, 0.05, 3.0)])
+    grid.update([(0.01, 0.01, 1.0), (0.04, 0.04, 2.0), (0.02, 0.02, 3.0)])
 
     assert grid.snapshot().elevation[0, 0] == pytest.approx(2.0)
 
 
 def test_the_grid_grows_to_cover_new_points_and_leaves_the_gap_empty():
     grid = ElevationGrid()
-    grid.update([(0.05, 0.05, 1.0), (0.25, 0.05, 3.0)])
+    grid.update([(0.02, 0.02, 1.0), (0.12, 0.02, 3.0)])
 
     elevation = grid.snapshot().elevation
     assert elevation.shape == (1, 3)
@@ -48,7 +48,7 @@ def test_the_grid_grows_to_cover_new_points_and_leaves_the_gap_empty():
 
 def test_rows_run_along_y_and_columns_along_x():
     grid = ElevationGrid()
-    grid.update([(0.05, 0.05, 1.0), (0.05, 0.25, 2.0)])
+    grid.update([(0.02, 0.02, 1.0), (0.02, 0.12, 2.0)])
 
     elevation = grid.snapshot().elevation
     assert elevation.shape == (3, 1)
@@ -68,8 +68,8 @@ def test_the_wrappers_padding_zeros_and_nans_are_thrown_away():
 
 def test_a_later_cloud_replaces_the_cells_it_covers_and_keeps_the_rest():
     grid = ElevationGrid()
-    grid.update([(0.05, 0.05, 1.0), (0.25, 0.05, 5.0)])
-    grid.update([(0.05, 0.05, 4.0)])
+    grid.update([(0.02, 0.02, 1.0), (0.12, 0.02, 5.0)])
+    grid.update([(0.02, 0.02, 4.0)])
 
     elevation = grid.snapshot().elevation
     # Replaced, not averaged with the old value: the fused cloud is
@@ -85,12 +85,12 @@ def test_growth_clips_to_the_cap_instead_of_freezing_short_of_it():
     # there was still room to grow up to the cap. It must clip to exactly
     # max_cells instead, keeping the cells already mapped.
     grid = ElevationGrid(max_cells=5)
-    grid.update([(0.05, 0.05, 1.0), (0.25, 0.05, 2.0)])   # cols 0, 2 -> 3 cols
+    grid.update([(0.02, 0.02, 1.0), (0.12, 0.02, 2.0)])   # cols 0, 2 -> 3 cols
     assert grid.snapshot().elevation.shape == (1, 3)
 
     # This point's column index is 5, so the union with the existing
     # window (cols 0-2) needs 6 columns - one past the cap of 5.
-    grid.update([(0.55, 0.05, 3.0)])
+    grid.update([(0.27, 0.02, 3.0)])
 
     snapshot = grid.snapshot()
     elevation = snapshot.elevation
@@ -105,7 +105,7 @@ def test_growth_clips_to_the_cap_instead_of_freezing_short_of_it():
     # A later point at column 4 now falls inside the grown-to-cap window,
     # proving the window is not frozen: it must be binned, not counted
     # outside.
-    grid.update([(0.45, 0.05, 4.0)])
+    grid.update([(0.22, 0.02, 4.0)])
     elevation = grid.snapshot().elevation
     assert elevation.shape == (1, 5)
     assert elevation[0, 4] == pytest.approx(4.0)
@@ -137,3 +137,55 @@ def test_an_unchanged_grid_compares_equal_so_it_is_not_republished():
 
 def test_an_empty_grid_has_no_snapshot():
     assert ElevationGrid().snapshot() is None
+
+
+def test_the_resolution_is_five_centimetres_and_the_cap_sixty_metres():
+    from navi_localization.elevation_grid import RESOLUTION, MAX_CELLS, MAX_EXTENT_M
+    assert RESOLUTION == 0.05
+    assert MAX_EXTENT_M == 60.0
+    assert MAX_CELLS == 1200
+
+
+def test_state_round_trips_through_replace():
+    from navi_localization.elevation_grid import ElevationGrid
+    grid = ElevationGrid()
+    grid.update([[0.12, 0.31, 1.0], [0.12, 0.31, 3.0], [-0.4, 0.9, 2.0]])
+    state = grid.state()
+
+    other = ElevationGrid()
+    other.replace(state)
+
+    assert other.snapshot().equals(grid.snapshot())
+    assert state.elevation.dtype == np.float32
+    assert state.count.dtype == np.int32
+    # Replacing reproduces the grid's exact internal state, not just its
+    # visible mean: the same later update(), on the original and on the
+    # replayed copy, must land on the same value. (update() replaces a
+    # touched cell's running mean rather than accumulating into it - see
+    # test_a_later_cloud_replaces_the_cells_it_covers_and_keeps_the_rest -
+    # so this cell's mean of two points becomes this new single point,
+    # 5.0, on both grids alike.)
+    grid.update([[0.12, 0.31, 5.0]])
+    other.update([[0.12, 0.31, 5.0]])
+    assert other.snapshot().equals(grid.snapshot())
+    assert other.snapshot().elevation[state.count.argmax() // state.count.shape[1],
+                                      state.count.argmax() % state.count.shape[1]] \
+        == pytest.approx(5.0)
+
+
+def test_state_of_an_empty_grid_is_none_and_replace_with_it_clears():
+    from navi_localization.elevation_grid import ElevationGrid
+    grid = ElevationGrid()
+    assert grid.state() is None
+    grid.update([[0.0, 0.0, 1.0], [0.1, 0.0, 1.0]])
+    grid.clear()
+    assert grid.snapshot() is None
+    assert grid.points_outside_cap == 0
+
+
+def test_the_snapshot_says_where_its_origin_is_on_the_lattice():
+    from navi_localization.elevation_grid import ElevationGrid
+    grid = ElevationGrid()
+    grid.update([[0.52, -0.31, 1.0]])           # cell ix=10, iy=-7 at 0.05 m
+    snapshot = grid.snapshot()
+    assert (snapshot.origin_ix, snapshot.origin_iy) == (10, -7)
