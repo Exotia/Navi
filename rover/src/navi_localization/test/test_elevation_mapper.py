@@ -775,3 +775,20 @@ def test_loading_a_map_coarser_than_the_parameter_adopts_its_size(node):
     node._obstacles.replace(np.zeros((0, 3), dtype=np.int32), voxel_m=0.05)
     node._on_command(String(data='{"action":"load","name":"coarse"}'))
     assert node._obstacles.voxel_m == pytest.approx(0.10)
+
+
+def test_obstacle_tiles_carry_the_frame_id_parameter_like_terrain_tiles(ros, tmp_path):
+    node = ElevationMapper(map_directory=str(tmp_path))
+    node._frame_id = 'odom'
+    node._tile_publisher = Recorder()
+    node._obstacle_publisher = Recorder()
+    node._status_publisher = Recorder()
+    try:
+        node._on_cloud(wall_cloud())
+        node._tick(now=0.0)
+        frames = {m.header.frame_id.split('|')[0] for m in node._obstacle_publisher.messages}
+        assert frames == {'odom'}
+        assert {m.header.frame_id for m in node._tile_publisher.messages} == {"odom"}
+        assert parse_obstacle_frame(node._obstacle_publisher.messages[0].header.frame_id)[:2] == (0, 0)
+    finally:
+        node.destroy_node()

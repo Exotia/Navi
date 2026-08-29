@@ -59,6 +59,10 @@ class FakeLocalization(Node):
         can do harm: whoever is downstream would see the fake square and the
         real rover interleaved and have no way to tell. Costs one graph
         query at startup."""
+        # Discovery is asynchronous: counted straight after construction
+        # the graph only ever contained this node, and the guard never
+        # fired. A second is what DDS needs to hear about a peer.
+        time.sleep(1.0)
         if self.count_publishers("/localization/pose") > 1:
             self.get_logger().error(
                 "something else is already publishing /localization/pose on this "

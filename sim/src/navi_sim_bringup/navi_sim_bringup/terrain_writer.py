@@ -201,7 +201,7 @@ def obstacle_key_from_frame_id(frame_id: str):
     compatible with a message built before the size became a parameter).
     """
     parts = frame_id.split('|')
-    if len(parts) not in (3, 4) or parts[0] != 'map':
+    if len(parts) not in (3, 4) or not parts[0]:
         raise ValueError(
             f"obstacle tile frame_id {frame_id!r} is not 'map|<ix>|<iy>' "
             "or 'map|<ix>|<iy>|<voxel_m>'")

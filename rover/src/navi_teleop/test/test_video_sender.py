@@ -461,3 +461,14 @@ def test_stopping_terminates_the_stdin_pipeline():
         assert node._state == "stopped"
     finally:
         node.destroy_node()
+
+
+def test_the_v4l2_streaming_detail_names_the_frame_size_like_the_zed_path(sender):
+    # The ground station re-pins its decoder from the 'streaming' detail;
+    # a v4l2 rover after a zed_topic session (640x360) must reset it to
+    # its own size or the pipeline never negotiates.
+    node, _ = sender
+    node._on_request(_request({"enable": True, "host": "127.0.0.1", "port": 5600,
+                               "width": 1344, "height": 376}))
+    assert node._state == 'streaming'
+    assert node._detail.endswith(" 672x376"), node._detail

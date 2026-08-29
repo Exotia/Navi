@@ -141,7 +141,8 @@ def build_tile_message(key, tile: np.ndarray, frame_id: str, stamp) -> GridMap:
     return message
 
 
-def build_obstacle_message(key, voxels: np.ndarray, stamp, voxel_m: float = VOXEL) -> PointCloud2:
+def build_obstacle_message(key, voxels: np.ndarray, stamp, voxel_m: float = VOXEL,
+                           frame_id: str = 'map') -> PointCloud2:
     """One obstacle tile's occupied voxels as a PointCloud2 of their
     centres, `(index + 0.5) * voxel_m` in the map frame.
 
@@ -159,7 +160,7 @@ def build_obstacle_message(key, voxels: np.ndarray, stamp, voxel_m: float = VOXE
     voxels = np.asarray(voxels, dtype=np.int32).reshape(-1, 3)
     centres = ((voxels.astype(np.float64) + 0.5) * voxel_m).astype(np.float32)
     message = PointCloud2()
-    message.header.frame_id = f"map|{ix}|{iy}|{voxel_m}"
+    message.header.frame_id = f"{frame_id}|{ix}|{iy}|{voxel_m}"
     message.header.stamp = stamp
     message.height = 1
     message.width = int(centres.shape[0])
@@ -177,13 +178,14 @@ def build_obstacle_message(key, voxels: np.ndarray, stamp, voxel_m: float = VOXE
 
 
 def parse_obstacle_frame(frame_id: str) -> tuple:
-    """`"map|<ix>|<iy>"` or `"map|<ix>|<iy>|<voxel_m>"` -> `(ix, iy,
-    voxel_m)`: the inverse of the frame_id `build_obstacle_message` writes.
+    """`"<frame>|<ix>|<iy>"` or `"<frame>|<ix>|<iy>|<voxel_m>"` -> `(ix, iy,
+    voxel_m)`: the inverse of the frame_id `build_obstacle_message` writes
+    (the frame is the node's `frame_id` parameter, "map" by default).
     A frame_id without the 4th part means `voxel_m == RESOLUTION` (0.05) -
     backwards compatible with a message built before the obstacle voxel
     size became a parameter, which was always that size."""
     parts = frame_id.split('|')
-    if len(parts) not in (3, 4) or parts[0] != 'map':
+    if len(parts) not in (3, 4) or not parts[0]:
         raise ValueError(f"not an obstacle tile frame_id: {frame_id!r}")
     ix, iy = int(parts[1]), int(parts[2])
     voxel_m = float(parts[3]) if len(parts) == 4 else RESOLUTION
@@ -395,7 +397,7 @@ class ElevationMapper(Node):
                     build_tile_message(key, empty_terrain, self._frame_id, stamp))
             else:
                 self._obstacle_publisher.publish(build_obstacle_message(
-                    key, empty_voxels, stamp, voxel_m=self._obstacles.voxel_m))
+                    key, empty_voxels, stamp, voxel_m=self._obstacles.voxel_m, frame_id=self._frame_id))
             sent += 1
         for key, tile in self._scheduler.due(now):
             self._tile_publisher.publish(build_tile_message(key, tile, self._frame_id, stamp))
@@ -405,7 +407,7 @@ class ElevationMapper(Node):
         # blocky obstacles drawn on top of it.
         for key, voxels in self._obstacle_scheduler.due(now):
             self._obstacle_publisher.publish(build_obstacle_message(
-                key, voxels, stamp, voxel_m=self._obstacles.voxel_m))
+                key, voxels, stamp, voxel_m=self._obstacles.voxel_m, frame_id=self._frame_id))
             self._obstacle_scheduler.published(key, voxels, now)
 
     # -- commands ---------------------------------------------------------

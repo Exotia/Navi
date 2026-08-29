@@ -208,7 +208,11 @@ class VideoSender(Node):
             return
 
         self.get_logger().info(f"streaming to {request.host}:{request.port}")
-        self._set_state('streaming', f"{request.host}:{request.port}")
+        # WxH in the 'streaming' detail, as the zed_topic path reports it:
+        # the ground station re-pins its decoder from this line, and a
+        # v4l2 rover after a zed_topic session (640x360) needs it too.
+        self._set_state('streaming',
+                        f"{request.host}:{request.port} {request.width // 2}x{request.height}")
 
     def _on_image(self, msg: Image) -> None:
         if self._pending is not None:
