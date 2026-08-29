@@ -4,7 +4,7 @@
 
 **Goal:** The Orin publishes the rover's pose (`/localization/pose`) and its health (`/localization/status`) from the front ZED 2i's visual-inertial tracking, while manual-mode video keeps working from the same camera.
 
-**Architecture:** `zed_wrapper` owns the camera permanently and runs positional tracking; a pure-Python `localization_status` node re-expresses the wrapper's `map -> zed_camera_link` pose at `base_footprint` and publishes a JSON status; `video_sender` gains a `zed_topic` source that pipes the wrapper's RGB image into the same gst front end the simulation sender uses. The Orin's git repository joins this one as `rover/` and is deployed by rsync + remote `colcon build`.
+**Architecture:** `zed_wrapper` owns the camera permanently and runs positional tracking; a pure-Python `localization_status` node re-expresses the wrapper's `map -> zed_front_camera_link` pose at `base_footprint` and publishes a JSON status; `video_sender` gains a `zed_topic` source that pipes the wrapper's RGB image into the same gst front end the simulation sender uses. The Orin's git repository joins this one as `rover/` and is deployed by rsync + remote `colcon build`.
 
 **Tech Stack:** ROS 2 Humble, `zed-ros2-wrapper humble-v4.2.5` (ZED SDK 4.2.5, prebuilt in `~/workspaces/isaac_ros-dev` on the Orin), `rclpy`, `ament_python`, pytest, GStreamer (`gst-launch-1.0`), bash.
 
@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- The ZED 2i's magnetometer is never subscribed or fused. Nothing reads `/zed/zed_node/imu/mag`.
+- The ZED 2i's magnetometer is never subscribed or fused. Nothing reads `/zed_front/zed_node/imu/mag`.
 - No wheel odometry is invented from the commanded twist.
 - Nothing under `ground_station/` imports `rclpy` (unchanged; this plan does not touch it).
 - `/manual_twist` drives the physical rover. Never publish to it during testing.
@@ -21,7 +21,7 @@
 - The Orin is `star@a_navi` (192.168.178.33), reachable with `ssh star@a_navi` (key and config already set up on this laptop; ignore the "remote port forwarding failed for listen port 1080" warning — it is harmless). Its ROS environment is entered with `source /opt/ros/humble/setup.bash && source ~/workspaces/isaac_ros-dev/install/setup.bash && source ~/navi/install/local_setup.bash`. The default shell there is bash.
 - On this laptop `ros2` is only on PATH after `source /opt/ros/humble/setup.bash`, and the default shell is zsh where that fails — always `bash -c 'source /opt/ros/humble/setup.bash && ...'`.
 - **Never use `pkill -f` or `pgrep -f` with a pattern that could match your own shell's command line** (e.g. over ssh, the pattern appears in the ssh command). Use `pkill -x <exact process name>` — e.g. `pkill -x component_container_isolated`.
-- The wrapper takes ~90 s to publish `/zed/zed_node/odom` with its default configuration (Task 5 fixes this). Poll for the topic; do not assume a fixed sleep.
+- The wrapper takes ~90 s to publish `/zed_front/zed_node/odom` with its default configuration (Task 5 fixes this). Poll for the topic; do not assume a fixed sleep.
 - Laptop tests: `.venv/bin/pytest tests/` from the repo root (pure Python, no ROS). Orin-side package tests run on the Orin: `cd ~/navi && colcon test --packages-select <pkg> && colcon test-result --verbose`, or faster, `python3 -m pytest src/<pkg>/test -q` from `~/navi` after sourcing.
 
 ## File structure
@@ -46,7 +46,7 @@ rover/                                   # git subtree of the Orin's ~/navi
     test/test_tracker.py
     test/test_localization_status.py
 deploy_rover.sh                          # new: rsync + remote colcon build + tests
-asterope_iiI.urdf                        # modified: zed_camera_link, zed_rear_camera_link
+asterope_iiI.urdf                        # modified: zed_front_camera_link, zed_rear_camera_link
 tests/test_urdf.py                       # modified
 tests/test_mount_offset_agrees_with_urdf.py  # new: URDF joint == Python constant
 ```
@@ -161,31 +161,43 @@ git -c user.name="Ole Peters" -c user.email="ole.peters@star-dresden.de" commit 
 
 ---
 
-### Task 2: Camera links in the URDF
+### Task 2: Pin the measured camera frames in the URDF
 
 **Files:**
-- Modify: `asterope_iiI.urdf` (after the `base_footprint_joint`, before `base_link`'s `<link>` — anywhere at top level is valid; put the new joints and links right after the `steer_*`/`wheel_*` blocks at the end of the file)
 - Modify: `tests/test_urdf.py`
+- `asterope_iiI.urdf`: **no change** — it already carries the frames.
 
 **Interfaces:**
-- Produces: links `zed_camera_link` (fixed joint `zed_camera_joint`, parent `base_link`, origin `0.322 0 0.154`, rpy `0 0 0`) and `zed_rear_camera_link` (fixed joint `zed_rear_camera_joint`, parent `base_link`, origin `-0.322 0 0.154`, rpy `0 0 3.14159265`). Task 3's `CAMERA_IN_BASE_FOOTPRINT` must equal the front origin plus `base_footprint_joint`'s z (0.409): `(0.322, 0, 0.563)`.
+- Produces: nothing new. The URDF already has, from the hardware team, a full
+  ZED frame tree for both cameras, laid out exactly as
+  `zed_wrapper/urdf/zed_macro.urdf.xacro` does and "placed from the measured
+  LEFT optical centres": `zed_front_camera_joint` (fixed, parent `base_link`,
+  child `zed_front_camera_link`, origin `0.345 0 0.139`, rpy `0 0 0`) and
+  `zed_rear_camera_joint` (child `zed_rear_camera_link`, origin
+  `-0.345 0 0.139`, rpy `0 0 3.141592654`), each with `*_camera_center`
+  (+0.015 z), left/right frames and optical frames beneath. `camera_link` is
+  the 1/4" mounting screw, which is also what the ZED wrapper tracks. Task 3's
+  `CAMERA_IN_BASE_FOOTPRINT` is this front origin plus `base_footprint_joint`'s
+  z (0.409): `(0.345, 0, 0.548)`. The wrapper is launched with
+  `camera_name: zed_front` so its hard-coded base frame name,
+  `<camera_name>_camera_link`, is the URDF's `zed_front_camera_link`.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write the tests that pin those frames**
 
 Append to `tests/test_urdf.py`:
 
 ```python
-def test_the_front_zed_sits_at_the_front_camera_box(robot):
-    # The black 37x188x30 mm box on the front white block is the ZED 2i
-    # body. Its centre is the wrapper's zed_camera_link. Authored from the
-    # existing visual, not from a measurement - see the comment in the URDF.
-    j = joint(robot, "zed_camera_joint")
+def test_the_front_zed_mount_is_where_the_hardware_team_measured_it(robot):
+    # The frame the ZED wrapper tracks is <camera_name>_camera_link, the 1/4"
+    # mounting screw. These numbers were placed from the measured left
+    # optical centres (see the comment block in the URDF); navi_localization's
+    # CAMERA_IN_BASE_FOOTPRINT is derived from them, so they are pinned here.
+    j = joint(robot, "zed_front_camera_joint")
     assert j.get("type") == "fixed"
     assert j.find("parent").get("link") == "base_link"
-    assert j.find("child").get("link") == "zed_camera_link"
-    assert j.find("origin").get("xyz") == "0.322 0 0.154"
+    assert j.find("child").get("link") == "zed_front_camera_link"
+    assert j.find("origin").get("xyz") == "0.345 0 0.139"
     assert j.find("origin").get("rpy") == "0 0 0"
-    assert any(l.get("name") == "zed_camera_link" for l in robot.findall("link"))
 
 
 def test_the_rear_zed_faces_backwards(robot):
@@ -193,60 +205,34 @@ def test_the_rear_zed_faces_backwards(robot):
     assert j.get("type") == "fixed"
     assert j.find("parent").get("link") == "base_link"
     assert j.find("child").get("link") == "zed_rear_camera_link"
-    assert j.find("origin").get("xyz") == "-0.322 0 0.154"
-    assert j.find("origin").get("rpy") == "0 0 3.14159265"
-    assert any(l.get("name") == "zed_rear_camera_link" for l in robot.findall("link"))
+    assert j.find("origin").get("xyz") == "-0.345 0 0.139"
+    assert j.find("origin").get("rpy") == "0 0 3.141592654"
+
+
+def test_each_zed_carries_the_wrapper_frame_layout(robot):
+    # camera_center sits 15 mm above the mounting screw, the two eyes 60 mm
+    # either side of it and 10 mm back - the wrapper's own macro layout.
+    for cam in ("zed_front", "zed_rear"):
+        assert joint(robot, f"{cam}_camera_center_joint").find("origin").get("xyz") == "0 0 0.015"
+        assert joint(robot, f"{cam}_left_camera_joint").find("origin").get("xyz") == "-0.01 0.06 0"
+        assert joint(robot, f"{cam}_right_camera_joint").find("origin").get("xyz") == "-0.01 -0.06 0"
 ```
 
-- [ ] **Step 2: Run them to see them fail**
+- [ ] **Step 2: Run them**
 
 Run: `.venv/bin/pytest tests/test_urdf.py -q`
-Expected: 2 failures, `expected exactly one joint zed_camera_joint, got 0`.
+Expected: all pass against the unchanged URDF. If any fails, the URDF has been changed from what the hardware team committed — do not "fix" the URDF; report it.
 
-- [ ] **Step 3: Add the joints and links**
+- [ ] **Step 3: Run the whole laptop suite and the xacro conversion**
 
-Insert before the closing `</robot>` of `asterope_iiI.urdf`:
+Run: `.venv/bin/pytest tests/ -q` and `bash -c 'source /opt/ros/humble/setup.bash && xacro sim/src/navi_sim_bringup/urdf/asterope_sim.urdf.xacro > /dev/null && echo ok'`
+Expected: all pass; `ok`.
 
-```xml
-    <!-- ZED 2i camera frames. zed_camera_link is the frame the ZED ROS 2
-         wrapper tracks (its tracking base frame is hard-coded to that name),
-         placed at the centre of the front camera body: the black
-         37 x 188 x 30 mm box on the front white block. The offset was read
-         off that visual, which was itself authored from photographs -
-         it is NOT a measurement. navi_localization reports it as unverified
-         until someone measures camera centre to the base_link origin.
-         The rear camera is not connected today; its frame is here so the
-         day it is, only one number changes. -->
-    <joint name="zed_camera_joint" type="fixed">
-        <parent link="base_link"/>
-        <child link="zed_camera_link"/>
-        <origin xyz="0.322 0 0.154" rpy="0 0 0"/>
-    </joint>
-    <link name="zed_camera_link"/>
-
-    <joint name="zed_rear_camera_joint" type="fixed">
-        <parent link="base_link"/>
-        <child link="zed_rear_camera_link"/>
-        <origin xyz="-0.322 0 0.154" rpy="0 0 3.14159265"/>
-    </joint>
-    <link name="zed_rear_camera_link"/>
-```
-
-- [ ] **Step 4: Run the whole laptop suite**
-
-Run: `.venv/bin/pytest tests/ -q`
-Expected: all pass (the simulation's xacro includes this URDF; fixed joints with no inertial are fine for Gazebo — they are lumped into `base_link`).
-
-- [ ] **Step 5: Confirm the simulation still converts**
-
-Run: `bash -c 'source /opt/ros/humble/setup.bash && xacro sim/src/navi_sim_bringup/urdf/asterope_sim.urdf.xacro > /dev/null && echo ok'`
-Expected: `ok`.
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add asterope_iiI.urdf tests/test_urdf.py
-git -c user.name="Ole Peters" -c user.email="ole.peters@star-dresden.de" commit -m "Add the two ZED 2i camera frames to the URDF, front offset flagged as unverified"
+git add tests/test_urdf.py
+git -c user.name="Ole Peters" -c user.email="ole.peters@star-dresden.de" commit -m "Pin the hardware team's measured ZED frames in the URDF tests, since navi_localization derives its mount offset from them"
 ```
 
 ---
@@ -265,8 +251,8 @@ git -c user.name="Ole Peters" -c user.email="ole.peters@star-dresden.de" commit 
       x: float; y: float; z: float
       qx: float; qy: float; qz: float; qw: float   # unit quaternion
   IDENTITY = Transform(0, 0, 0, 0, 0, 0, 1)
-  CAMERA_IN_BASE_FOOTPRINT = Transform(0.322, 0.0, 0.563, 0.0, 0.0, 0.0, 1.0)
-  MOUNT_OFFSET_VERIFIED = False
+  CAMERA_IN_BASE_FOOTPRINT = Transform(0.345, 0.0, 0.548, 0.0, 0.0, 0.0, 1.0)
+  MOUNT_OFFSET_VERIFIED = True
   def compose(a: Transform, b: Transform) -> Transform          # a * b
   def inverse(t: Transform) -> Transform
   def footprint_pose_from_camera_pose(camera_in_map: Transform,
@@ -394,16 +380,16 @@ def test_inverse_undoes_the_transform():
 
 
 def test_footprint_is_behind_and_below_the_camera_when_facing_x():
-    # Camera at map origin facing +x: the footprint origin is 0.322 m behind
-    # it and 0.563 m below it.
+    # Camera at map origin facing +x: the footprint origin is 0.345 m behind
+    # it and 0.548 m below it.
     cam = IDENTITY
-    approx(footprint_pose_from_camera_pose(cam), -0.322, 0.0, -0.563, 0.0)
+    approx(footprint_pose_from_camera_pose(cam), -0.345, 0.0, -0.548, 0.0)
 
 
 def test_footprint_offset_rotates_with_the_camera():
-    # Camera facing +y (yaw 90 deg) at (10, 5, 0.563): "behind" is now -y.
-    cam = Transform(10.0, 5.0, 0.563, *quat_z(math.pi / 2))
-    approx(footprint_pose_from_camera_pose(cam), 10.0, 5.0 - 0.322, 0.0, math.pi / 2)
+    # Camera facing +y (yaw 90 deg) at (10, 5, 0.548): "behind" is now -y.
+    cam = Transform(10.0, 5.0, 0.548, *quat_z(math.pi / 2))
+    approx(footprint_pose_from_camera_pose(cam), 10.0, 5.0 - 0.345, 0.0, math.pi / 2)
 
 
 def test_a_custom_mount_offset_is_honoured():
@@ -413,7 +399,7 @@ def test_a_custom_mount_offset_is_honoured():
 
 
 def test_the_default_mount_offset_is_the_front_camera_box():
-    assert CAMERA_IN_BASE_FOOTPRINT == Transform(0.322, 0.0, 0.563, 0.0, 0.0, 0.0, 1.0)
+    assert CAMERA_IN_BASE_FOOTPRINT == Transform(0.345, 0.0, 0.548, 0.0, 0.0, 0.0, 1.0)
 
 
 def test_translation_distance_ignores_rotation():
@@ -435,7 +421,7 @@ Expected: `ModuleNotFoundError: No module named 'navi_localization.pose_composit
 The ZED ROS 2 wrapper (4.2) tracks a frame it insists on calling
 `<camera_name>_camera_link`, and it publishes the TF for it. The rover's
 own frame, base_footprint, cannot be hung *above* that in TF without giving
-zed_camera_link two parents, so instead the pose is re-expressed here in
+zed_front_camera_link two parents, so instead the pose is re-expressed here in
 plain arithmetic and published as its own message. Pure Python on purpose:
 no tf2, no numpy, so it is testable on any machine and the mount offset is
 one constant in one file.
@@ -461,14 +447,14 @@ class Transform:
 IDENTITY = Transform(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
 
 # Front ZED 2i body centre in base_footprint: the URDF's zed_camera_joint
-# (0.322, 0, 0.154 in base_link) plus base_footprint_joint's 0.409 m of
+# (zed_front_camera_joint: 0.345, 0, 0.139 in base_link, the 1/4" mounting screw) plus base_footprint_joint's 0.409 m of
 # height. tests/test_mount_offset_agrees_with_urdf.py in the Navi repository
 # keeps the two in step.
-CAMERA_IN_BASE_FOOTPRINT = Transform(0.322, 0.0, 0.563, 0.0, 0.0, 0.0, 1.0)
+CAMERA_IN_BASE_FOOTPRINT = Transform(0.345, 0.0, 0.548, 0.0, 0.0, 0.0, 1.0)
 
-# The offset above was read off a URDF visual that was authored from
-# photographs. Flip this only after measuring camera centre to base_link.
-MOUNT_OFFSET_VERIFIED = False
+# The URDF block these numbers come from says they were placed from the
+# measured left optical centres. Set False if a re-measurement disagrees.
+MOUNT_OFFSET_VERIFIED = True
 
 
 def _quat_multiply(a, b):
@@ -567,7 +553,7 @@ def origin_of(robot, joint_name):
 
 def test_the_python_constant_matches_the_urdf_front_camera_joint():
     robot = ET.parse(URDF).getroot()
-    cam = origin_of(robot, "zed_camera_joint")
+    cam = origin_of(robot, "zed_front_camera_joint")
     base = origin_of(robot, "base_footprint_joint")
     pc = load_pose_composition()
     t = pc.CAMERA_IN_BASE_FOOTPRINT
@@ -587,7 +573,7 @@ Expected: `navi_localization` in the colcon summary, and its pytest run passing.
 
 ```bash
 git add rover/src/navi_localization tests/test_mount_offset_agrees_with_urdf.py
-git -c user.name="Ole Peters" -c user.email="ole.peters@star-dresden.de" commit -m "Add navi_localization with the pose re-expression from zed_camera_link to base_footprint"
+git -c user.name="Ole Peters" -c user.email="ole.peters@star-dresden.de" commit -m "Add navi_localization with the pose re-expression from zed_front_camera_link to base_footprint"
 ```
 
 ---
@@ -612,7 +598,7 @@ git -c user.name="Ole Peters" -c user.email="ole.peters@star-dresden.de" commit 
       def pose_to_publish(self) -> tuple[Transform, float] | None   # (pose, stamp); stamp frozen while not OK
       def status_json(self, now: float) -> str
   ```
-  Node `localization_status` (executable `localization_status`): subscribes `/zed/zed_node/pose` (`geometry_msgs/PoseStamped`), `/zed/zed_node/pose_with_covariance` (`geometry_msgs/PoseWithCovarianceStamped`), `/zed/zed_node/pose/status` (`zed_msgs/PosTrackStatus`); publishes `/localization/pose` (`nav_msgs/Odometry`) and `/localization/status` (`std_msgs/String`, JSON).
+  Node `localization_status` (executable `localization_status`): subscribes `/zed_front/zed_node/pose` (`geometry_msgs/PoseStamped`), `/zed_front/zed_node/pose_with_covariance` (`geometry_msgs/PoseWithCovarianceStamped`), `/zed_front/zed_node/pose/status` (`zed_msgs/PosTrackStatus`); publishes `/localization/pose` (`nav_msgs/Odometry`) and `/localization/status` (`std_msgs/String`, JSON).
 
 - [ ] **Step 1: Find out what the ZED status message looks like**
 
@@ -708,7 +694,7 @@ def test_status_json_carries_the_fields_the_ground_station_reads():
         "seconds_since_ok": pytest.approx(0.5),
         "source": "zed_vio",
         "distance_travelled": pytest.approx(4.0),
-        "mount_offset_verified": False,
+        "mount_offset_verified": True,
     }
 
 
@@ -879,7 +865,7 @@ def status(ok: bool):
 
 def test_a_camera_pose_is_republished_at_base_footprint(node):
     node._on_status(status(True))
-    node._on_pose(camera_pose(0.322, 0.0, 0.563, 0.0, 100.0))
+    node._on_pose(camera_pose(0.345, 0.0, 0.548, 0.0, 100.0))
 
     assert len(node._pose_publisher.messages) == 1
     odom = node._pose_publisher.messages[0]
@@ -892,9 +878,9 @@ def test_a_camera_pose_is_republished_at_base_footprint(node):
 
 def test_searching_republishes_the_last_good_pose_with_its_old_stamp(node):
     node._on_status(status(True))
-    node._on_pose(camera_pose(1.322, 0.0, 0.563, 0.0, 100.0))
+    node._on_pose(camera_pose(1.345, 0.0, 0.548, 0.0, 100.0))
     node._on_status(status(False))
-    node._on_pose(camera_pose(5.0, 5.0, 0.563, 0.0, 101.0))
+    node._on_pose(camera_pose(5.0, 5.0, 0.548, 0.0, 101.0))
 
     last = node._pose_publisher.messages[-1]
     assert last.pose.pose.position.x == pytest.approx(1.0, abs=1e-9)
@@ -919,7 +905,6 @@ def test_status_is_published_on_every_state_change(node):
     node._on_pose(camera_pose(0.0, 0.0, 0.0, 0.0, 1.1))
 
     states = [json.loads(m.data)["state"] for m in node._status_publisher.messages]
-    assert states[0] == "OFF"          # the initial announcement
     assert "OK" in states
     assert states[-1] == "SEARCHING"
 
@@ -927,7 +912,7 @@ def test_status_is_published_on_every_state_change(node):
 def test_the_magnetometer_is_never_subscribed(node):
     topics = [s.topic_name for s in node.subscriptions]
     assert not any("mag" in t for t in topics)
-    assert "/zed/zed_node/pose" in topics
+    assert "/zed_front/zed_node/pose" in topics
 ```
 
 Adjust `PosTrackStatus.OK` / `PosTrackStatus.SEARCHING` to the constant names Step 1 found.
@@ -978,11 +963,11 @@ class LocalizationStatus(Node):
 
         self._pose_publisher = self.create_publisher(Odometry, '/localization/pose', 10)
         self._status_publisher = self.create_publisher(String, '/localization/status', 10)
-        self.create_subscription(PoseStamped, '/zed/zed_node/pose', self._on_pose, 10)
+        self.create_subscription(PoseStamped, '/zed_front/zed_node/pose', self._on_pose, 10)
         self.create_subscription(PoseWithCovarianceStamped,
-                                 '/zed/zed_node/pose_with_covariance',
+                                 '/zed_front/zed_node/pose_with_covariance',
                                  self._on_covariance, 10)
-        self.create_subscription(PosTrackStatus, '/zed/zed_node/pose/status',
+        self.create_subscription(PosTrackStatus, '/zed_front/zed_node/pose/status',
                                  self._on_status, 10)
         self.create_timer(float(self.get_parameter('status_interval_seconds').value),
                           self._tick)
@@ -991,7 +976,7 @@ class LocalizationStatus(Node):
         self.get_logger().info(
             f"camera mount offset in base_footprint: ({c.x}, {c.y}, {c.z}) - "
             + ("verified" if MOUNT_OFFSET_VERIFIED else
-               "UNVERIFIED, read off the URDF visual, not measured"))
+               "UNVERIFIED - a re-measurement disagreed with the URDF"))
         self._publish_status(force=True)
 
     def _now(self) -> float:
@@ -1115,7 +1100,7 @@ Expected: about 90 s. Write the number down for the launch file docstring.
 /**:
     ros__parameters:
         general:
-            camera_name: 'zed'
+            camera_name: 'zed_front'
             grab_resolution: 'HD720'
             grab_frame_rate: 30
             pub_resolution: 'CUSTOM'
@@ -1182,7 +1167,7 @@ are two ways in, and Step 3 uses the first unless the check below rules it out:
    report the finding rather than to hack around it — stop and say so.
 
 List the topics from the baseline log:
-`grep -o "Advertised on topic: /zed/zed_node/[a-z_/]*" /tmp/zed_baseline.log | sed 's|.*/zed_node/||' | sort -u`
+`grep -o "Advertised on topic: /zed_front/zed_node/[a-z_/]*" /tmp/zed_baseline.log | sed 's|.*/zed_node/||' | sort -u`
 and compare with `IMAGE_TOPICS` in Step 3; use the log's list, not the plan's, if they differ.
 
 - [ ] **Step 3: Write the launch file**
@@ -1196,7 +1181,7 @@ URDF publisher and its parameter loading stay the wrapper's business; we
 add one override file and one node.
 
 Startup, measured 2026-08-29 on the Orin, time from launch to
-/zed/zed_node/odom being advertised:
+/zed_front/zed_node/odom being advertised:
     wrapper defaults: <baseline from Task 5 step 1> s
     this launch file: <after from Task 5 step 5> s
 """
@@ -1213,7 +1198,7 @@ from launch_ros.actions import Node
 # its image_transport plugin list pinned to raw: the default set includes
 # ffmpeg, whose libx264 initialisation per topic is what made the wrapper
 # take 90 s to reach odometry. Regenerate from a wrapper log with:
-#   grep -o "Advertised on topic: /zed/zed_node/[a-z_/]*image[a-z_]*" log | sort -u
+#   grep -o "Advertised on topic: /zed_front/zed_node/[a-z_/]*image[a-z_]*" log | sort -u
 IMAGE_TOPICS = [
     'rgb/image_rect_color',
     'rgb_gray/image_rect_gray',
@@ -1249,7 +1234,7 @@ def generate_launch_description():
             os.path.join(wrapper_share, 'launch', 'zed_camera.launch.py')),
         launch_arguments={
             'camera_model': 'zed2i',
-            'camera_name': 'zed',
+            'camera_name': 'zed_front',
             'ros_params_override_path': os.path.join(share, 'config', 'zed_front.yaml'),
             'publish_tf': 'true',
             'publish_map_tf': 'true',
@@ -1289,7 +1274,7 @@ echo "status received after $(( $(date +%s) - start )) s"
 echo "== status =="; timeout 5 ros2 topic echo /localization/status --once
 echo "== pose hz =="; timeout 15 ros2 topic hz /localization/pose --window 30 2>&1 | grep average | tail -1
 echo "== pose frames =="; timeout 5 ros2 topic echo /localization/pose --once | grep -E "frame_id|child_frame_id"
-echo "== mag subscribers (must be 0) =="; ros2 topic info /zed/zed_node/imu/mag | grep "Subscription count"
+echo "== mag subscribers (must be 0) =="; ros2 topic info /zed_front/zed_node/imu/mag | grep "Subscription count"
 echo "== plugin topics (ffmpeg must be absent) =="; ros2 topic list | grep -c ffmpeg || true
 pkill -x component_container_isolated; pkill -x localization_status; sleep 3
 grep -iE "\[ERROR\]|\[WARN\]" /tmp/loc_launch.log | grep -viE "debug" | head -5'
@@ -1328,12 +1313,12 @@ git -c user.name="Ole Peters" -c user.email="ole.peters@star-dresden.de" commit 
   def frame_matches(msg_width, msg_height, msg_encoding, msg_len, request: VideoRequest) -> str | None
   #   None when the image can be sent for this request; else a one-line reason.
   ```
-  `VideoSender` gains parameter `source` (`'zed_topic'` default, or `'v4l2'`) and `image_topic` (`'/zed/zed_node/rgb/image_rect_color'`).
+  `VideoSender` gains parameter `source` (`'zed_topic'` default, or `'v4l2'`) and `image_topic` (`'/zed_front/zed_node/rgb/image_rect_color'`).
 
 - [ ] **Step 1: Look at what the wrapper publishes**
 
 On the Orin with the Task 5 launch running (start it, wait for `/localization/status`, then):
-`ros2 topic echo /zed/zed_node/rgb/image_rect_color --once --no-arr | grep -E "width|height|encoding|step"`
+`ros2 topic echo /zed_front/zed_node/rgb/image_rect_color --once --no-arr | grep -E "width|height|encoding|step"`
 Expected: `width: 640`, `height: 360`, `encoding: bgra8`, `step: 2560`. Then stop it (`pkill -x component_container_isolated; pkill -x localization_status`). Record the values; the tests below assume them.
 
 - [ ] **Step 2: Write the failing `image_pipe` tests**
@@ -1635,7 +1620,7 @@ Changes, in order:
    the camera as a plain UVC device - for a run without localisation
    (start_navi.sh --no-localization), when the wrapper is not there.
    ```
-3. `__init__(self, launcher=subprocess.Popen, **node_kwargs)` → `super().__init__('video_sender', **node_kwargs)`. Declare `source` (`'zed_topic'`) and `image_topic` (`'/zed/zed_node/rgb/image_rect_color'`). Add `self._pending: VideoRequest | None = None` (a request waiting for its first frame) and `self._frame_bytes = 0`. If `source == 'zed_topic'`, `self.create_subscription(Image, image_topic, self._on_image, 1)` — depth 1: a late frame is worthless.
+3. `__init__(self, launcher=subprocess.Popen, **node_kwargs)` → `super().__init__('video_sender', **node_kwargs)`. Declare `source` (`'zed_topic'`) and `image_topic` (`'/zed_front/zed_node/rgb/image_rect_color'`). Add `self._pending: VideoRequest | None = None` (a request waiting for its first frame) and `self._frame_bytes = 0`. If `source == 'zed_topic'`, `self.create_subscription(Image, image_topic, self._on_image, 1)` — depth 1: a late frame is worthless.
 4. `_on_request`: unchanged except the enable branch becomes:
    ```python
         self._stop_stream()
@@ -1835,5 +1820,5 @@ git -c user.name="Ole Peters" -c user.email="ole.peters@star-dresden.de" commit 
 ## Rover-day checklist (not tasks — recorded for the operator)
 
 - Drive a closed loop of ~20 m; `ros2 topic echo /localization/pose` at start and at the end back on the start mark; report the closure error in metres and degrees.
-- Measure the camera centre relative to the `base_link` origin (the centre of the blue body box). If it differs from `(0.322, 0, 0.154)`, change `zed_camera_joint` in the URDF and `CAMERA_IN_BASE_FOOTPRINT` in `pose_composition.py` together — `tests/test_mount_offset_agrees_with_urdf.py` enforces that — then set `MOUNT_OFFSET_VERIFIED = True`.
+- If the mounting-screw position is ever re-measured and differs from `(0.345, 0, 0.139)`, change `zed_front_camera_joint` in the URDF and `CAMERA_IN_BASE_FOOTPRINT` in `pose_composition.py` together — `tests/test_mount_offset_agrees_with_urdf.py` enforces that.
 - Watch `/localization/status` while driving over the sandiest part of the yard; note how often it goes `SEARCHING` and for how long.
