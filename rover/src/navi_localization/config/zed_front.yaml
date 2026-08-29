@@ -11,11 +11,7 @@
             grab_frame_rate: 30
             pub_resolution: 'CUSTOM'
             pub_downscale_factor: 2.0     # 640 x 360 images: the video sender is their only consumer
-            # Not 15.0: the wrapper gates pose and odom publishing on this too,
-            # not just the images (measured - at 15.0 the camera still grabs at
-            # 30 but /zed_front/zed_node/pose and .../odom come out at 15.1 Hz).
-            # Localisation wants the full 30 Hz; the images stay cheap because
-            # pub_downscale_factor already halves them to 640 x 360.
+            # Gates pose and odom publishing too, not just the images: at 15.0 the camera still grabs at 30 but /localization/pose ran at 14 Hz.
             pub_frame_rate: 30.0
         depth:
             depth_mode: 'PERFORMANCE'

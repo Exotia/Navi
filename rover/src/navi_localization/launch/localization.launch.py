@@ -5,32 +5,30 @@ URDF publisher and its parameter loading stay the wrapper's business; we
 add one override file and one node.
 
 Startup, measured 2026-08-29 on the Orin, time from launch to
-/zed_front/zed_node/odom being advertised:
+/zed_front/zed_node/odom being advertised and to the first
+/localization/status message, each run from a verified-clean Orin
+(no component container; note that `pkill -x component_container_isolated`
+is a no-op because comm is truncated to 15 characters - the name that
+works is `component_conta`):
 
-                              domain 0 as found    remote participants excluded
-    wrapper defaults               88.6 s                     4.9 s
-    this launch file          20.2 / 21.5 / 22.6 / 35.9 s     4.5 / 4.7 s
+    this launch file, quiet domain 0    run 1   4.5 s odom / 4.6 s status
+                                        run 2   4.4 s odom / 4.6 s status
+                                        run 3   4.4 s odom / 4.6 s status
+    wrapper defaults, quiet domain 0            4.9 s odom
+    wrapper defaults, domain 0 with a
+      foreign participant present              88.6 s odom
 
-Read the right-hand column first: pinning the image topics to raw saves
-almost nothing on a quiet ROS domain. The left-hand column is what the rover
-actually did on the day, and the reason both numbers there are large is not
-this package.
+What costs the time is not libx264 - the ffmpeg publishers this file turns
+off initialise in well under a second each, which is why the wrapper's own
+defaults also reach odometry in 4.9 s on a quiet domain. It is ROS 2
+discovery: when a foreign participant shares the domain, creating a
+publisher stalls about 3 s per ten publishers (a bare rclpy node making 60
+publishers took 0.1 s on a quiet domain and 17.9 s against one stale
+laptop bringup), so the wrapper's ~100 publishers dominate everything else
+and the 88.6 s figure above is a measurement of that, not of this package.
 
-Creating a ROS publisher on this rover's domain 0 stalls for 3.06 s roughly
-every ten publishers. It is nothing to do with the ZED: a bare rclpy node
-creating 60 publishers takes 0.1 s on a quiet domain and 18 s on domain 0.
-The cause is four /robot_state_publisher nodes belonging to another machine
-on the LAN (the ground station, running the rover simulation) that share
-ROS domain 0; with ROS_LOCALHOST_ONLY=1 they are invisible and the stalls
-disappear. So the wrapper's start-up here is roughly (publishers created)
-x 0.3 s, which is why dropping the 15 ffmpeg publishers takes it from 88.6 s
-to about 21 s, and why the remaining 21 s is unstable - it tracks whatever
-the ground station is doing, not anything in this file.
-
-The fix belongs to the fleet, not here: give the rover and the ground
-station's simulation different ROS_DOMAIN_IDs, or keep the simulation off
-the rover's domain. Until then, budget 20-40 s for this launch file rather
-than the 4.5 s it needs on its own.
+Pinning the image topics to raw is therefore worth keeping because nothing
+on the rover reads those topics, not because it buys seconds.
 """
 
 import os
@@ -43,10 +41,9 @@ from launch_ros.actions import Node
 
 # Every image topic the wrapper hands to image_transport, relative to the
 # node. Each gets its transport list pinned to raw in config/zed_front.yaml,
-# which drops 15 ffmpeg publishers nothing on the rover reads. The libx264
-# initialisation those publishers do is cheap; what they cost is 15 more
-# publisher creations, and on this rover that is the expensive part (see the
-# module docstring).
+# which drops 15 ffmpeg publishers nothing on the rover reads. Their libx264
+# initialisation is cheap; the 15 extra publisher creations are only
+# expensive when a foreign participant shares the domain (module docstring).
 #
 # This is the authoritative list, taken from the parameters image_transport
 # declares rather than from the wrapper's advertised topics - they are not the
