@@ -154,6 +154,9 @@ def test_the_sim_side_node_has_no_subscriptions_at_all():
         # get_subscriptions_info_by_topic reports every subscription anywhere,
         # including the bridge's own rover-side one on the other domain.
         assert len(list(bridge.sim_node.subscriptions)) == 0
-        assert len(list(bridge.rover_node.publishers)) == 0
+        # Every rclpy node owns /rosout and /parameter_events publishers; that
+        # is node infrastructure, not a bridged topic, and stays on its own domain.
+        assert [p.topic_name for p in bridge.rover_node.publishers
+                if p.topic_name not in ("/rosout", "/parameter_events")] == []
     finally:
         bridge.shutdown()
