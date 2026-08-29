@@ -133,10 +133,11 @@ def terrain_sdf(image_uri: str, heightmap: Heightmap,
           </heightmap>
         </geometry>
         <material>
-          <script>
-            <uri>file://media/materials/scripts/gazebo.material</uri>
-            <name>Gazebo/Grey</name>
-          </script>
+          <!-- Orange-brown, not grey: the operator must tell the mapped
+               ground from Gazebo's grey default background at a glance. -->
+          <ambient>0.72 0.42 0.16 1</ambient>
+          <diffuse>0.80 0.47 0.18 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
         </material>
       </visual>
     </link>

@@ -73,6 +73,18 @@
        wheel-versus-ground contact. This lives in the sim-only xacro rather
        than the real URDF because it is a statement about the simulation,
        not a fact about the rover. -->
+  <!-- The rover is drawn black in the ground station's view so it stands
+       out against the orange terrain and Gazebo's grey background. -->
+  <gazebo reference="base_link"><material>Gazebo/Black</material></gazebo>
+  <gazebo reference="steer_front_left"><material>Gazebo/Black</material></gazebo>
+  <gazebo reference="steer_front_right"><material>Gazebo/Black</material></gazebo>
+  <gazebo reference="steer_rear_left"><material>Gazebo/Black</material></gazebo>
+  <gazebo reference="steer_rear_right"><material>Gazebo/Black</material></gazebo>
+  <gazebo reference="wheel_front_left"><material>Gazebo/Black</material></gazebo>
+  <gazebo reference="wheel_front_right"><material>Gazebo/Black</material></gazebo>
+  <gazebo reference="wheel_rear_left"><material>Gazebo/Black</material></gazebo>
+  <gazebo reference="wheel_rear_right"><material>Gazebo/Black</material></gazebo>
+
   <gazebo reference="steer_front_left"><gravity>false</gravity></gazebo>
   <gazebo reference="wheel_front_left"><gravity>false</gravity></gazebo>
   <gazebo reference="steer_front_right"><gravity>false</gravity></gazebo>
