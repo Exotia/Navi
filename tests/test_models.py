@@ -83,3 +83,49 @@ def test_snapshot_is_sorted_by_name():
 
     names = [n.name for n in registry.snapshot()]
     assert names == ["/aaa_node", "/zzz_node"]
+
+
+import math
+
+from ground_station.models import pose_readout_from_odometry, yaw_from_quaternion
+
+
+def test_yaw_of_the_identity_quaternion_is_zero():
+    assert yaw_from_quaternion(0.0, 0.0, 0.0, 1.0) == 0.0
+
+
+def test_yaw_of_a_quarter_turn_about_z():
+    yaw = yaw_from_quaternion(0.0, 0.0, math.sin(math.pi / 4), math.cos(math.pi / 4))
+
+    assert yaw == pytest.approx(math.pi / 2)
+
+
+def test_yaw_is_signed_so_a_right_turn_reads_negative():
+    yaw = yaw_from_quaternion(0.0, 0.0, math.sin(-math.pi / 6), math.cos(-math.pi / 6))
+
+    assert yaw == pytest.approx(-math.pi / 3)
+
+
+def test_pose_readout_pulls_x_y_and_yaw_out_of_an_odometry_message():
+    message = {
+        "header": {"frame_id": "map"},
+        "child_frame_id": "base_footprint",
+        "pose": {"pose": {
+            "position": {"x": 3.25, "y": -1.5, "z": 0.0},
+            "orientation": {"x": 0.0, "y": 0.0,
+                            "z": math.sin(math.pi / 4), "w": math.cos(math.pi / 4)},
+        }},
+    }
+
+    readout = pose_readout_from_odometry(message)
+
+    assert readout["x"] == pytest.approx(3.25)
+    assert readout["y"] == pytest.approx(-1.5)
+    assert readout["yaw"] == pytest.approx(math.pi / 2)
+
+
+def test_pose_readout_of_a_truncated_message_reads_as_the_origin_not_a_crash():
+    # rosbridge hands over whatever JSON arrived. A malformed message must
+    # not take the GUI thread down mid-drive; a readout at the origin is
+    # visibly wrong and recoverable, an exception in a Qt slot is not.
+    assert pose_readout_from_odometry({}) == {"x": 0.0, "y": 0.0, "yaw": 0.0}

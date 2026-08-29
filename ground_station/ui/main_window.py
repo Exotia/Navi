@@ -1,5 +1,7 @@
+import math
 import socket
 import sys
+from time import monotonic
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -21,6 +23,12 @@ SIM_VIDEO_PORT = 5601
 # camera in semi-autonomous mode. One constant, because the test asserts on
 # it and the spec fixes the wording.
 SEMI_AUTO_REFUSAL = "no camera stream in semi-autonomous mode"
+
+# /localization/status arrives at 2 Hz, so three seconds is six missed
+# messages: the rover is gone, not hiccuping. After that the marker stops
+# asserting a health nobody has confirmed since - it reads NO LOCALISATION
+# STATUS, which is what is actually true.
+LOCALIZATION_STATUS_STALE_AFTER_SECONDS = 3.0
 
 
 class MainWindow(QMainWindow):
@@ -53,6 +61,8 @@ class MainWindow(QMainWindow):
         # show the current state immediately instead of a blank marker until
         # the next 2 Hz status message.
         self._localization_status: dict | None = None
+        # monotonic() when that status arrived, or None if none has.
+        self._localization_status_at: float | None = None
 
         input_style = (
             f"background-color: {theme.PANEL}; color: {theme.TEXT}; "
@@ -68,6 +78,13 @@ class MainWindow(QMainWindow):
 
         self.connection_label = QLabel("ROSBRIDGE: DISCONNECTED")
         self.connection_label.setStyleSheet(
+            f"color: {theme.TEXT_DIM}; background-color: {theme.PANEL}; "
+            f"border: 1px solid {theme.BORDER}; border-radius: 4px; padding: 6px 12px; "
+            f"font-family: {theme.MONO_FONT_FAMILY};"
+        )
+
+        self.localization_label = QLabel("LOC: NO POSE")
+        self.localization_label.setStyleSheet(
             f"color: {theme.TEXT_DIM}; background-color: {theme.PANEL}; "
             f"border: 1px solid {theme.BORDER}; border-radius: 4px; padding: 6px 12px; "
             f"font-family: {theme.MONO_FONT_FAMILY};"
@@ -95,6 +112,7 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.port_input)
         header_layout.addWidget(self.connect_button)
         header_layout.addWidget(self.connection_label)
+        header_layout.addWidget(self.localization_label)
 
         self.dashboard_page = DashboardPage(video_receiver=video_receiver)
         self.drive_detail_page = DriveDetailPage()
@@ -190,11 +208,17 @@ class MainWindow(QMainWindow):
         self.ros_client.signals.nodes_received.connect(self._on_nodes)
         self.ros_client.signals.connection_changed.connect(self._on_connection_changed)
         self.ros_client.signals.video_status_received.connect(self._on_video_status)
+        self.ros_client.signals.localization_status_received.connect(
+            self._on_localization_status)
+        self.ros_client.signals.localization_pose_received.connect(
+            self._on_localization_pose)
 
         try:
             self.ros_client.connect()
             self.ros_client.subscribe_manual_twist()
             self.ros_client.subscribe_video_status()
+            self.ros_client.subscribe_localization_status()
+            self.ros_client.subscribe_localization_pose()
         except Exception as exc:
             print(f"ground_station: failed to connect to rosbridge: {exc}", file=sys.stderr)
 
@@ -260,11 +284,23 @@ class MainWindow(QMainWindow):
         self.dashboard_page.video_panel.stop_receiver(keep_failed_reason=True)
         super().closeEvent(event)
 
-    def _check_staleness(self) -> None:
-        elapsed = self.drive_state.seconds_since_last()
+    def _check_staleness(self, now: float | None = None) -> None:
+        now = monotonic() if now is None else now
+        elapsed = self.drive_state.seconds_since_last(now)
         if elapsed is not None and elapsed > self.stale_after_seconds:
             self.dashboard_page.drive_card.mark_stale()
             self.drive_detail_page.mark_stale()
+
+        # The rover unreachable is the case this catches: sim_bridge stops
+        # receiving, the Gazebo rover holds still on its own, and this is
+        # the panel saying so rather than leaving LOCALISED on screen
+        # because that is what the rover said before the link died.
+        if (self._localization_status_at is not None
+                and now - self._localization_status_at
+                > LOCALIZATION_STATUS_STALE_AFTER_SECONDS):
+            self._localization_status = None
+            self._localization_status_at = None
+            self.dashboard_page.video_panel.set_localization_status(None)
 
     def local_address_for(self, host: str, port: int) -> str:
         """Our own address on the interface that reaches the rover. The
@@ -348,6 +384,23 @@ class MainWindow(QMainWindow):
 
     def _on_video_status(self, status: dict) -> None:
         self.dashboard_page.video_panel.apply_status(status)
+
+    def _on_localization_status(self, status: dict) -> None:
+        """Kept here as well as handed to the panel: entering semi-autonomous
+        must show the current state at once rather than a blank marker until
+        the next 2 Hz message."""
+        self._localization_status = status
+        self._localization_status_at = monotonic()
+        self.dashboard_page.video_panel.set_localization_status(status)
+
+    def _on_localization_pose(self, pose: dict) -> None:
+        """Three numbers in the header, at 5 Hz. This is the whole of what
+        the ground station does with the pose - the rover in the Gazebo view
+        is placed over DDS by sim_ik_node, not from here, because this
+        process has no ROS and is not in that path."""
+        self.localization_label.setText(
+            f"LOC: x {pose['x']:.2f}  y {pose['y']:.2f}  "
+            f"yaw {math.degrees(pose['yaw']):.1f}°")
 
     def _on_mode_changed(self, mode: str) -> None:
         """Switches the panel's view source only. The twist keeps reaching

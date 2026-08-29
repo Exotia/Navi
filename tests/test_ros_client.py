@@ -4,12 +4,16 @@ from ground_station.ros_client import RosBridgeClient
 class FakeTopic:
     instances = []
 
-    def __init__(self, ros, name, msg_type):
+    def __init__(self, ros, name, msg_type, **options):
         self.ros = ros
         self.name = name
         self.msg_type = msg_type
         self.callback = None
         self.published_messages = []
+        # Whatever roslibpy keywords the client passed - throttle_rate today.
+        # Kept rather than swallowed: a subscription's throttle is part of
+        # what the client promises, so a test has to be able to assert on it.
+        self.options = options
         FakeTopic.instances.append(self)
 
     def subscribe(self, callback):
@@ -236,3 +240,78 @@ def test_publish_video_request_reuses_one_topic_across_calls():
     request_topics = [t for t in FakeTopic.instances if t.name == "/video_request"]
     assert len(request_topics) == 1
     assert len(request_topics[0].published_messages) == 2
+
+
+import json
+
+from ground_station.ros_client import LOCALIZATION_POSE_THROTTLE_MS
+
+
+def test_subscribe_localization_status_emits_the_parsed_json(qtbot):
+    client = make_client(qtbot)
+    client.connect()
+    client.subscribe_localization_status()
+    topic = next(t for t in FakeTopic.instances if t.name == "/localization/status")
+    assert topic.msg_type == "std_msgs/String"
+
+    with qtbot.waitSignal(client.signals.localization_status_received,
+                          timeout=1000) as blocker:
+        topic.callback({"data": json.dumps({
+            "state": "SEARCHING", "seconds_since_ok": 4.2, "source": "zed_vio",
+            "distance_travelled": 12.5, "mount_offset_verified": True})})
+
+    assert blocker.args[0] == {
+        "state": "SEARCHING", "seconds_since_ok": 4.2, "source": "zed_vio",
+        "distance_travelled": 12.5, "mount_offset_verified": True, "detail": ""}
+
+
+def test_a_malformed_localization_status_reads_as_off_with_the_reason(qtbot):
+    # Same reasoning as the video status: a bad payload must not raise
+    # inside roslibpy's background thread. OFF is the right fallback state -
+    # it is what the panel shows when nothing can be trusted - and the
+    # reason is carried so it is not lost.
+    client = make_client(qtbot)
+    client.connect()
+    client.subscribe_localization_status()
+    topic = next(t for t in FakeTopic.instances if t.name == "/localization/status")
+
+    with qtbot.waitSignal(client.signals.localization_status_received,
+                          timeout=1000) as blocker:
+        topic.callback({"data": "{not json"})
+
+    assert blocker.args[0]["state"] == "OFF"
+    assert "bad status JSON" in blocker.args[0]["detail"]
+
+
+def test_subscribe_localization_pose_throttles_at_five_hertz(qtbot):
+    # The pose is published at ~30 Hz and is wanted here for one header
+    # readout. Throttling at the rosbridge server rather than on this laptop
+    # is 25 messages a second that never cross the field link.
+    client = make_client(qtbot)
+    client.connect()
+    client.subscribe_localization_pose()
+    topic = next(t for t in FakeTopic.instances if t.name == "/localization/pose")
+
+    assert topic.msg_type == "nav_msgs/Odometry"
+    assert topic.options["throttle_rate"] == LOCALIZATION_POSE_THROTTLE_MS
+    assert LOCALIZATION_POSE_THROTTLE_MS == 200
+
+
+def test_subscribe_localization_pose_emits_x_y_and_yaw(qtbot):
+    import math
+
+    client = make_client(qtbot)
+    client.connect()
+    client.subscribe_localization_pose()
+    topic = next(t for t in FakeTopic.instances if t.name == "/localization/pose")
+
+    with qtbot.waitSignal(client.signals.localization_pose_received,
+                          timeout=1000) as blocker:
+        topic.callback({"pose": {"pose": {
+            "position": {"x": 1.5, "y": 2.5, "z": 0.0},
+            "orientation": {"x": 0.0, "y": 0.0,
+                            "z": math.sin(math.pi / 4), "w": math.cos(math.pi / 4)}}}})
+
+    assert blocker.args[0]["x"] == 1.5
+    assert blocker.args[0]["y"] == 2.5
+    assert abs(blocker.args[0]["yaw"] - math.pi / 2) < 1e-9

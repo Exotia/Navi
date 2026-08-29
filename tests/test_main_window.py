@@ -9,11 +9,12 @@ from tests.test_video_panel import FakeReceiver
 class FakeTopic:
     instances = []
 
-    def __init__(self, ros, name, msg_type):
+    def __init__(self, ros, name, msg_type, **options):
         self.name = name
         self.msg_type = msg_type
         self.callback = None
         self.published_messages = []
+        self.options = options
         FakeTopic.instances.append(self)
 
     def subscribe(self, callback):
@@ -683,3 +684,93 @@ def test_the_semi_auto_refusal_does_not_start_a_local_receiver(qtbot):
     window._on_stream_requested(True)
 
     assert panel.streaming is streaming_before
+
+
+def test_connecting_subscribes_to_both_localisation_topics(qtbot):
+    window, _ = make_window(qtbot)
+
+    names = [t.name for t in FakeTopic.instances]
+    assert "/localization/status" in names
+    assert "/localization/pose" in names
+
+
+def test_a_localisation_status_reaches_the_panel(qtbot):
+    window, client = make_window(qtbot)
+    window.dashboard_page.mode_changed.emit("semi_auto")
+    topic = next(t for t in FakeTopic.instances if t.name == "/localization/status")
+
+    topic.callback({"data": json.dumps({
+        "state": "SEARCHING", "seconds_since_ok": 4.2, "source": "zed_vio",
+        "distance_travelled": 12.5, "mount_offset_verified": True})})
+
+    assert window.dashboard_page.video_panel.title_label.text() == (
+        "CAMERA / SIMULATION  -  SEARCHING … 4 s")
+
+
+def test_the_last_status_is_on_screen_the_moment_semi_auto_is_entered(qtbot):
+    # /localization/status arrives at 2 Hz. Waiting half a second with a
+    # blank marker after a mode switch is half a second of the operator not
+    # knowing whether to trust the picture they just switched to.
+    window, _ = make_window(qtbot)
+    topic = next(t for t in FakeTopic.instances if t.name == "/localization/status")
+    topic.callback({"data": json.dumps({
+        "state": "OK", "seconds_since_ok": 0.0, "source": "zed_vio",
+        "distance_travelled": 1.0, "mount_offset_verified": True})})
+
+    window.dashboard_page.mode_changed.emit("semi_auto")
+
+    assert window.dashboard_page.video_panel.title_label.text() == (
+        "CAMERA / SIMULATION  -  LOCALISED")
+
+
+def test_the_header_reads_out_the_pose(qtbot):
+    import math
+
+    window, _ = make_window(qtbot)
+    topic = next(t for t in FakeTopic.instances if t.name == "/localization/pose")
+
+    topic.callback({"pose": {"pose": {
+        "position": {"x": 1.5, "y": -2.25, "z": 0.0},
+        "orientation": {"x": 0.0, "y": 0.0,
+                        "z": math.sin(math.pi / 4), "w": math.cos(math.pi / 4)}}}})
+
+    assert window.localization_label.text() == "LOC: x 1.50  y -2.25  yaw 90.0°"
+
+
+def test_the_header_says_so_before_any_pose_arrives(qtbot):
+    window, _ = make_window(qtbot)
+
+    assert window.localization_label.text() == "LOC: NO POSE"
+
+
+def test_a_localisation_status_that_stops_arriving_stops_being_asserted(qtbot):
+    # A marker reading LOCALISED because that is what the rover said before
+    # the link died is the worst failure this panel has: the operator is
+    # driving on a picture, and the marker is the one thing telling them
+    # whether to trust it.
+    window, _ = make_window(qtbot)
+    window.dashboard_page.mode_changed.emit("semi_auto")
+    topic = next(t for t in FakeTopic.instances if t.name == "/localization/status")
+    topic.callback({"data": json.dumps({
+        "state": "OK", "seconds_since_ok": 0.0, "source": "zed_vio",
+        "distance_travelled": 1.0, "mount_offset_verified": True})})
+    assert window.dashboard_page.video_panel.title_label.text().endswith("LOCALISED")
+
+    window._check_staleness(now=window._localization_status_at + 3.5)
+
+    assert window.dashboard_page.video_panel.title_label.text() == (
+        "CAMERA / SIMULATION  -  NO LOCALISATION STATUS")
+    assert window._localization_status is None
+
+
+def test_a_fresh_status_is_not_called_stale(qtbot):
+    window, _ = make_window(qtbot)
+    window.dashboard_page.mode_changed.emit("semi_auto")
+    topic = next(t for t in FakeTopic.instances if t.name == "/localization/status")
+    topic.callback({"data": json.dumps({
+        "state": "OK", "seconds_since_ok": 0.0, "source": "zed_vio",
+        "distance_travelled": 1.0, "mount_offset_verified": True})})
+
+    window._check_staleness(now=window._localization_status_at + 1.0)
+
+    assert window.dashboard_page.video_panel.title_label.text().endswith("LOCALISED")
