@@ -84,7 +84,10 @@ if [ ! -f "$ROS_SETUP" ]; then
     exit 1
 fi
 
-if [ ! -f "$MAP_MESH" ]; then
+# Only simulation mode displays the organisers' scan. In semi mode the
+# ground is the rover's own map, spawned at run time by terrain_writer, and
+# demanding a 161 MB gitignored .obj for it would be absurd.
+if [ "$MODE" = "simulation" ] && [ ! -f "$MAP_MESH" ]; then
     echo "error: map mesh not found: $MAP_MESH" >&2
     echo "       it is gitignored (161 MB) and not part of the repository - pass" >&2
     echo "       --map-mesh /path/to/Model3D_mesh2.obj if it lives elsewhere." >&2

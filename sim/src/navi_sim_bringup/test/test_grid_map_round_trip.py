@@ -10,6 +10,16 @@ workspaces, so nothing else forces them to agree; this does.
     python3 -m pytest sim/src/navi_sim_bringup/test/test_grid_map_round_trip.py -q'
 """
 
+import pathlib
+import sys
+
+# navi_localization is the rover's package and is not installed in the sim
+# workspace; the round trip needs its grid, so it is loaded from the source
+# tree (this file lives at sim/src/navi_sim_bringup/test/).
+_ROVER_PKG = pathlib.Path(__file__).resolve().parents[4] / "rover" / "src" / "navi_localization"
+if str(_ROVER_PKG) not in sys.path:
+    sys.path.insert(0, str(_ROVER_PKG))
+
 import numpy as np
 import pytest
 from builtin_interfaces.msg import Time

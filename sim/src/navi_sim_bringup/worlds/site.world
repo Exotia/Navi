@@ -39,16 +39,10 @@
       </link>
     </model>
 
-    <!-- The scanned site. MAP_MESH_PATH is substituted by the launch file:
-         the .obj is gitignored and 161 MB, so it is not in this repository
-         and its location cannot be hardcoded. -->
-    <model name="site_scan">
-      <static>true</static>
-      <link name="link">
-        <visual name="visual">
-          <geometry><mesh><uri>file://MAP_MESH_PATH</uri></mesh></geometry>
-        </visual>
-      </link>
-    </model>
+    <!-- The terrain, if any, is composed in by the launch file: the
+         organisers' scan in simulation mode, nothing in semi mode where
+         terrain_writer spawns the rover's own map at run time.
+         See navi_sim_bringup/world_composition.py. -->
+    <!-- SITE_SCAN_MODEL -->
   </world>
 </sdf>

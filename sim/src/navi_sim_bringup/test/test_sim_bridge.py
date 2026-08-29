@@ -160,3 +160,10 @@ def test_the_sim_side_node_has_no_subscriptions_at_all():
                 if p.topic_name not in ("/rosout", "/parameter_events")] == []
     finally:
         bridge.shutdown()
+
+
+def test_the_built_map_is_among_the_topics_the_bridge_carries_by_default():
+    # Sub-project 3: terrain_writer on the simulation's domain reads the
+    # elevation map the rover publishes on its own. If this entry went
+    # missing the terrain would silently never appear.
+    assert "/localization/map:grid_map_msgs/msg/GridMap" in sim_bridge.DEFAULT_TOPICS
