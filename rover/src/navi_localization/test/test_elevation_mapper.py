@@ -741,3 +741,37 @@ def test_a_loaded_tile_that_is_empty_after_the_clamp_blanks_the_old_one(node, tm
     messages = node._tile_publisher.messages
     assert _tile_keys(messages) == [(0, 0)]
     assert _all_nan(messages[0])
+
+
+def test_loading_an_old_5cm_map_keeps_the_10cm_parameter_and_coarsens_its_voxels(node, tmp_path):
+    # A map written before voxel_m existed: no such key, voxels in 5 cm
+    # units. Two 5 cm voxels that share one 10 cm voxel.
+    node._on_cloud(cloud(points_at(0.1, 0.1, n=4, z=0.0)))
+    state = node._grid.state()
+    np.savez(tmp_path / 'old.npz', elevation=state.elevation, count=state.count,
+             origin_ix=state.origin_ix, origin_iy=state.origin_iy,
+             resolution=state.resolution, saved_at='x',
+             voxels=np.array([[2, 2, 10], [3, 2, 10]], dtype=np.int32))
+
+    assert node._obstacles.voxel_m == pytest.approx(0.10)
+    node._on_command(String(data='{"action":"load","name":"old"}'))
+    node._publish_status()
+    status = json.loads(node._status_publisher.messages[-1].data)
+    assert status['last_command']['ok'], status['last_command']
+    assert node._obstacles.voxel_m == pytest.approx(0.10)          # parameter kept
+    assert node._obstacles.state().tolist() == [[1, 1, 5]]         # merged into one 10 cm voxel
+
+    # The next fused cloud keeps voxelising at 10 cm, and so does the message.
+    node._on_cloud(wall_cloud())
+    node._tick(now=1.0)
+    non_empty = [m for m in node._obstacle_publisher.messages if m.width > 0]
+    assert all(m.header.frame_id.endswith('|0.1') for m in non_empty), \
+        [m.header.frame_id for m in non_empty]
+
+
+def test_loading_a_map_coarser_than_the_parameter_adopts_its_size(node):
+    node._on_cloud(wall_cloud())
+    node._on_command(String(data='{"action":"save","name":"coarse"}'))
+    node._obstacles.replace(np.zeros((0, 3), dtype=np.int32), voxel_m=0.05)
+    node._on_command(String(data='{"action":"load","name":"coarse"}'))
+    assert node._obstacles.voxel_m == pytest.approx(0.10)

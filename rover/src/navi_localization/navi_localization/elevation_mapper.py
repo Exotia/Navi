@@ -440,6 +440,28 @@ class ElevationMapper(Node):
                          command.get('name') if isinstance(command, dict) else None,
                          str(error))
 
+    def _rescaled_voxels(self, voxels, file_voxel_m: float):
+        """A loaded map's voxels expressed at this node's `obstacle_voxel_m`.
+
+        The file's size is a property of the file, not a setting for the
+        rest of the run: without this, loading a map saved before the
+        size existed (the store reports 0.05 for those) switched the live
+        map to 5 cm voxels until a restart - and the next save baked that
+        in. Finer or equal voxels are coarsened to the parameter (index
+        floor-scaled, duplicates merged). A file coarser than the
+        parameter cannot be refined, so its size is adopted, with a
+        warning, as the one exception."""
+        own = self._obstacles.voxel_m
+        if abs(file_voxel_m - own) < 1e-9:
+            return voxels, None
+        if file_voxel_m > own + 1e-9:
+            self.get_logger().warn(
+                f"loaded map was built with {file_voxel_m:.3f} m obstacle voxels, "
+                f"coarser than obstacle_voxel_m={own:.3f}; using the map's size")
+            return voxels, file_voxel_m
+        scaled = np.floor(voxels.astype(np.float64) * (file_voxel_m / own)).astype(np.int32)
+        return np.unique(scaled, axis=0), None
+
     def _record(self, action, name, error) -> None:
         self._last_command = {
             'action': action, 'name': name, 'ok': error is None, 'error': error,
@@ -457,7 +479,7 @@ class ElevationMapper(Node):
     def _load(self, name) -> None:
         state, voxels, voxel_m = self._store.load(name)
         self._grid.replace(state)
-        self._obstacles.replace(voxels, voxel_m=voxel_m)
+        self._obstacles.replace(*self._rescaled_voxels(voxels, voxel_m))
         self._loaded = name
         # A load replaces the grid and the obstacle map outright, so each
         # scheduler's memory of the previous one is dropped too: without
