@@ -32,3 +32,11 @@ def test_the_python_constant_matches_the_urdf_front_camera_joint():
     t = pc.CAMERA_IN_BASE_FOOTPRINT
     assert (t.x, t.y, t.z) == pytest.approx((cam[0] + base[0], cam[1] + base[1], cam[2] + base[2]))
     assert (t.qx, t.qy, t.qz, t.qw) == (0.0, 0.0, 0.0, 1.0)
+
+
+def test_the_base_link_constant_matches_the_urdf_base_footprint_joint():
+    robot = ET.parse(URDF).getroot()
+    base = origin_of(robot, "base_footprint_joint")
+    t = load_pose_composition().BASE_LINK_IN_BASE_FOOTPRINT
+    assert (t.x, t.y, t.z) == pytest.approx((base[0], base[1], base[2]))
+    assert (t.qx, t.qy, t.qz, t.qw) == (0.0, 0.0, 0.0, 1.0)

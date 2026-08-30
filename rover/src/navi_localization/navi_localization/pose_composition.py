@@ -40,6 +40,12 @@ CAMERA_IN_BASE_FOOTPRINT = Transform(0.345, 0.0, 0.548, 0.0, 0.0, 0.0, 1.0)
 # re-measurement of camera centre to base_link disagrees with them.
 MOUNT_OFFSET_VERIFIED = True
 
+# base_link above base_footprint: the URDF's base_footprint_joint, which is
+# the wheel axle at -0.284 plus the 0.125 m wheel radius. Nav2 needs the link
+# to exist in TF; nothing on the rover computes with it.
+# tests/test_mount_offset_agrees_with_urdf.py keeps this equal to the URDF.
+BASE_LINK_IN_BASE_FOOTPRINT = Transform(0.0, 0.0, 0.409, 0.0, 0.0, 0.0, 1.0)
+
 
 def _quat_multiply(a, b):
     ax, ay, az, aw = a
@@ -98,3 +104,20 @@ def yaw_of(t: Transform) -> float:
 
 def translation_distance(a: Transform, b: Transform) -> float:
     return math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2 + (a.z - b.z) ** 2)
+
+
+# The only two transforms the Orin publishes on /tf_static, parent to child.
+#
+# The ZED wrapper owns map -> odom -> zed_front_camera_link and must stay its
+# only owner, so base_footprint is hung *below* the camera rather than above
+# it: topologically upside down relative to the URDF, but one tree with one
+# root, which is what Nav2's costmap lookups need. Both entries add children,
+# never a second parent - that is the invariant, and test_pose_composition.py
+# asserts it. A robot_state_publisher on the Orin would violate it.
+# (The simulation's own bringup does run one, with the full URDF, publishing
+# these two edges the other way up. That is fine only while the sim and the
+# rover never share a ROS domain.)
+STATIC_FRAMES = (
+    ('zed_front_camera_link', 'base_footprint', inverse(CAMERA_IN_BASE_FOOTPRINT)),
+    ('base_footprint', 'base_link', BASE_LINK_IN_BASE_FOOTPRINT),
+)

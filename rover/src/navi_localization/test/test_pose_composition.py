@@ -3,8 +3,9 @@ import math
 import pytest
 
 from navi_localization.pose_composition import (
-    CAMERA_IN_BASE_FOOTPRINT, IDENTITY, Transform, compose,
-    footprint_pose_from_camera_pose, inverse, translation_distance, yaw_of)
+    BASE_LINK_IN_BASE_FOOTPRINT, CAMERA_IN_BASE_FOOTPRINT, IDENTITY,
+    STATIC_FRAMES, Transform, compose, footprint_pose_from_camera_pose,
+    inverse, translation_distance, yaw_of)
 
 
 def quat_z(yaw):
@@ -65,3 +66,31 @@ def test_translation_distance_ignores_rotation():
     a = Transform(0, 0, 0, *quat_z(1.0))
     b = Transform(3, 4, 0, *quat_z(-2.0))
     assert translation_distance(a, b) == pytest.approx(5.0)
+
+
+def test_base_link_sits_where_the_urdf_base_footprint_joint_puts_it():
+    assert BASE_LINK_IN_BASE_FOOTPRINT == Transform(0.0, 0.0, 0.409, 0.0, 0.0, 0.0, 1.0)
+
+
+def test_the_static_frames_are_the_two_the_wrapper_does_not_own():
+    assert [(parent, child) for parent, child, _ in STATIC_FRAMES] == [
+        ("zed_front_camera_link", "base_footprint"),
+        ("base_footprint", "base_link"),
+    ]
+
+
+def test_the_camera_static_frame_is_the_mount_constant_inverted():
+    _, _, camera_to_footprint = STATIC_FRAMES[0]
+    approx(camera_to_footprint, -0.345, 0.0, -0.548, 0.0)
+    # Composing the two directions has to land back on nothing: this is the
+    # test that catches a sign flip, which reads plausibly either way.
+    approx(compose(CAMERA_IN_BASE_FOOTPRINT, camera_to_footprint), 0.0, 0.0, 0.0, 0.0)
+
+
+def test_no_static_frame_gives_the_wrappers_link_a_second_parent():
+    # The ZED wrapper owns map -> odom -> zed_front_camera_link. A transform
+    # of ours whose *child* is that link would give it two parents and split
+    # the tree - the single failure this whole arrangement exists to avoid.
+    children = [child for _, child, _ in STATIC_FRAMES]
+    assert "zed_front_camera_link" not in children
+    assert len(children) == len(set(children)), "a frame may have only one parent"
