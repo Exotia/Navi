@@ -1,0 +1,118 @@
+# fake_bema_server.py
+"""A stand-in for the primary's BEMA (:21022) and coordinator (:21031)
+rpclib servers, speaking the same msgpack-RPC wire. Records every call so
+tests can assert on the lease dance, the deadman, and unit conversion
+without the rover. Run as a script with --forward-twist to drive the
+Gazebo rover: each F1 becomes a Twist on /sim_test_twist.
+"""
+
+import socket
+import threading
+
+import msgpack
+
+
+class _Server:
+    def __init__(self, port, dispatch):
+        self._dispatch = dispatch
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._srv.bind(("127.0.0.1", port))
+        self._srv.listen(4)
+        self.port = self._srv.getsockname()[1]
+        self._stop = False
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def _run(self):
+        while not self._stop:
+            try:
+                self._srv.settimeout(0.2)
+                conn, _ = self._srv.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
+
+    def _serve(self, conn):
+        unpacker = msgpack.Unpacker(raw=False)
+        while not self._stop:
+            try:
+                data = conn.recv(4096)
+            except OSError:
+                break
+            if not data:
+                break
+            unpacker.feed(data)
+            for msg in unpacker:
+                _type, msgid, method, args = msg
+                error, result = self._dispatch(method, list(args))
+                conn.sendall(msgpack.packb([1, msgid, error, result],
+                                           use_bin_type=True))
+        conn.close()
+
+    def stop(self):
+        self._stop = True
+        try:
+            self._srv.close()
+        except OSError:
+            pass
+
+
+class FakeBemaServer:
+    def __init__(self, bema_port=0, coordinator_port=0, on_drive=None):
+        self.calls = []
+        self.state = 1                 # Idle
+        self.movement_enabled = False
+        self.lease_held = False
+        self._on_drive = on_drive or (lambda vx, vy, w: None)
+        self._bema = _Server(bema_port, self._bema_dispatch)
+        self._coord = _Server(coordinator_port, self._coord_dispatch)
+        self.bema_port = self._bema.port
+        self.coordinator_port = self._coord.port
+
+    def start(self):
+        self._bema.start()
+        self._coord.start()
+
+    def stop(self):
+        self._bema.stop()
+        self._coord.stop()
+
+    def set_state(self, value):
+        self.state = value
+
+    def _bema_dispatch(self, method, args):
+        self.calls.append(("bema", method, args))
+        if method == "__sam__request":
+            self.lease_held = True
+            return None, True
+        if method == "__sam__ping":
+            return None, self.lease_held
+        if method == "__sam__release":
+            self.lease_held = False
+            return None, None
+        if method == "__sam__force":
+            self.lease_held = True
+            return None, None
+        if not self.lease_held and method != "F8":
+            return 1, None             # rpc_base error when not the holder
+        if method == "F1":
+            self._on_drive(*args)
+        if method == "F7":
+            self.movement_enabled = bool(args[0])
+        return None, None
+
+    def _coord_dispatch(self, method, args):
+        self.calls.append(("coord", method, args))
+        if method == "F9":             # getState
+            return None, self.state
+        if method == "F6":             # startManual
+            self.state = 3             # Manual (simplified: no 5 s delay)
+            return None, None
+        if method == "F10":            # notifyConnected
+            return None, None
+        return None, None
