@@ -35,6 +35,7 @@ class DriveRow(QWidget):
         super().__init__(parent)
         self._state = None
         self._clock = clock
+        self._init_sent = False
         self.confirm_init = self._confirm_init_dialog
         self.confirm_reset_encoders = self._confirm_reset_encoders_dialog
 
@@ -126,9 +127,10 @@ class DriveRow(QWidget):
     def set_state(self, state) -> None:
         self._state = state
         movable = state is not None and state.connected
-        for b in (self.manual_button, self.init_button, self.reset_enc_button,
+        for b in (self.manual_button, self.reset_enc_button,
                   self.reset_odom_button, self.mode_button, self.state_button):
             b.setEnabled(movable)
+        self.init_button.setEnabled(movable and not self._init_sent)
         self.stop_button.setEnabled(True)          # always
         self._refresh_status()
 
@@ -203,6 +205,10 @@ class DriveRow(QWidget):
 
     def _on_init(self):
         if self.confirm_init():
+            # BemaServer::init() is one-shot (a second F0 is ignored by the
+            # rover), so the button follows suit for this GS session.
+            self._init_sent = True
+            self.init_button.setEnabled(False)
             self.init_requested.emit()
 
     def _on_reset_encoders(self):

@@ -67,3 +67,31 @@ def test_status_line_shows_the_last_action(qtbot):
     qtbot.addWidget(row)
     row.set_state(state(last_action="stop"))
     assert "last: stop" in row.last_action_label.text().lower()
+
+
+def test_init_can_only_be_clicked_once(qtbot):
+    # BemaServer::init() is one-shot on the rover (a second F0 is ignored),
+    # so the button goes dark after the first confirmed click and stays
+    # dark even as fresh statuses arrive.
+    row = DriveRow()
+    qtbot.addWidget(row)
+    row.set_state(state())
+    emitted = []
+    row.init_requested.connect(lambda: emitted.append(True))
+    row.confirm_init = lambda: True
+    row.init_button.click()
+    assert emitted == [True]
+    assert not row.init_button.isEnabled()
+    row.set_state(state())               # a new status must not re-enable it
+    assert not row.init_button.isEnabled()
+    row.init_button.click()              # disabled: no dialog, no emit
+    assert emitted == [True]
+
+
+def test_a_cancelled_init_stays_clickable(qtbot):
+    row = DriveRow()
+    qtbot.addWidget(row)
+    row.set_state(state())
+    row.confirm_init = lambda: False
+    row.init_button.click()
+    assert row.init_button.isEnabled()
