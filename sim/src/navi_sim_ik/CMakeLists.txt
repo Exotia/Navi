@@ -71,6 +71,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_vendored_model_242 test/test_vendored_model_242.cpp)
   target_link_libraries(test_vendored_model_242 navi_sim_ik_model242)
 
+  ament_add_gtest(test_asterope_params test/test_asterope_params.cpp)
+  target_include_directories(test_asterope_params PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
   ament_add_gtest(test_sim_ik_stepper test/test_sim_ik_stepper.cpp)
   target_link_libraries(test_sim_ik_stepper navi_sim_ik_stepper)
 

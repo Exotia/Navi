@@ -4,41 +4,27 @@
 #include <cmath>
 
 #include "kinematics.h"
+#include "navi_sim_ik/asterope_params.hpp"
 
 // Proves the 2.42 copy is complete and usable: it compiles, initialises,
 // accepts geometry through the hParams inport, and steps. Not a test of the
 // control law, which belongs to whoever regenerates the model upstream - this
 // is the guard that says the copy is complete.
-//
-// The eight geometry numbers are inline here only for this first task; Task 2
-// replaces them with the shared header, so the rover's values live in exactly
-// one place.
 namespace
 {
 void set_asterope_geometry(ExtU_kinematics_T & in)
 {
-  // Declared float, then widened. The rover holds these as `const float` in
-  // RoverParameters.h and hands them to the model through a
-  // std::vector<float>, so the double the model actually sees is a widened
-  // float, not the decimal literal. Writing them as double here would change
-  // the arithmetic in the 8th decimal place - which is exactly the kind of
-  // difference this whole sub-project exists to eliminate.
-  const float wheel[8] = {
-    0.45527f, -0.44385f,
-    0.45527f, 0.44385f,
-    -0.45527f, 0.44285f,   // wheel3y: 0.44285, not 0.44385 - see VENDOR242.md
-    -0.45527f, -0.44385f};
   for (int i = 0; i < 8; ++i) {
-    in.hParams[i] = wheel[i];
+    in.hParams[i] = navi_sim_ik::kAsteropeHParams[i];
   }
 }
 
 void set_ik_limits(ExtU_kinematics_T & in)
 {
-  in.TS = 0.06;
-  in.beta_dot_max = 1.5;
-  in.beta_ddot_max = 250.0;
-  in.acceleration_factor = 3.0;
+  in.TS = navi_sim_ik::kIkTimestepSeconds;
+  in.beta_dot_max = navi_sim_ik::kBetaDotMax;
+  in.beta_ddot_max = navi_sim_ik::kBetaDdotMax;
+  in.acceleration_factor = navi_sim_ik::kAccelerationFactor;
 }
 
 // One closed-loop run from a fresh model. A kinematic simulation has no
