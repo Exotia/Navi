@@ -88,6 +88,36 @@ def test_init_can_only_be_clicked_once(qtbot):
     assert emitted == [True]
 
 
+def test_init_re_arms_after_a_connection_cycle(qtbot):
+    # m_initialized lives on the rover and resets on a rover power-cycle -
+    # after that the operator NEEDS Init again, but a GS-session latch that
+    # never clears would leave the button dead. A connection cycle
+    # (connected -> not connected/None -> connected again) is the signal:
+    # the drive link came back, possibly to a freshly booted rover.
+    row = DriveRow()
+    qtbot.addWidget(row)
+    row.set_state(state())
+    row.confirm_init = lambda: True
+    row.init_button.click()
+    assert not row.init_button.isEnabled()
+
+    row.set_state(None)                  # link drops
+    row.set_state(state())               # link comes back (rover may have rebooted)
+    assert row.init_button.isEnabled()
+
+
+def test_repeated_set_state_without_a_gap_keeps_init_disabled(qtbot):
+    row = DriveRow()
+    qtbot.addWidget(row)
+    row.set_state(state())
+    row.confirm_init = lambda: True
+    row.init_button.click()
+    assert not row.init_button.isEnabled()
+
+    row.set_state(state())               # still connected the whole time
+    assert not row.init_button.isEnabled()
+
+
 def test_a_cancelled_init_stays_clickable(qtbot):
     row = DriveRow()
     qtbot.addWidget(row)

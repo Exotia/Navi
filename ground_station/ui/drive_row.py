@@ -36,6 +36,10 @@ class DriveRow(QWidget):
         self._state = None
         self._clock = clock
         self._init_sent = False
+        # Tracks connected-ness across calls so set_state can tell a
+        # connection cycle (was None/disconnected, now connected) from a
+        # routine status refresh - see set_state.
+        self._was_connected = False
         self.confirm_init = self._confirm_init_dialog
         self.confirm_reset_encoders = self._confirm_reset_encoders_dialog
 
@@ -142,8 +146,18 @@ class DriveRow(QWidget):
         self.set_state(None)
 
     def set_state(self, state) -> None:
+        now_connected = state is not None and state.connected
+        # The rover's own m_initialized resets on a rover power-cycle, but
+        # _init_sent is a GS-session latch that otherwise never clears -
+        # after a reboot the operator NEEDS Init again and the button would
+        # stay dead. A connection cycle (previously None/disconnected, now
+        # connected) is the signal a reconnect happened, possibly to a
+        # freshly booted rover, so re-arm the latch then.
+        if not self._was_connected and now_connected:
+            self._init_sent = False
+        self._was_connected = now_connected
         self._state = state
-        movable = state is not None and state.connected
+        movable = now_connected
         for b in (self.manual_button, self.reset_enc_button,
                   self.reset_odom_button, self.mode_button, self.state_button):
             b.setEnabled(movable)
