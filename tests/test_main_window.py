@@ -9,6 +9,12 @@ from tests.test_video_panel import FakeReceiver
 
 class FakeTopic:
     instances = []
+    # A call log shared across every FakeTopic instance, in publish order -
+    # unlike published_messages (per-topic), this is what lets a test pin a
+    # cross-topic ordering (e.g. /estop_request strictly before
+    # /drive_command), which two separate topics' published_messages[-1]
+    # cannot: those pass even if the sends happened in the other order.
+    call_log = []
 
     def __init__(self, ros, name, msg_type, **options):
         self.name = name
@@ -23,6 +29,7 @@ class FakeTopic:
 
     def publish(self, message):
         self.published_messages.append(message)
+        FakeTopic.call_log.append((self.name, message))
 
 
 class FakeRos:
@@ -104,6 +111,7 @@ def make_timeout_client_factory():
 def make_window(qtbot, initial_host="localhost", gamepad_reader=None, video_receiver=None):
     FakeRos.instances.clear()
     FakeTopic.instances.clear()
+    FakeTopic.call_log.clear()
     window = MainWindow(
         ros_client_factory=make_fake_client_factory(),
         initial_host=initial_host,
@@ -1085,6 +1093,10 @@ def test_stop_sends_both_the_estop_request_and_the_chassis_stop(qtbot):
 
     window.dashboard_page.drive_row.stop_requested.emit()
 
+    # A cross-topic sequence, not two independent published_messages[-1]
+    # checks: those pass even if the two sends happened in the other order.
+    assert [name for name, _ in FakeTopic.call_log] == [
+        "/estop_request", "/drive_command"]
     estop = next(t for t in FakeTopic.instances if t.name == "/estop_request")
     assert json.loads(estop.published_messages[-1]["data"])["reason"]
     command = next(t for t in FakeTopic.instances if t.name == "/drive_command")
@@ -1099,6 +1111,10 @@ def test_stop_sends_the_estop_request_in_autonomous_mode_too(qtbot):
 
     estop = next(t for t in FakeTopic.instances if t.name == "/estop_request")
     assert len(estop.published_messages) == 1
+    # Same ordering guarantee holds in autonomous: the latch still goes
+    # out before the chassis stop.
+    assert [name for name, _ in FakeTopic.call_log] == [
+        "/estop_request", "/drive_command"]
 
 
 def test_manual_asks_for_the_mode_before_the_coordinator(qtbot):
@@ -1106,6 +1122,10 @@ def test_manual_asks_for_the_mode_before_the_coordinator(qtbot):
 
     window.dashboard_page.drive_row.manual_requested.emit()
 
+    # A cross-topic sequence, not two independent published_messages[-1]
+    # checks: those pass even if the two sends happened in the other order.
+    assert [name for name, _ in FakeTopic.call_log] == [
+        "/mode_request", "/drive_command"]
     request = next(t for t in FakeTopic.instances if t.name == "/mode_request")
     assert json.loads(request.published_messages[-1]["data"]) == {"mode": "manual"}
     command = next(t for t in FakeTopic.instances if t.name == "/drive_command")
