@@ -287,3 +287,45 @@ if pushed anywhere, would be the fastest path to recovering it) — this directo
 (`/home/ole/navi/navigation`) only has the four original raw asset files
 (`Model3D_mesh.fbx`, `Model3D_mesh1.ply`, `Model3D_mesh2.obj`, `asterope_iiI.urdf`) that
 this whole project was originally built from.
+
+## 7. The BEMA drive bridge (2026-08-30, branch `bema-bridge`)
+
+The ground station's gamepad twist now has a path to the real wheels. A new
+node `bema_bridge` (in `navi_teleop`, Python + the `msgpack` package) runs on
+the Orin, subscribes `/manual_twist`, and speaks msgpack-RPC to the primary
+Pi (`192.168.178.26`): the BEMA drive server on :21022 (`F1(vX, vY, w_degps)`
+at 20 Hz under the exclusive-access lease, `__sam__ping` every 0.5 s) and the
+mission coordinator on :21031 (`notifyConnected` heartbeat every 1 s —
+without it the coordinator drops to Disconnected within 2 s and disables
+movement; `startManual` arms driving after a 5 s PrepareManual).
+
+Safety: a **1 s deadman** — when `/manual_twist` stops, the node sends
+`F1(0,0,0)` then `F2 stopMovement` once and keeps streaming zeros; there is
+NO deadman on the Pi side (the lease watchdog expiring does not stop the
+wheels), so this node is the stop reflex. Start-up sends nothing that moves
+wheels; `F0 init` and `F4 resetEncoders` (both physically move the wheels)
+fire only from explicit GS buttons behind confirm dialogs. The node never
+calls `__sam__force`.
+
+GS side: a DRIVE row (semi-auto mode, beside the MAP row) with STOP always
+live, Manual ("arming (5 s)"), Init/Reset-encoders behind confirms, and a
+status line from `/drive_status` (1 Hz JSON: connected, lease, coordinator
+state name, deadman, twist age, last error). `/drive_command` carries the
+button actions as JSON. The old `DriveState` tracker class was renamed
+`DriveCommandTracker`; the new `/drive_status` dataclass owns the name.
+
+Config: `bema_host`/`bema_port`/`coordinator_port`/`deadman_s`/`twist_topic`
+are node parameters (addresses have churned before — coordinator still dials
+a NaVi at .18 that doesn't exist; `a_navi` is .33). `start_navi.sh` starts
+the bridge (`--no-bridge` to skip). The Orin has no internet: `msgpack`
+1.2.2 was installed from a wheel carried over scp.
+
+Verified: 240 GS + 65 teleop tests locally; 171 + 65 on the Orin after
+`deploy_rover.sh --test`; a headless bench on domain 93 (fake BEMA server
+`test/fake_bema_server.py --forward-twist`, bridge on `/bench_twist`) showed
+the full chain forward 0.2 m/s / 0.5 rad/s with the w double-negation
+self-consistent, and zeros after the publisher stopped. **Still open:** the
+absolute turn direction and the wheel-corner mapping are only checkable on
+hardware — rover on blocks, hand on STOP, before any free driving. The
+coordinator-driven autonomy path (NaVi RPC server, `setTargets`) is
+deliberately not built.
