@@ -34,6 +34,7 @@ class DriveRow(QWidget):
     def __init__(self, parent=None, clock=monotonic):
         super().__init__(parent)
         self._state = None
+        self._mode_state = None
         self._clock = clock
         self._init_sent = False
         # Tracks connected-ness across calls so set_state can tell a
@@ -83,6 +84,12 @@ class DriveRow(QWidget):
         self.no_status_label = QLabel("DRIVE: no status")
         self.no_status_label.setStyleSheet(f"color: {theme.TEXT_DIM}; border: none;")
 
+        # The supervisor's mode, not the bridge's status - a separate rover
+        # node, so a separate pill with its own setter. It goes first
+        # because it is the chip that explains why the sticks are or are
+        # not reaching the wheels.
+        self.mode_pill = QLabel()
+
         self.lease_pill = QLabel()
         self.state_pill = QLabel()
         self.deadman_pill = QLabel("DEADMAN")
@@ -98,11 +105,12 @@ class DriveRow(QWidget):
         # state, twist age, last action, last_error) is pinned to plain
         # text - never auto-detected as rich text - so a stray '<' from the
         # rover is shown as itself instead of being parsed as markup.
-        for w in (self.lease_pill, self.state_pill, self.twist_age_label,
-                  self.last_action_label, self.error_pill):
+        for w in (self.mode_pill, self.lease_pill, self.state_pill,
+                  self.twist_age_label, self.last_action_label, self.error_pill):
             w.setTextFormat(Qt.TextFormat.PlainText)
 
         self.status_layout = QHBoxLayout()
+        self.status_layout.addWidget(self.mode_pill)
         self.status_layout.addWidget(self.no_status_label)
         for w in (self.lease_pill, self.state_pill, self.deadman_pill,
                   self.twist_age_label, self.last_action_label, self.error_pill):
@@ -144,6 +152,7 @@ class DriveRow(QWidget):
         self.mode_button.clicked.connect(self.drive_mode_requested.emit)
         self.state_button.clicked.connect(self.drive_state_requested.emit)
         self.set_state(None)
+        self.set_mode_state(None)
 
     def set_state(self, state) -> None:
         now_connected = state is not None and state.connected
@@ -164,6 +173,36 @@ class DriveRow(QWidget):
         self.init_button.setEnabled(movable and not self._init_sent)
         self.stop_button.setEnabled(True)          # always
         self._refresh_status()
+
+    def set_mode_state(self, state) -> None:
+        """/mode_status, which is a different rover node's business from
+        /drive_status - the supervisor's, not the bridge's. Hence its own
+        setter and its own pill: either source can go quiet without
+        blanking the other, and the mode is exactly what the operator needs
+        when the bridge is the thing that has gone quiet."""
+        self._mode_state = state
+        self._refresh_mode()
+
+    def _refresh_mode(self) -> None:
+        s = self._mode_state
+        if s is None:
+            self.mode_pill.setVisible(False)
+            return
+        if s.estop_latched or s.mode == "estop":
+            self.mode_pill.setText("E-STOP LATCHED")
+            self.mode_pill.setStyleSheet(theme.pill_style(theme.BAD, "white"))
+        elif s.mode == "autonomous":
+            self.mode_pill.setText("AUTONOMOUS")
+            self.mode_pill.setStyleSheet(theme.pill_style(theme.ACCENT, "#2a1600"))
+        elif s.mode in ("manual", "semi_auto"):
+            self.mode_pill.setText(s.mode.upper())
+            self.mode_pill.setStyleSheet(theme.pill_style(theme.OK, "#0c1a0e"))
+        else:
+            # A mode this build does not know. Shown verbatim rather than
+            # guessed at, and through _plain because it came off the wire.
+            self.mode_pill.setText(_plain(f"MODE {s.mode}"))
+            self.mode_pill.setStyleSheet(theme.pill_style(theme.OFF, theme.TEXT))
+        self.mode_pill.setVisible(True)
 
     def refresh(self, now=None) -> None:
         self._refresh_status(now)

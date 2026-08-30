@@ -961,6 +961,7 @@ def test_a_timed_out_first_connect_still_registers_every_subscription(qtbot):
     assert names == {
         "/manual_twist", "/video_status", "/localization/status",
         "/localization/pose", "/localization/map_status", "/drive_status",
+        "/mode_status",
     }
     client = window.ros_client
     assert client._manual_twist_topic is not None
@@ -969,3 +970,154 @@ def test_a_timed_out_first_connect_still_registers_every_subscription(qtbot):
     assert client._localization_pose_topic is not None
     assert client._map_status_topic is not None
     assert client._drive_status_topic is not None
+    assert client._mode_status_topic is not None
+
+
+def _mode_status(window, mode):
+    from ground_station.models import parse_mode_status
+    window._on_mode_status(parse_mode_status(json.dumps({"mode": mode})))
+
+
+def test_manual_twist_is_published_in_manual_mode(qtbot):
+    gamepad = FakeGamepadReader(connected=True, twist=(0.04, 0.0, 0.05))
+    window, _ = make_window(qtbot, initial_host="localhost", gamepad_reader=gamepad)
+    _mode_status(window, "manual")
+
+    window._poll_gamepad()
+
+    topic = next(t for t in FakeTopic.instances if t.name == "/manual_twist")
+    assert len(topic.published_messages) == 1
+
+
+def test_manual_twist_is_published_in_semi_auto_mode(qtbot):
+    gamepad = FakeGamepadReader(connected=True, twist=(0.04, 0.0, 0.05))
+    window, _ = make_window(qtbot, initial_host="localhost", gamepad_reader=gamepad)
+    _mode_status(window, "semi_auto")
+
+    window._poll_gamepad()
+
+    topic = next(t for t in FakeTopic.instances if t.name == "/manual_twist")
+    assert len(topic.published_messages) == 1
+
+
+def test_a_centred_stick_publishes_nothing_in_autonomous_mode(qtbot):
+    # The constant zero stream is what rule 5 kills.
+    gamepad = FakeGamepadReader(connected=True, twist=(0.0, 0.0, 0.0))
+    window, _ = make_window(qtbot, initial_host="localhost", gamepad_reader=gamepad)
+    _mode_status(window, "autonomous")
+
+    window._poll_gamepad()
+
+    topic = next(t for t in FakeTopic.instances if t.name == "/manual_twist")
+    assert topic.published_messages == []
+
+
+def test_a_deflected_stick_is_published_in_autonomous_mode(qtbot):
+    # ... and this is what keeps rule 1 reachable: the supervisor reads
+    # 0.04 m/s as a takeover, aborts the coordinator and re-enters manual.
+    gamepad = FakeGamepadReader(connected=True, twist=(0.04, 0.0, 0.05))
+    window, _ = make_window(qtbot, initial_host="localhost", gamepad_reader=gamepad)
+    _mode_status(window, "autonomous")
+
+    window._poll_gamepad()
+
+    topic = next(t for t in FakeTopic.instances if t.name == "/manual_twist")
+    assert len(topic.published_messages) == 1
+    # the local display still shows what the sticks are doing
+    assert "0.04" in window.dashboard_page.drive_card.vx_label.text()
+
+
+def test_manual_twist_is_not_published_while_estopped(qtbot):
+    # Not even a deflected stick: estop has no takeover path.
+    gamepad = FakeGamepadReader(connected=True, twist=(0.04, 0.0, 0.05))
+    window, _ = make_window(qtbot, initial_host="localhost", gamepad_reader=gamepad)
+    _mode_status(window, "estop")
+
+    window._poll_gamepad()
+
+    topic = next(t for t in FakeTopic.instances if t.name == "/manual_twist")
+    assert topic.published_messages == []
+
+
+def test_the_gamepad_disconnect_zero_is_gated_by_the_mode_too(qtbot):
+    # A zero is never a takeover, so the fail-safe zero stays gated by the
+    # stream gate alone. Centred sticks throughout, so nothing else can
+    # account for a published message.
+    gamepad = FakeGamepadReader(connected=True, twist=(0.0, 0.0, 0.0))
+    window, _ = make_window(qtbot, initial_host="localhost", gamepad_reader=gamepad)
+    _mode_status(window, "autonomous")
+
+    window._poll_gamepad()
+    gamepad.set_connected(False)
+    window._poll_gamepad()
+
+    topic = next(t for t in FakeTopic.instances if t.name == "/manual_twist")
+    assert topic.published_messages == []
+
+
+def test_a_mode_status_that_stops_arriving_does_not_reopen_the_stream(qtbot):
+    gamepad = FakeGamepadReader(connected=True, twist=(0.0, 0.0, 0.0))
+    window, _ = make_window(qtbot, initial_host="localhost", gamepad_reader=gamepad)
+    _mode_status(window, "autonomous")
+    window._on_connection_changed(False)
+    window._on_connection_changed(True)
+
+    window._poll_gamepad()
+
+    topic = next(t for t in FakeTopic.instances if t.name == "/manual_twist")
+    assert topic.published_messages == []
+
+
+def test_an_unreadable_mode_status_does_not_reopen_the_stream(qtbot):
+    # A garbled /mode_status frame parses to None. Ignoring it keeps the
+    # last known mode; storing it would reopen the zero stream mid-run.
+    gamepad = FakeGamepadReader(connected=True, twist=(0.0, 0.0, 0.0))
+    window, _ = make_window(qtbot, initial_host="localhost", gamepad_reader=gamepad)
+    _mode_status(window, "autonomous")
+    window._on_mode_status(None)
+    window._poll_gamepad()
+    topic = next(t for t in FakeTopic.instances if t.name == "/manual_twist")
+    assert topic.published_messages == []
+
+
+def test_stop_sends_both_the_estop_request_and_the_chassis_stop(qtbot):
+    window, _ = make_window(qtbot, initial_host="localhost")
+
+    window.dashboard_page.drive_row.stop_requested.emit()
+
+    estop = next(t for t in FakeTopic.instances if t.name == "/estop_request")
+    assert json.loads(estop.published_messages[-1]["data"])["reason"]
+    command = next(t for t in FakeTopic.instances if t.name == "/drive_command")
+    assert json.loads(command.published_messages[-1]["data"]) == {"action": "stop"}
+
+
+def test_stop_sends_the_estop_request_in_autonomous_mode_too(qtbot):
+    window, _ = make_window(qtbot, initial_host="localhost")
+    _mode_status(window, "autonomous")
+
+    window.dashboard_page.drive_row.stop_requested.emit()
+
+    estop = next(t for t in FakeTopic.instances if t.name == "/estop_request")
+    assert len(estop.published_messages) == 1
+
+
+def test_manual_asks_for_the_mode_before_the_coordinator(qtbot):
+    window, _ = make_window(qtbot, initial_host="localhost")
+
+    window.dashboard_page.drive_row.manual_requested.emit()
+
+    request = next(t for t in FakeTopic.instances if t.name == "/mode_request")
+    assert json.loads(request.published_messages[-1]["data"]) == {"mode": "manual"}
+    command = next(t for t in FakeTopic.instances if t.name == "/drive_command")
+    assert json.loads(command.published_messages[-1]["data"]) == {"action": "manual"}
+
+
+def test_the_mode_status_reaches_the_drive_row(qtbot):
+    window, _ = make_window(qtbot, initial_host="localhost")
+    _mode_status(window, "autonomous")
+    assert window.dashboard_page.drive_row.mode_pill.text() == "AUTONOMOUS"
+
+
+def test_the_window_subscribes_to_mode_status_on_connect(qtbot):
+    make_window(qtbot, initial_host="localhost")
+    assert any(t.name == "/mode_status" for t in FakeTopic.instances)

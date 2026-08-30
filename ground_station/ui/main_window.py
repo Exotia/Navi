@@ -9,7 +9,9 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, Q
 
 from ground_station import theme
 from ground_station.gamepad_input import GamepadReader
-from ground_station.models import DriveCommandTracker, NodeRegistry
+from ground_station.models import (DriveCommandTracker, NodeRegistry,
+                                   is_stick_deflected, may_publish_manual_twist,
+                                   may_publish_takeover_twist)
 from ground_station.ros_client import RosBridgeClient
 from ground_station.ui.dashboard_page import DashboardPage
 from ground_station.ui.drive_detail_page import DriveDetailPage
@@ -79,6 +81,12 @@ class MainWindow(QMainWindow):
         self._map_status_at: float | None = None
         # Same, for /drive_status.
         self._drive_status_at: float | None = None
+        # The last /mode_status seen, or None if none has. Deliberately
+        # never expired and never cleared on a rosbridge drop: the mode is
+        # the rover's, not this link's, and forgetting it would reopen the
+        # /manual_twist stream into an autonomous run the moment the link
+        # hiccuped - which rule 1 would then read as a takeover.
+        self._mode_state = None
 
         # Global button style, applied at the MainWindow level so every
         # QPushButton in the app (including ones on child widgets) gets the
@@ -159,8 +167,8 @@ class MainWindow(QMainWindow):
         row.clear_requested.connect(lambda: self._send_map_command("clear"))
 
         drive_row = self.dashboard_page.drive_row
-        drive_row.stop_requested.connect(lambda: self._send_drive_command("stop"))
-        drive_row.manual_requested.connect(lambda: self._send_drive_command("manual"))
+        drive_row.stop_requested.connect(self._on_stop_requested)
+        drive_row.manual_requested.connect(self._on_manual_requested)
         drive_row.init_requested.connect(lambda: self._send_drive_command("init"))
         drive_row.reset_encoders_requested.connect(
             lambda: self._send_drive_command("reset_encoders"))
@@ -211,27 +219,42 @@ class MainWindow(QMainWindow):
     def _poll_gamepad(self) -> None:
         """Shows the gamepad's current stick-derived Twist on the Drive
         card/detail page unconditionally - this display never depends on a
-        rosbridge connection. Separately, once both a gamepad and a
-        rosbridge connection are present, also publishes it on
-        /manual_twist automatically (no manual "enable driving" step) - a
-        raw stream nothing subscribes to yet; deciding whether this becomes
-        the rover's actual /cmd_vel is a later mode-supervisor module's
-        job, not this one's. On disconnect, publishes one zero-velocity
-        Twist as a fail-safe stop rather than leaving the rover at its last
-        command forever, then stops publishing until the gamepad returns."""
+        rosbridge connection, or on the mode.
+
+        Publishing is gated. The continuous stream goes out only when a
+        gamepad and a rosbridge connection are both present AND the rover's
+        own /mode_status says manual or semi_auto (spec rule 5).
+
+        In autonomous the stream stops but the operator is not locked out:
+        a stick past the gamepad deadzone is still published, a centred one
+        is not. That is what rule 5's own justification asks for - rule 1
+        becomes "a real signal rather than a constant stream" - and it is
+        what makes the supervisor's takeover reachable at all, since this
+        is the only publisher of /manual_twist. No new threshold is
+        invented: read_twist() has already applied gamepad_input.DEADZONE
+        (0.1) per axis, so a non-zero component is past it by construction.
+
+        On gamepad disconnect it publishes one zero-velocity Twist as a
+        fail-safe stop - subject to the *stream* gate only, because a zero
+        is never a takeover and a zero stream is exactly what the gate
+        exists to silence - then stops publishing until the gamepad
+        returns."""
         connected = self.gamepad_reader.poll()
         rosbridge_ready = self.ros_client is not None and self.ros_client.is_connected
+        may_stream = rosbridge_ready and may_publish_manual_twist(self._mode_state)
+        may_take_over = rosbridge_ready and may_publish_takeover_twist(self._mode_state)
 
         if connected:
             self._gamepad_was_connected = True
             linear_x, linear_y, angular_z = self.gamepad_reader.read_twist()
             self._update_drive_display(linear_x, linear_y, angular_z)
-            if rosbridge_ready:
+            if may_stream or (may_take_over and is_stick_deflected(
+                    (linear_x, linear_y, angular_z))):
                 self.ros_client.publish_manual_twist(linear_x, linear_y, angular_z)
         elif self._gamepad_was_connected:
             self._gamepad_was_connected = False
             self._update_drive_display(0.0, 0.0, 0.0)
-            if rosbridge_ready:
+            if may_stream:
                 self.ros_client.publish_manual_twist(0.0, 0.0, 0.0)
 
     def _on_connect_clicked(self) -> None:
@@ -270,6 +293,7 @@ class MainWindow(QMainWindow):
             self._on_localization_pose)
         self.ros_client.signals.map_status_received.connect(self._on_map_status)
         self.ros_client.signals.drive_status_received.connect(self._on_drive_status)
+        self.ros_client.signals.mode_status_received.connect(self._on_mode_status)
 
         try:
             # Subscribe BEFORE connecting: roslibpy's Ros.run() raises
@@ -289,6 +313,7 @@ class MainWindow(QMainWindow):
             self.ros_client.subscribe_localization_pose()
             self.ros_client.subscribe_map_status()
             self.ros_client.subscribe_drive_status()
+            self.ros_client.subscribe_mode_status()
             self.ros_client.connect()
         except Exception as exc:
             print(f"ground_station: failed to connect to rosbridge: {exc}", file=sys.stderr)
@@ -511,6 +536,42 @@ class MainWindow(QMainWindow):
     def _on_drive_status(self, state) -> None:
         self._drive_status_at = monotonic() if state is not None else None
         self.dashboard_page.drive_row.set_state(state)
+
+    def _on_mode_status(self, state) -> None:
+        # A status that would not parse says nothing about the rover's
+        # mode. Keeping the last known one is the safe direction:
+        # forgetting it would reopen the /manual_twist stream into a
+        # running autonomous mission for the same reason a rosbridge blip
+        # must not (see __init__).
+        if state is None:
+            return
+        self._mode_state = state
+        self.dashboard_page.drive_row.set_mode_state(state)
+
+    def _on_stop_requested(self) -> None:
+        """STOP does two different things, in this order.
+
+        /estop_request latches on the Orin and survives this link dying -
+        it is the one that must go first, because it is the one that keeps
+        working when the next message does not arrive. The chassis stop on
+        /drive_command is what puts F2 on the wire through the primary
+        right now. Neither replaces the other, and both are sent in every
+        mode."""
+        if self.ros_client is None:
+            return
+        self.ros_client.send_estop_request("ground station STOP")
+        self.ros_client.send_drive_command("stop")
+
+    def _on_manual_requested(self) -> None:
+        """The DRIVE row's Manual button, which is also the only way back
+        from a latched e-stop: /mode_request manual clears the supervisor's
+        latch, then the coordinator is asked for Manual as before. In that
+        order - asking the coordinator to arm while the supervisor is still
+        latched would arm a rover that is still being held at zero."""
+        if self.ros_client is None:
+            return
+        self.ros_client.send_mode_request("manual")
+        self.ros_client.send_drive_command("manual")
 
     def _on_mode_changed(self, mode: str) -> None:
         """Switches the panel's view source only. The twist keeps reaching

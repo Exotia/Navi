@@ -137,3 +137,43 @@ def test_every_button_explains_itself(qtbot):
     # The two wheel-moving buttons say so, unmissably.
     assert "WHEELS WILL MOVE" in row.init_button.toolTip()
     assert "WHEELS WILL MOVE" in row.reset_enc_button.toolTip()
+
+
+def mode(**over):
+    from ground_station.models import ModeState
+    base = dict(mode="manual", reason="", source="/manual_twist",
+                deadman_active=False, estop_latched=False,
+                localization_state="OK", source_age_s=0.05)
+    base.update(over)
+    return ModeState(**base)
+
+
+def test_the_mode_pill_is_hidden_until_a_mode_status_arrives(qtbot):
+    row = DriveRow()
+    qtbot.addWidget(row)
+    assert not row.mode_pill.isVisibleTo(row)
+
+
+def test_the_mode_pill_names_the_mode(qtbot):
+    row = DriveRow()
+    qtbot.addWidget(row)
+    row.set_mode_state(mode(mode="semi_auto"))
+    assert row.mode_pill.text() == "SEMI_AUTO"
+    row.set_mode_state(mode(mode="autonomous"))
+    assert row.mode_pill.text() == "AUTONOMOUS"
+
+
+def test_a_latched_estop_is_what_the_mode_pill_says(qtbot):
+    row = DriveRow()
+    qtbot.addWidget(row)
+    row.set_mode_state(mode(mode="estop", estop_latched=True, source=None))
+    assert row.mode_pill.text() == "E-STOP LATCHED"
+
+
+def test_the_mode_pill_survives_a_drive_status_going_away(qtbot):
+    row = DriveRow()
+    qtbot.addWidget(row)
+    row.set_mode_state(mode(mode="autonomous"))
+    row.set_state(None)                # the bridge went quiet, not the supervisor
+    assert row.mode_pill.text() == "AUTONOMOUS"
+    assert row.mode_pill.isVisibleTo(row)
