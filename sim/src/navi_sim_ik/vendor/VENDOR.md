@@ -39,3 +39,21 @@ Files that do NOT carry it: `gpc.h`, `kinematics_capi_host.h`, `rtw_capi.h`,
 This was noted at the time of vendoring. It has not been assessed by anyone
 with the authority to rule on whether it affects this project's use of the
 code.
+
+## Superseded, 2026-08-30
+
+This model — 2.41, ert.tlc, R2022a, with **Merope** geometry baked into the
+generated code — is **no longer what the simulation runs**. SP4 re-vendored the
+rover's own model into `../vendor242/` (2.42, grt.tlc, R2023a, Asterope
+geometry supplied at runtime on `hParams`), because a feasibility clamp that
+trusts the simulation must clamp against arithmetic the wheels actually obey.
+See `docs/superpowers/specs/autonomy-plan.md` §1.4.
+
+These files are kept, unchanged, and still compiled: `test/test_vendored_model.cpp`
+is the only thing that links them, and it stays as the guard that this frozen
+copy remains complete. Nothing else references them. Removing the directory is
+a separate decision, to be taken once someone has also ruled on the licence
+note above.
+
+**Both directories define `class kinematics`**, with different member layouts
+and different input structs. No single binary may link both libraries.
