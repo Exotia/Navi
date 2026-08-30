@@ -102,6 +102,13 @@ def test_manual_command_calls_the_coordinator(bridge):
     assert ("coord", "F6", []) in server.calls
 
 
+def test_abort_command_calls_the_coordinator(bridge):
+    node, server, clock = bridge
+    node._on_command(_string({"action": "abort"}))
+    assert ("coord", "F7", []) in server.calls
+    assert node._last_action == "abort"
+
+
 def test_status_tick_publishes_json(bridge):
     node, server, clock = bridge
     published = []

@@ -135,6 +135,9 @@ class FakeBemaServer:
         # un-leased call is answered with error 1 and the handler never runs.
         if not self.coord_lease_held:
             return 1, None
+        if method == "F7":             # abort - back to Idle
+            self.state = 1
+            return None, None
         if method == "F6":             # startManual
             self.state = 3             # Manual (simplified: no 5 s delay)
             return None, None

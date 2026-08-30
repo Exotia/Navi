@@ -96,6 +96,26 @@ def test_start_manual_calls_the_coordinator(server):
     assert server.state == 3
 
 
+def test_abort_takes_the_coordinator_lease_then_calls_f7(server):
+    # Coordinator F7 is abort, and like F6 it sits behind checkAccess() on
+    # the coordinator's own lease - the same trap start_manual fell into.
+    clock = Clock()
+    sess = _session(server, clock)
+    server.calls.clear()
+    server.set_state(5)                          # Autonomous, so 1 proves F7
+    sess.abort()
+    assert ("coord", "__sam__request", []) in server.calls
+    assert ("coord", "F7", []) in server.calls
+    assert server.state == 1                     # back to Idle
+
+
+def test_abort_without_a_coordinator_is_a_no_op(server):
+    clock = Clock()
+    sess = _session(server, clock)
+    sess._coord = None
+    sess.abort()          # no exception = pass
+
+
 def test_close_after_link_drop_does_not_raise(server):
     clock = Clock()
     sess = _session(server, clock)

@@ -99,6 +99,7 @@ class BemaBridge(Node):
         table = {
             "stop": self._session.stop,
             "manual": self._session.start_manual,
+            "abort": self._session.abort,
             "init": self._session.init,
             "reset_encoders": self._session.reset_encoders,
             "reset_odometry": self._session.reset_odometry,

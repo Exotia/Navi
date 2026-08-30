@@ -184,6 +184,25 @@ class BemaSession:
         except (RpcTimeout, RpcDisconnected, OSError) as exc:
             self._mark_down(exc)
 
+    def abort(self):
+        # F7 on the COORDINATOR is abort - not BEMA's F7, which is
+        # setMovementEnabled(bool) on a different server on a different
+        # port. Like startManual it sits behind CoordinatorProxy's
+        # checkAccess() on the coordinator's own ServerAccessManager, so
+        # the lease is acquired just-in-time here too; it lapses by itself
+        # after 4 s of guarded-call silence.
+        if self._coord is None:
+            return
+        try:
+            if not self._coord.call("__sam__request"):
+                self._last_error = "coordinator refused the lease for abort"
+                return
+            self._coord.call("F7")
+        except RpcError as exc:
+            self._mark_refused(exc, "abort")
+        except (RpcTimeout, RpcDisconnected, OSError) as exc:
+            self._mark_down(exc)
+
     def _safe(self, method, *args):
         if self._bema is None:
             return
