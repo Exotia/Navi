@@ -17,38 +17,42 @@ TEST(SimIkStepper, StartsAtTheOrigin)
 TEST(SimIkStepper, DrivingForwardMovesAlongXAndNotAcross)
 {
   // The real IK's constrained output is not perfectly decoupled: driving from
-  // a standing start measurably shows up as 0.0764 m of cross-track drift and
-  // 0.0562 rad of yaw over these 100 steps (traced to a small non-zero
+  // a standing start measurably shows up as 0.0813 m of cross-track drift and
+  // 0.0581 rad of yaw over these 100 steps (traced to a small non-zero
   // eta_dot_constrained[2] the model itself settles to while VX_out is
-  // nonzero and VY_out/U_p are zero - not an artifact of this wrapper, and
-  // reproducible by feeding the vendored model directly). These are measured
-  // baselines from the current, correct implementation, not analytically
-  // derived - the +/-0.03 band is a regression guard around them, wide
-  // enough for ordinary numerical noise but tight enough that a change which
-  // doubled or erased the real coupling would fail either bound.
+  // nonzero and VY_out/U are zero - not an artifact of this wrapper, and
+  // reproducible by feeding the 2.42 model with Asterope geometry directly).
+  // These are measured baselines from the current, correct implementation,
+  // not analytically derived - the +/-0.03 band is a regression guard around
+  // them, wide enough for ordinary numerical noise but tight enough that a
+  // change which doubled or erased the real coupling would fail either
+  // bound.
   SimIkStepper stepper;
   for (int i = 0; i < 100; ++i) {   // 6 seconds
     stepper.step(0.5, 0.0, 0.0);
   }
   EXPECT_GT(stepper.pose().x, 1.0);
-  EXPECT_NEAR(stepper.pose().y, 0.0764, 0.03);
-  EXPECT_NEAR(stepper.pose().yaw, 0.0562, 0.03);
+  EXPECT_NEAR(stepper.pose().y, 0.0813, 0.03);
+  EXPECT_NEAR(stepper.pose().yaw, 0.0581, 0.03);
 }
 
 TEST(SimIkStepper, TurningInPlaceChangesYawWithoutTravelling)
 {
-  // As above: the vendored IK measurably produces -0.0792 m of transient x
-  // travel while spinning up from a standing start (the wheels take a moment
-  // to swing into the turn-in-place configuration, and that transient is real
-  // motion the vehicle would actually make). Measured baseline, not derived;
-  // the +/-0.03 band around it is a two-sided regression guard rather than a
-  // ceiling, so a change that doubled the real transient would also fail.
+  // The IK measurably produces some transient x travel while spinning up
+  // from a standing start (the wheels take a moment to swing into the
+  // turn-in-place configuration, and that transient is real motion the
+  // vehicle would actually make). Measured baseline from the 2.42 model with
+  // Asterope geometry, not analytically derived; the +/-0.03 band around it
+  // is a two-sided regression guard rather than a ceiling, so a change that
+  // doubled the real transient would also fail. Note the sign: under the old
+  // 2.41/Merope model this transient went the other way, which is a change of
+  // chassis geometry and not of behaviour.
   SimIkStepper stepper;
   for (int i = 0; i < 100; ++i) {
     stepper.step(0.0, 0.0, 0.4);
   }
   EXPECT_GT(std::abs(stepper.pose().yaw), 0.5);
-  EXPECT_NEAR(stepper.pose().x, -0.0792, 0.03);
+  EXPECT_NEAR(stepper.pose().x, 0.1787, 0.03);
   EXPECT_NEAR(stepper.pose().y, 0.0, 0.05);
 }
 
@@ -135,13 +139,18 @@ TEST(SimIkStepper, YawIsIntegratedFromTheStartOfStepNotTheEnd)
   // the order of 0.1 m - an order of magnitude past the 0.02 m tolerance
   // here, so that ordering bug fails this test while ordinary numerical
   // noise does not.
+  //
+  // Re-measured for the 2.42 model with Asterope geometry (SP4). The
+  // ordering bug this test exists to catch still shifts the endpoint by
+  // roughly one step's yaw increment applied to the whole path - on the
+  // order of 0.1 m, an order of magnitude past the tolerance here.
   SimIkStepper stepper;
   for (int i = 0; i < 100; ++i) {
     stepper.step(0.5, 0.0, 0.6);
   }
-  EXPECT_NEAR(stepper.pose().x, -0.0841218, 0.02);
-  EXPECT_NEAR(stepper.pose().y, 1.6467001, 0.02);
-  EXPECT_NEAR(stepper.pose().yaw, 3.2995396, 0.02);
+  EXPECT_NEAR(stepper.pose().x, -0.0929653, 0.02);
+  EXPECT_NEAR(stepper.pose().y, 1.6378290, 0.02);
+  EXPECT_NEAR(stepper.pose().yaw, 3.3671992, 0.02);
 }
 
 TEST(SimIkStepper, AchievedVelocityIsBodyFrameNotWorldFrame)

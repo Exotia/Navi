@@ -4,6 +4,7 @@
 #include <array>
 
 #include "kinematics.h"
+#include "navi_sim_ik/asterope_params.hpp"
 
 namespace navi_sim_ik
 {
@@ -51,10 +52,17 @@ struct Velocity2D
 /// rate fed back into the model are its own previous outputs. That closes the
 /// loop the way the rover's hardware would when it tracks perfectly, which is
 /// the assumption this whole simulation rests on.
+///
+/// The model is the rover's own: Simulink 2.42, grt target, R2023a, with
+/// Asterope's geometry fed in through hParams (../../vendor242/VENDOR242.md).
+/// The simulation runs the arithmetic the wheels obey, which is what makes a
+/// disagreement between sim and rover a real disagreement — and what makes
+/// SP10's feasibility clamp trustworthy.
 class SimIkStepper
 {
 public:
-  explicit SimIkStepper(double ts = 0.06);
+  /// `ts` defaults to the rover's own IK period; see asterope_params.hpp.
+  explicit SimIkStepper(double ts = kIkTimestepSeconds);
 
   /// One tick of `ts` seconds against a body-frame velocity command.
   void step(double vx, double vy, double yaw_rate);
@@ -75,7 +83,11 @@ public:
 private:
   double ts_;
   kinematics model_;
-  kinematics::ExternalInputs in_{};
+  // Model 2.42 takes the chassis geometry at runtime on hParams, so this
+  // struct is persistent and carries it: setExternalInputs() copies the whole
+  // struct by value on every tick, exactly as the rover's IkController does
+  // with its own m_in. Filled once in the constructor.
+  ExtU_kinematics_T in_{};
   WheelTargets targets_{};
   Pose2D pose_{};
   bool indirect_mode_{false};

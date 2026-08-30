@@ -13,17 +13,38 @@ SimIkStepper::SimIkStepper(double ts)
 {
   model_.initialize();
   in_.TS = ts_;
+
+  // The rover's own constants, from IkController's constructor. They are
+  // inports on this model rather than baked-in parameters, so they have to be
+  // supplied - a default-constructed ExtU_kinematics_T would hand the model
+  // beta_dot_max = 0 and freeze the steering solid.
+  in_.beta_dot_max = kBetaDotMax;
+  in_.beta_ddot_max = kBetaDdotMax;
+  in_.acceleration_factor = kAccelerationFactor;
+
+  // Asterope's chassis geometry. Element-by-element from a std::array<float>
+  // into a real_T[8], which is the same float-to-double widening the rover
+  // performs when IkController copies its std::vector<float> - see the note
+  // in asterope_params.hpp about why that matters.
+  for (int i = 0; i < 8; ++i) {
+    in_.hParams[i] = kAsteropeHParams[i];
+  }
 }
 
 void SimIkStepper::step(double vx, double vy, double yaw_rate)
 {
   in_.VX_out = vx;
   in_.VY_out = vy;
-  in_.U_p = yaw_rate;
+  // rad/s, straight through. The rover reaches the same number by two
+  // negations that cancel: bema_bridge.py sends w = -degrees(angular.z) over
+  // RPC, and BemaServer::drive() computes u = -pi*w/180. Converting to
+  // degrees or flipping the sign here would apply that pair a second time and
+  // spin the simulated rover backwards at a 57th of the commanded rate.
+  in_.U = yaw_rate;
 
   model_.setExternalInputs(&in_);
   model_.step();
-  const auto & out = model_.getExternalOutputs();
+  const ExtY_kinematics_T & out = model_.getExternalOutputs();
 
   for (int w = 0; w < 4; ++w) {
     targets_.steer[w] = out.beta_next[w];
