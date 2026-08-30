@@ -95,3 +95,15 @@ def test_a_cancelled_init_stays_clickable(qtbot):
     row.confirm_init = lambda: False
     row.init_button.click()
     assert row.init_button.isEnabled()
+
+
+def test_every_button_explains_itself(qtbot):
+    row = DriveRow()
+    qtbot.addWidget(row)
+    for b in (row.stop_button, row.manual_button, row.init_button,
+              row.reset_enc_button, row.reset_odom_button,
+              row.mode_button, row.state_button):
+        assert b.toolTip(), b.text()
+    # The two wheel-moving buttons say so, unmissably.
+    assert "WHEELS WILL MOVE" in row.init_button.toolTip()
+    assert "WHEELS WILL MOVE" in row.reset_enc_button.toolTip()

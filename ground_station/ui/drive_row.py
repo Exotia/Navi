@@ -115,6 +115,23 @@ class DriveRow(QWidget):
             layout.addWidget(b)
         layout.addLayout(self.status_layout, stretch=2)
 
+        self.stop_button.setToolTip(
+            "Stop all movement immediately (emergency stop).\n"
+            "Latches: the rover stays stopped until you move a stick again.")
+        self.manual_button.setToolTip(
+            "Ask the rover's coordinator for Manual mode.\n"
+            "Driving arms ~5 s later (chip shows ARMING, then MANUAL).")
+        self.init_button.setToolTip(
+            "One-time drive initialisation after a rover boot.\n"
+            "THE WHEELS WILL MOVE to zero the steering. Needed once; further clicks are ignored.")
+        self.reset_enc_button.setToolTip(
+            "Re-zero the steering encoders. THE WHEELS WILL MOVE.")
+        self.reset_odom_button.setToolTip(
+            "Reset the rover's odometry to zero. The wheels do not move.")
+        self.mode_button.setToolTip(
+            "Toggle the drive mode on the rover (kinematic / direct).")
+        self.state_button.setToolTip(
+            "Cycle the rover's drive state machine. Can move the wheels.")
         self.stop_button.clicked.connect(self.stop_requested.emit)
         self.manual_button.clicked.connect(self.manual_requested.emit)
         self.init_button.clicked.connect(self._on_init)
