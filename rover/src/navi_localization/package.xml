@@ -18,6 +18,8 @@
   <exec_depend>python3-numpy</exec_depend>
   <depend>zed_msgs</depend>
   <exec_depend>zed_wrapper</exec_depend>
+  <!-- localization.launch.py runs two static_transform_publisher nodes. -->
+  <exec_depend>tf2_ros</exec_depend>
 
   <test_depend>python3-pytest</test_depend>
   <!-- test_localization_launch.py reads the wrapper's parameter YAML. -->

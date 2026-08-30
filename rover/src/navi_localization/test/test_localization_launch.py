@@ -13,6 +13,7 @@ budget was spent on.
 import importlib.util
 import pathlib
 
+import pytest
 import yaml
 
 PACKAGE_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -89,3 +90,62 @@ def test_the_launch_file_starts_the_elevation_mapper():
     source = LAUNCH_FILE.read_text()
 
     assert "executable='elevation_mapper'" in source
+
+
+def _named(arguments):
+    return {arguments[i]: arguments[i + 1] for i in range(0, len(arguments), 2)}
+
+
+def test_the_static_transforms_are_the_two_from_pose_composition():
+    argument_lists = _load_launch_module().static_frame_arguments()
+
+    assert len(argument_lists) == 2
+    camera, base_link = (_named(a) for a in argument_lists)
+
+    assert camera['--frame-id'] == 'zed_front_camera_link'
+    assert camera['--child-frame-id'] == 'base_footprint'
+    assert float(camera['--x']) == pytest.approx(-0.345)
+    assert float(camera['--y']) == pytest.approx(0.0)
+    assert float(camera['--z']) == pytest.approx(-0.548)
+    assert [float(camera[k]) for k in ('--qx', '--qy', '--qz', '--qw')] == [0.0, 0.0, 0.0, 1.0]
+
+    assert base_link['--frame-id'] == 'base_footprint'
+    assert base_link['--child-frame-id'] == 'base_link'
+    assert float(base_link['--z']) == pytest.approx(0.409)
+
+
+def test_negative_zero_never_reaches_the_command_line():
+    # inverse() of a transform with a zero component produces -0.0, which
+    # would be published correctly but read as a typo in `ros2 node info`.
+    for arguments in _load_launch_module().static_frame_arguments():
+        assert '-0.0' not in arguments
+
+
+def test_the_launch_file_starts_the_static_transform_publishers():
+    # The nodes are built in a loop over static_frame_arguments(), so the
+    # count that matters is the argument lists', asserted above; what this
+    # checks is that they are wired into the LaunchDescription at all.
+    source = LAUNCH_FILE.read_text()
+
+    assert "executable='static_transform_publisher'" in source
+    assert "package='tf2_ros'" in source
+    assert 'LaunchDescription([zed, status, mapper] + static_frame_nodes())' in source
+
+
+def test_the_orin_never_starts_a_robot_state_publisher():
+    # A robot_state_publisher here would publish the URDF root and re-parent
+    # zed_front_camera_link, giving it a second parent and splitting the tree.
+    # This only guards against this file starting one directly: with
+    # publish_urdf: 'true', the wrapper's included zed_camera.launch.py does
+    # start its own robot_state_publisher for the camera's xacro, rooted at
+    # zed_front_camera_link (harmless, since it only adds children) — this
+    # test proves less than its name suggests. The real evidence for "no
+    # robot_state_publisher on the Orin" is the rover check elsewhere in this
+    # plan.
+    assert 'robot_state_publisher' not in LAUNCH_FILE.read_text()
+
+
+def test_tf2_ros_is_declared_as_a_dependency():
+    package_xml = (PACKAGE_ROOT / 'package.xml').read_text()
+
+    assert '<exec_depend>tf2_ros</exec_depend>' in package_xml

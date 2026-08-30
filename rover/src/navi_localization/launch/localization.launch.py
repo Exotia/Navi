@@ -54,6 +54,8 @@ from launch.actions import IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 
+from navi_localization.pose_composition import STATIC_FRAMES
+
 # Every image topic the wrapper hands to image_transport, relative to the
 # node. Each gets its transport list pinned to raw in config/zed_front.yaml,
 # which drops 15 ffmpeg publishers nothing on the rover reads. Their libx264
@@ -104,6 +106,69 @@ def raw_only_plugin_parameters() -> dict:
             for topic in IMAGE_TOPICS}
 
 
+def _number(value: float) -> str:
+    """A float for a command line. `+ 0.0` folds -0.0 (which inverse()
+    produces from a zero component) back to 0.0, so the arguments read like
+    the constant they came from."""
+    return repr(value + 0.0)
+
+
+def static_transform_arguments(transform, frame_id: str, child_frame_id: str) -> list:
+    """tf2_ros static_transform_publisher's named arguments (Humble). The
+    positional form is deprecated and silently reorders roll/pitch/yaw."""
+    return [
+        '--x', _number(transform.x),
+        '--y', _number(transform.y),
+        '--z', _number(transform.z),
+        '--qx', _number(transform.qx),
+        '--qy', _number(transform.qy),
+        '--qz', _number(transform.qz),
+        '--qw', _number(transform.qw),
+        '--frame-id', frame_id,
+        '--child-frame-id', child_frame_id,
+    ]
+
+
+def static_frame_arguments() -> list:
+    """One argument list per entry in pose_composition.STATIC_FRAMES.
+
+    Separated from static_frame_nodes() so the test can call it: this launch
+    file's generate_launch_description() needs the zed_wrapper share
+    directory, which does not exist on the laptop.
+    """
+    return [static_transform_arguments(transform, parent, child)
+            for parent, child, transform in STATIC_FRAMES]
+
+
+def static_frame_nodes() -> list:
+    """base_footprint and base_link, hung under the frame the ZED wrapper
+    owns.
+
+    Two static_transform_publisher processes rather than a broadcaster node
+    of our own: the transforms are fixed, tf2_ros already latches /tf_static
+    correctly, and starting them here means they live and die with the
+    wrapper they hang from. The numbers are not retyped - they are
+    pose_composition's constants, the same ones localization_status uses to
+    re-express the pose, so a re-measured mount is still one number in one
+    place.
+
+    Deliberately not a URDF-wide state publisher: that would publish the
+    URDF root and make zed_front_camera_link a child of base_link, giving
+    that link a second parent and splitting the tree the wrapper owns.
+    """
+    names = ['camera_to_base_footprint_tf', 'base_footprint_to_base_link_tf']
+    return [
+        Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            name=name,
+            arguments=arguments,
+            output='screen',
+        )
+        for name, arguments in zip(names, static_frame_arguments())
+    ]
+
+
 def generate_launch_description():
     share = get_package_share_directory('navi_localization')
     wrapper_share = get_package_share_directory('zed_wrapper')
@@ -138,4 +203,4 @@ def generate_launch_description():
         output='screen',
     )
 
-    return LaunchDescription([zed, status, mapper])
+    return LaunchDescription([zed, status, mapper] + static_frame_nodes())
