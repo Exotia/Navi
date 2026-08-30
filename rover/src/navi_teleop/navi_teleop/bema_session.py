@@ -127,10 +127,11 @@ class BemaSession:
     def close(self):
         if self._bema is not None:
             self.stop()
-            try:
-                self._bema.call("__sam__release")
-            except (RpcError, RpcTimeout, RpcDisconnected, OSError):
-                pass
+            if self._bema is not None:
+                try:
+                    self._bema.call("__sam__release")
+                except (RpcError, RpcTimeout, RpcDisconnected, OSError):
+                    pass
         for client in (self._bema, self._coord):
             if client is not None:
                 client.close()
