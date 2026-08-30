@@ -272,13 +272,24 @@ class MainWindow(QMainWindow):
         self.ros_client.signals.drive_status_received.connect(self._on_drive_status)
 
         try:
-            self.ros_client.connect()
+            # Subscribe BEFORE connecting: roslibpy's Ros.run() raises
+            # RosTimeoutError after 10 s if rosbridge doesn't answer, but
+            # it keeps reconnecting in the background and Topic.subscribe()
+            # registers its "send once ready" callback against the Ros
+            # instance regardless of whether a connection exists yet
+            # (roslibpy.core.Topic._connect_topic -> Ros.send_on_ready ->
+            # factory.on_ready, which queues via a one-shot "ready"
+            # listener when not yet connected). So calling connect() last
+            # means a slow/initially-down rosbridge still ends up with
+            # every subscription wired up once it does go ready, instead
+            # of silently skipping all of them.
             self.ros_client.subscribe_manual_twist()
             self.ros_client.subscribe_video_status()
             self.ros_client.subscribe_localization_status()
             self.ros_client.subscribe_localization_pose()
             self.ros_client.subscribe_map_status()
             self.ros_client.subscribe_drive_status()
+            self.ros_client.connect()
         except Exception as exc:
             print(f"ground_station: failed to connect to rosbridge: {exc}", file=sys.stderr)
 

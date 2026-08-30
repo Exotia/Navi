@@ -56,6 +56,16 @@ class FakeRos:
         pass
 
 
+class FakeRosThatTimesOutOnRun(FakeRos):
+    """Mirrors roslibpy: Ros.run() raises RosTimeoutError when rosbridge
+    doesn't answer within the connection timeout, while auto-reconnect
+    keeps running in the background and Topic subscriptions registered
+    beforehand still get wired up once a later attempt succeeds."""
+
+    def run(self):
+        raise TimeoutError("Failed to connect to ROS")
+
+
 class FakeGamepadReader:
     """Never reports a gamepad connected unless a test explicitly says so -
     this is the default injected into every MainWindow test so none of them
@@ -81,6 +91,13 @@ class FakeGamepadReader:
 def make_fake_client_factory():
     def factory(host, port=9090):
         return RosBridgeClient(host=host, port=port, ros_factory=FakeRos, topic_factory=FakeTopic)
+    return factory
+
+
+def make_timeout_client_factory():
+    def factory(host, port=9090):
+        return RosBridgeClient(host=host, port=port, ros_factory=FakeRosThatTimesOutOnRun,
+                               topic_factory=FakeTopic)
     return factory
 
 
@@ -920,3 +937,35 @@ def test_a_mode_round_trip_restores_the_rover_camera_that_was_on(qtbot, monkeypa
 
     assert panel.streaming is True
     assert _last_video_request()["enable"] is True
+
+
+def test_a_timed_out_first_connect_still_registers_every_subscription(qtbot):
+    # Regression: _connect_to used to call ros_client.connect() (which
+    # raises when roslibpy's Ros.run() times out) BEFORE any of the
+    # subscribe_* calls, so a slow/down rosbridge on first connect meant
+    # every subscription was skipped - even though roslibpy keeps
+    # reconnecting in the background and will eventually go ready.
+    # subscribe_* must run regardless of whether connect() raises.
+    window = MainWindow(
+        ros_client_factory=make_timeout_client_factory(),
+        initial_host=None,
+        gamepad_reader=FakeGamepadReader(),
+        video_receiver=FakeReceiver(),
+    )
+    qtbot.addWidget(window)
+    FakeTopic.instances.clear()
+
+    window._connect_to("localhost", 9090)
+
+    names = {t.name for t in FakeTopic.instances}
+    assert names == {
+        "/manual_twist", "/video_status", "/localization/status",
+        "/localization/pose", "/localization/map_status", "/drive_status",
+    }
+    client = window.ros_client
+    assert client._manual_twist_topic is not None
+    assert client._video_status_topic is not None
+    assert client._localization_status_topic is not None
+    assert client._localization_pose_topic is not None
+    assert client._map_status_topic is not None
+    assert client._drive_status_topic is not None
