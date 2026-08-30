@@ -11,8 +11,9 @@ import numpy as np
 import pytest
 
 from navi_autonomy.traversability import (
-    ROUGHNESS_REF_M, SLOPE_LETHAL_DEG, SLOPE_LETHAL_RAD, STEP_LETHAL_M, derive,
-    roughness_layer, slope_layer, step_layer, valid_layer)
+    LETHAL, MAX_SCALED_COST, ROUGHNESS_REF_M, SLOPE_LETHAL_DEG, SLOPE_LETHAL_RAD,
+    STEP_LETHAL_M, UNKNOWN, costmap_seed, derive, roughness_layer, seed_from_elevation,
+    slope_layer, step_layer, valid_layer)
 
 
 def pit(depth=0.2, size=6, extent=24):
@@ -157,3 +158,75 @@ def test_derive_returns_the_four_layers_at_the_input_shape():
     for name, array in layers.items():
         assert array.shape == grid.shape, name
         assert array.dtype == np.float32, name
+
+
+# -- the cost curve --------------------------------------------------------
+
+def test_the_seed_values_are_the_occupancy_grid_conventions():
+    assert (LETHAL, UNKNOWN, MAX_SCALED_COST) == (100, -1, 99)
+
+
+def test_a_pit_rim_is_lethal_in_the_seed():
+    """End of the chain the whole sub-project exists for."""
+    grid, lo, size = pit()
+    layers, cost = seed_from_elevation(grid)
+    assert cost.dtype == np.int8
+    assert cost[lo - 1, lo - 1] == LETHAL
+    assert cost[lo - 1, lo + 2] == LETHAL
+    assert cost[lo, lo] == LETHAL                 # the floor against the wall
+    assert cost[2, 2] == 0                        # far flat ground is free
+    assert (cost == LETHAL).sum() == 48            # the 6x6 pit's two rings of rim
+
+
+def test_never_seen_ground_is_unknown_not_free():
+    grid = np.zeros((10, 10), dtype=np.float32)
+    grid[5, 5] = np.nan
+    _, cost = seed_from_elevation(grid)
+    assert cost[5, 5] == UNKNOWN
+    assert cost[4, 5] == UNKNOWN                  # incomplete neighbourhood
+    assert cost[0, 3] == UNKNOWN                  # the grid edge
+    assert cost[3, 3] == 0
+
+
+def test_a_lethal_step_beats_an_incomplete_neighbourhood():
+    """A cell can be short of support and still have a measured, lethal drop
+    beside it. Lethal wins: that is the safe direction, and it is exactly the
+    case at the frontier of a hole."""
+    grid = np.zeros((10, 10), dtype=np.float32)
+    grid[5, 5] = -0.3
+    grid[5, 7] = np.nan            # takes valid away from (5, 6) and (5, 7)
+    _, cost = seed_from_elevation(grid)
+    assert valid_layer(grid)[5, 6] == 0.0
+    assert cost[5, 6] == LETHAL
+
+
+def test_slope_scales_below_the_threshold_and_is_lethal_above_it():
+    _, cost_20 = seed_from_elevation(plane(20.0))
+    _, cost_30 = seed_from_elevation(plane(30.0))
+    assert cost_20[10, 10] == 79           # round(99 * 20/25)
+    assert cost_30[10, 10] == LETHAL
+
+
+def test_the_scaled_band_takes_the_worst_indicator_not_their_average():
+    zeros = np.zeros((4, 4), dtype=np.float32)
+    ones = np.ones((4, 4), dtype=np.float32)
+    cost = costmap_seed(slope=zeros, step=np.full((4, 4), 0.07, dtype=np.float32),
+                        roughness=zeros, valid=ones)
+    assert cost[1, 1] == 50                # round(99 * 0.5), not a third of it
+
+
+def test_flat_seen_ground_costs_nothing():
+    cost = costmap_seed(slope=np.zeros((4, 4), dtype=np.float32),
+                        step=np.zeros((4, 4), dtype=np.float32),
+                        roughness=np.zeros((4, 4), dtype=np.float32),
+                        valid=np.ones((4, 4), dtype=np.float32))
+    assert (cost == 0).all()
+
+
+def test_the_seed_never_emits_a_value_outside_the_occupancy_grid_range():
+    rng = np.random.default_rng(7)
+    grid = rng.normal(0.0, 0.3, (60, 60)).astype(np.float32)
+    grid[rng.random((60, 60)) < 0.2] = np.nan
+    _, cost = seed_from_elevation(grid)
+    assert cost.min() >= -1 and cost.max() <= 100
+    assert set(np.unique(cost)) <= set(range(-1, 101))

@@ -157,3 +157,50 @@ def derive(elevation, resolution: float = RESOLUTION) -> dict:
         'roughness': roughness_layer(grid),
         'valid': valid_layer(grid),
     }
+
+
+# nav_msgs/OccupancyGrid conventions: 0..100 cost, -1 unknown. 100 is
+# reserved for lethal, so the scaled band tops out at 99 and a planner can
+# tell "as bad as it gets while still driveable" from "do not".
+LETHAL = 100
+UNKNOWN = -1
+MAX_SCALED_COST = 99
+
+
+def costmap_seed(slope, step, roughness, valid) -> np.ndarray:
+    """The four layers as one int8 cost grid for /autonomy/costmap_seed.
+
+        s = clip(slope     / SLOPE_LETHAL_RAD, 0, 1)
+        t = clip(step      / STEP_LETHAL_M,    0, 1)
+        r = clip(roughness / ROUGHNESS_REF_M,  0, 1)
+        cost = round(99 * max(s, t, r))
+        cost = -1   where valid == 0
+        cost = 100  where step >= STEP_LETHAL_M or slope >= SLOPE_LETHAL_RAD
+
+    `max`, not a mean: one bad indicator must not be averaged away by two
+    good ones. The order of the last two lines is deliberate - a cell with a
+    measured lethal step is lethal even where its neighbourhood is too
+    incomplete for `valid`, because that is the safe direction and because it
+    is exactly what a hole's frontier looks like.
+    """
+    slope = np.nan_to_num(np.asarray(slope, dtype=np.float32), nan=0.0)
+    step = np.nan_to_num(np.asarray(step, dtype=np.float32), nan=0.0)
+    roughness = np.nan_to_num(np.asarray(roughness, dtype=np.float32), nan=0.0)
+    valid = np.asarray(valid, dtype=np.float32)
+
+    worst = np.maximum(
+        np.maximum(np.clip(slope / SLOPE_LETHAL_RAD, 0.0, 1.0),
+                   np.clip(step / STEP_LETHAL_M, 0.0, 1.0)),
+        np.clip(roughness / ROUGHNESS_REF_M, 0.0, 1.0))
+    cost = np.rint(MAX_SCALED_COST * worst).astype(np.int8)
+    cost[valid < 0.5] = UNKNOWN
+    cost[(step >= STEP_LETHAL_M) | (slope >= SLOPE_LETHAL_RAD)] = LETHAL
+    return cost
+
+
+def seed_from_elevation(elevation, resolution: float = RESOLUTION) -> tuple:
+    """(the four layers, the int8 cost grid) - the whole derive in one call."""
+    layers = derive(elevation, resolution)
+    cost = costmap_seed(layers['slope'], layers['step'],
+                        layers['roughness'], layers['valid'])
+    return layers, cost
