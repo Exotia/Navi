@@ -71,6 +71,7 @@ class FakeBemaServer:
         self.state = 1                 # Idle
         self.movement_enabled = False
         self.lease_held = False
+        self.coord_lease_held = False
         self._on_drive = on_drive or (lambda vx, vy, w: None)
         self._bema = _Server(bema_port, self._bema_dispatch)
         self._coord = _Server(coordinator_port, self._coord_dispatch)
@@ -111,12 +112,24 @@ class FakeBemaServer:
 
     def _coord_dispatch(self, method, args):
         self.calls.append(("coord", method, args))
-        if method == "F9":             # getState
+        if method == "__sam__request":
+            self.coord_lease_held = True
+            return None, True
+        if method == "__sam__ping":
+            return None, self.coord_lease_held
+        if method == "__sam__release":
+            self.coord_lease_held = False
+            return None, None
+        if method == "F9":             # getState - unguarded on the real proxy
             return None, self.state
+        if method == "F10":            # notifyConnected - unguarded
+            return None, None
+        # F0-F6 sit behind checkAccess() on the real CoordinatorProxy: an
+        # un-leased call is answered with error 1 and the handler never runs.
+        if not self.coord_lease_held:
+            return 1, None
         if method == "F6":             # startManual
             self.state = 3             # Manual (simplified: no 5 s delay)
-            return None, None
-        if method == "F10":            # notifyConnected
             return None, None
         return None, None
 

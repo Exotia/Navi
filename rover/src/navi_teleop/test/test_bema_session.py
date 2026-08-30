@@ -210,3 +210,19 @@ def test_movement_enable_resent_after_lease_reacquired(server):
     sess.tick(clock.t)
     f7 = [(m, a) for tag, m, a in server.calls if m == "F7"]
     assert f7 == [("F7", [True])]
+
+
+def test_start_manual_takes_the_coordinator_lease_first(server):
+    # CoordinatorProxy guards F6 behind checkAccess() on the coordinator's
+    # OWN lease (separate from BEMA's). Without requesting it, F6 answers
+    # error 1, the session marks itself down, and Manual never engages -
+    # the "RPC error for a second on pressing Manual" bug.
+    clock = Clock()
+    sess = _session(server, clock)
+    server.calls.clear()
+    sess.start_manual()
+    coord = [(m, a) for tag, m, a in server.calls if tag == "coord"]
+    assert ("__sam__request", []) in coord
+    assert coord.index(("__sam__request", [])) < coord.index(("F6", []))
+    assert server.state == 3                      # startManual actually ran
+    assert sess.status()["connected"] is True     # and nothing marked down

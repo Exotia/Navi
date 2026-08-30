@@ -154,7 +154,20 @@ class BemaSession:
         self._safe("F6")
 
     def start_manual(self):
-        self._safe_coord("F6")
+        # CoordinatorProxy guards F6 (startManual) behind checkAccess() on
+        # the coordinator's OWN lease - a separate ServerAccessManager from
+        # BEMA's. Acquire it just-in-time; it lapses by itself after 4 s of
+        # guarded-call silence, and the unguarded F9/F10 heartbeat neither
+        # needs nor refreshes it.
+        if self._coord is None:
+            return
+        try:
+            if not self._coord.call("__sam__request"):
+                self._last_error = "coordinator refused the lease for startManual"
+                return
+            self._coord.call("F6")
+        except (RpcError, RpcTimeout, RpcDisconnected, OSError) as exc:
+            self._mark_down(exc)
 
     def _safe(self, method, *args):
         if self._bema is None:
