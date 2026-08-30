@@ -61,17 +61,7 @@ class DriveRow(QWidget):
         self.reset_odom_button.clicked.connect(self.reset_odometry_requested.emit)
         self.mode_button.clicked.connect(self.drive_mode_requested.emit)
         self.state_button.clicked.connect(self.drive_state_requested.emit)
-        # Not self.set_state(None): that would disable every button but
-        # stop before any status has ever arrived (movable = state is not
-        # None and state.connected), and a disabled QPushButton.click() is
-        # a silent no-op - the operator could never open Init's
-        # confirmation dialog before the first /drive_status message. Qt's
-        # default is enabled, so leaving that alone here means the buttons
-        # only go dark once a real status says the rover is unreachable
-        # (via set_state(None) from the staleness timer) or disconnected
-        # (via set_state(state) with connected=False) - not merely because
-        # none has arrived yet.
-        self._refresh_status()
+        self.set_state(None)
 
     def set_state(self, state) -> None:
         self._state = state

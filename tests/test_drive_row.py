@@ -24,9 +24,18 @@ def test_stop_emits_without_confirmation(qtbot):
         row.stop_button.click()
 
 
+def test_manual_and_init_are_disabled_with_no_status(qtbot):
+    row = DriveRow()
+    qtbot.addWidget(row)
+    assert not row.manual_button.isEnabled()
+    assert not row.init_button.isEnabled()
+    assert row.stop_button.isEnabled()
+
+
 def test_init_asks_for_confirmation_before_emitting(qtbot):
     row = DriveRow()
     qtbot.addWidget(row)
+    row.set_state(state())
     emitted = []
     row.init_requested.connect(lambda: emitted.append(True))
     row.confirm_init = lambda: False
