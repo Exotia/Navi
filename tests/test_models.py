@@ -210,3 +210,11 @@ def test_parse_drive_status_tolerates_garbage():
 
 def test_drive_command_json_round_trips():
     assert json.loads(drive_command_json("stop")) == {"action": "stop"}
+
+
+def test_parse_drive_status_rejects_json_booleans_in_numeric_fields():
+    # JSON booleans (True/False) must not pass int/float type guards
+    # (Python bool is a subclass of int, so bare isinstance(x, int) lets True/False through)
+    state = parse_drive_status(json.dumps({"twist_age_s": True, "coordinator_state": True}))
+    assert state.twist_age_s is None
+    assert state.coordinator_state is None

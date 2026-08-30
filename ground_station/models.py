@@ -176,7 +176,7 @@ _COORDINATOR_STATES = {
 
 
 def _coordinator_name(value):
-    return _COORDINATOR_STATES.get(value) if isinstance(value, int) else None
+    return _COORDINATOR_STATES.get(value) if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 @dataclass
@@ -204,7 +204,7 @@ def parse_drive_status(payload: str):
         lease=status.get("lease") is True,
         coordinator_state=_coordinator_name(status.get("coordinator_state")),
         deadman_active=status.get("deadman_active") is True,
-        twist_age_s=age if isinstance(age, (int, float)) else None,
+        twist_age_s=age if isinstance(age, (int, float)) and not isinstance(age, bool) else None,
         last_action=status.get("last_action") if isinstance(
             status.get("last_action"), str) else None,
         last_error=status.get("last_error") if isinstance(
