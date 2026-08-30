@@ -119,3 +119,49 @@ class FakeBemaServer:
         if method == "F10":            # notifyConnected
             return None, None
         return None, None
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--bema-port", type=int, default=21022)
+    parser.add_argument("--coordinator-port", type=int, default=21031)
+    parser.add_argument("--forward-twist", action="store_true",
+                        help="republish each F1 as a Twist on /sim_test_twist")
+    args = parser.parse_args()
+
+    on_drive = None
+    node = None
+    if args.forward_twist:
+        import rclpy
+        from geometry_msgs.msg import Twist
+        from math import radians
+        rclpy.init()
+        node = rclpy.create_node("fake_bema_forward")
+        pub = node.create_publisher(Twist, "/sim_test_twist", 1)
+
+        def on_drive(vx, vy, w_deg):
+            t = Twist()
+            t.linear.x, t.linear.y = vx, vy
+            t.angular.z = -radians(w_deg)     # invert the bridge's negation
+            pub.publish(t)
+
+    server = FakeBemaServer(args.bema_port, args.coordinator_port, on_drive=on_drive)
+    server.state = 3                          # Manual, so nothing gates F1
+    server.start()
+    print(f"fake BEMA on :{server.bema_port}, coordinator on :{server.coordinator_port}")
+    try:
+        if node is not None:
+            rclpy.spin(node)
+        else:
+            import time
+            while True:
+                time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.stop()
+
+
+if __name__ == "__main__":
+    main()
