@@ -119,12 +119,21 @@ ethernet (`ip addr add 192.168.178.18/24 dev <iface>`, added idempotently by
 alternative, rebuilding `rpc_coord` with `.33`, is rejected: it modifies the
 flight computer of a competition rover for a cosmetic reason.
 
-Two ways to command a run, both supported:
-- **Operator-initiated** (normal use): ground station → `/nav_request` →
-  `goal_relay` starts Nav2 **and** tells the coordinator via `startNaViTask`
-  so the mission state and LEDs are truthful.
-- **Coordinator-initiated** (ERC judging, future missions): the coordinator
-  calls our NaVi server with waypoints; the same internal path runs.
+**Runs are operator-initiated only.** Ground station → `/nav_request` →
+`goal_relay` starts Nav2 **and** calls `startNaViTask` so the mission state
+and LEDs are truthful. Coordinator-initiated runs (the coordinator choosing
+a task by itself) are **out of scope**; the plan does not build them.
+
+That does **not** remove the NaVi server. `CoordinatorImpl::startNaViTask`
+calls `setTargets` on the NaVi endpoint as part of servicing our own request,
+and if the endpoint is unreachable it logs `"Cannot start navigation task:
+NaVi not reachable"` and drops straight back to `Idle` — so without a served
+`:21021`, our own Go button cannot put the coordinator into `Autonomous`.
+The server is therefore built (SP8), but only the methods that path needs:
+`F0 init`, `F3 setTargets`, `F4 startNavigation`, `F5 isTargetReached`,
+`F6 stopNavigation`, `F7 setMovementEnabled`. `F1 setPosition`,
+`F2 getPosition`, `F8 getTofData` and `F9 takeSnapshot` are stubbed to a
+safe refusal until something needs them.
 
 ## 4. Arbitration and the deadman — the safety core
 
@@ -179,8 +188,8 @@ downstream use. This is the piece the old spec assumed already existed.
   invisible today; this is where they become lethal cells.
 - slope lethal above 25°, roughness scaled below that.
 Publishes `/autonomy/traversability` (GridMap, for the view — it can also
-drive the pit colouring in the sim) and `/autonomy/costmap_seed`
 (OccupancyGrid, latched).
+drive the pit colouring in the sim) and `/autonomy/costmap_seed`  
 
 **Costmap resolution 0.05 m** [CHANGED] to match the elevation map exactly.
 Resampling smears the step edges that matter most. Cost: 4× the cells of the
@@ -240,7 +249,7 @@ Autonomous mode becomes selectable. Additions, all JSON over rosbridge, no
 | **SP5** | `mode_supervisor` + ground-station publish policy + `/rover_twist` single writer; `bema_bridge` fed from it | SP4 |
 | **SP6** | Static frames, `/localization/odom_local` | — |
 | **SP7** | `tile_aggregator` + `traversability_layer` (holes become lethal) | — |
-| **SP8** | `navi_rpc_server` (:21021 on the `.18` alias) + coordinator client for task state | SP5 |
+| **SP8** | `navi_rpc_server` (:21021 on the `.18` alias, only the methods `startNaViTask` needs) + coordinator client for task state | SP5 |
 | **SP9** | Nav2 bringup and offline planning against a recorded map | SP6, SP7 |
 | **SP10** | `twist_shaper` (feasibility clamp on the real 2.42 IK) + path following in the sim | SP4, SP9 |
 | **SP11** | Ground-station NAV row, `goal_relay`, plan drawing | SP5, SP8 |
@@ -274,7 +283,7 @@ things can publish to the chassis.
 Manual is currently capped at **0.05 m/s / 0.1 rad/s** (a deliberate tenth
 for the first hardware sessions). Autonomy starts at the same cap for SP10's
 first runs, then rises **only** on measured evidence, in stages:
-0.05 → 0.15 → 0.30 → 0.45 m/s, with `wz ≤ 0.4 rad/s` and `wz` acceleration
+0.05 → 0.15 → 0.30 → 0.45 m/s, with `wz ≤ 0.4 rad/s` and `wz` acceleration  //only rize that if i specifically Tell you to
 ≤ 0.5 rad/s² until the steering slew is measured. Each stage needs one clean
 sim run and one clean yard run. The cap lives in one place per path
 (`gamepad_input.py` for manual, the velocity smoother for autonomy).
@@ -299,7 +308,10 @@ sim run and one clean yard run. The cap lives in one place per path
 
 Rear and side sensing; reversing beyond 0.6 m; MPPI; prior-scan alignment
 tooling; automatic resume after localisation recovery; probing, science and
-maintenance tasks (the coordinator's other three task types).
+maintenance tasks (the coordinator's other three task types);
+**coordinator-initiated runs** — the NaVi server exists (§3) but is driven
+only by our own Go button, and the unused half of its interface stays
+stubbed.
 
 ## 13. Operator actions
 
