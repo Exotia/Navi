@@ -1,4 +1,4 @@
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel
 
 from ground_station import theme
@@ -10,12 +10,12 @@ class DriveCard(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setStyleSheet(
-            f"background-color: {theme.PANEL}; border: 1px solid {theme.BORDER}; border-radius: 6px;"
-        )
+        self.setObjectName("driveCard")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(f"QWidget#driveCard {{ {theme.card_style()} }}")
 
         title = QLabel("DRIVE / TWIST")
-        title.setStyleSheet(f"color: {theme.TEXT_DIM}; font-weight: 600; border: none;")
+        title.setStyleSheet(theme.section_title_style())
 
         self.vx_label = QLabel("vx (cmd)  --")
         self.vy_label = QLabel("vy (cmd)  --")

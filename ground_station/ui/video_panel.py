@@ -100,15 +100,14 @@ class VideoPanel(QWidget):
         # rover completes would both request the same value.
         self._toggle_requested = False
 
-        self.setStyleSheet(
-            f"background-color: {theme.PANEL}; border: 1px solid {theme.BORDER}; "
-            f"border-radius: 6px;"
-        )
+        self.setObjectName("videoPanel")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(f"QWidget#videoPanel {{ {theme.card_style()} }}")
 
         self.title_label = QLabel()
-        self.title_label.setStyleSheet(f"color: {theme.TEXT_DIM}; font-weight: 600; border: none;")
+        self.title_label.setStyleSheet(theme.section_title_style())
 
-        self.image_label = QLabel()
+        self.image_label = QLabel("NO SIGNAL")
         self.image_label.setAlignment(Qt.AlignCenter)
         # A small fixed minimum, not the stream's own size. Pinning the
         # label to 672x376 made that the floor for the whole window, and
@@ -116,14 +115,15 @@ class VideoPanel(QWidget):
         # picture is scaled to whatever room the label ends up with.
         self.image_label.setMinimumSize(160, 90)
         self.image_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
-        self.image_label.setStyleSheet(f"background-color: {theme.BG}; border: none;")
+        # The empty state (no pixmap set yet) shows dimmed, centred text
+        # rather than a flat, unexplained rectangle; setPixmap later draws
+        # over this the moment a frame arrives.
+        self.image_label.setStyleSheet(
+            f"background-color: {theme.BG}; color: {theme.TEXT_DIM}; border: none;"
+        )
 
         self.toggle_button = QPushButton("Start video")
-        self.toggle_button.setStyleSheet(
-            f"QPushButton {{ background-color: {theme.PANEL}; color: {theme.TEXT}; "
-            f"border: 1px solid {theme.BORDER}; border-radius: 4px; padding: 4px 14px; }} "
-            f"QPushButton:hover {{ border-color: {theme.ACCENT}; }}"
-        )
+        self.toggle_button.setStyleSheet(theme.button_style())
         self.toggle_button.clicked.connect(self._on_toggle_clicked)
 
         self.status_label = QLabel("VIDEO OFF")
@@ -211,7 +211,10 @@ class VideoPanel(QWidget):
         # LEFT") above a moving picture would never win the operator's
         # attention. The failure colours are the same ones FAILED and the
         # blocked-port warning use, for the same reason: these are warnings.
-        self.title_label.setStyleSheet(f"color: {colour}; font-weight: 600; border: none;")
+        self.title_label.setStyleSheet(
+            f"color: {colour}; font-size: {theme.FONT_SIZE_SMALL}px; font-weight: 600; "
+            f"letter-spacing: 1px; border: none;"
+        )
 
     def _on_toggle_clicked(self) -> None:
         self._toggle_requested = not self._toggle_requested
@@ -259,6 +262,7 @@ class VideoPanel(QWidget):
         self.receiver.stop()
         self._last_frame = None
         self.image_label.clear()
+        self.image_label.setText("NO SIGNAL")
         if not (keep_failed_reason and self._rover_state == "failed"):
             self._rover_state = "stopped"
             self._rover_detail = ""

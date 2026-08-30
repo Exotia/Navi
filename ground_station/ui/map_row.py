@@ -55,6 +55,10 @@ class MapRow(QWidget):
         self.ask_name = self._ask_name_dialog
         self.confirm_clear = self._confirm_clear_dialog
 
+        self.setObjectName("mapRow")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(f"QWidget#mapRow {{ {theme.card_style()} }}")
+
         self.map_combo = QComboBox()
         self.load_button = QPushButton("Load")
         self.save_button = QPushButton("Save as…")
@@ -64,10 +68,13 @@ class MapRow(QWidget):
         # line stays chrome-coloured; every value that goes in is escaped.
         self.status_label.setTextFormat(Qt.TextFormat.RichText)
         self.status_label.setStyleSheet(
-            f"color: {theme.TEXT_DIM}; font-family: {theme.MONO_FONT_FAMILY};")
+            f"color: {theme.TEXT_DIM}; font-family: {theme.MONO_FONT_FAMILY}; border: none;")
+
+        title = QLabel("MAP")
+        title.setStyleSheet(theme.section_title_style())
 
         layout = QHBoxLayout(self)
-        layout.addWidget(QLabel("MAP"))
+        layout.addWidget(title)
         layout.addWidget(self.map_combo, stretch=1)
         layout.addWidget(self.load_button)
         layout.addWidget(self.save_button)

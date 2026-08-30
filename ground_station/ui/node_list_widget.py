@@ -1,3 +1,4 @@
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel
 
 from ground_station import theme
@@ -5,14 +6,19 @@ from ground_station.models import NodeStatus
 
 
 class NodeListWidget(QWidget):
+    # Fixed width for the right-hand column: consistent whatever the video
+    # panel and drive cards do with the rest of the window's width.
+    FIXED_WIDTH = 240
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setStyleSheet(
-            f"background-color: {theme.PANEL}; border: 1px solid {theme.BORDER}; border-radius: 6px;"
-        )
+        self.setObjectName("nodeList")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(f"QWidget#nodeList {{ {theme.card_style()} }}")
+        self.setFixedWidth(self.FIXED_WIDTH)
         self._layout = QVBoxLayout(self)
         title = QLabel("SYSTEM NODES")
-        title.setStyleSheet(f"color: {theme.TEXT_DIM}; font-weight: 600; border: none;")
+        title.setStyleSheet(theme.section_title_style())
         self._layout.addWidget(title)
         self._row_labels: list[QLabel] = []
 

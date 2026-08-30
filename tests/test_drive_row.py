@@ -50,19 +50,20 @@ def test_status_line_shows_coordinator_state_and_deadman(qtbot):
     row = DriveRow()
     qtbot.addWidget(row)
     row.set_state(state(coordinator_state="Idle", deadman_active=True))
-    text = row.status_label.text().lower()
-    assert "idle" in text and "deadman" in text
+    assert "idle" in row.state_pill.text().lower()
+    assert not row.deadman_pill.isHidden()
+    assert "deadman" in row.deadman_pill.text().lower()
 
 
 def test_manual_shows_arming_while_preparing(qtbot):
     row = DriveRow()
     qtbot.addWidget(row)
     row.set_state(state(coordinator_state="PrepareManual"))
-    assert "arming" in row.status_label.text().lower()
+    assert "arming" in row.state_pill.text().lower()
 
 
 def test_status_line_shows_the_last_action(qtbot):
     row = DriveRow()
     qtbot.addWidget(row)
     row.set_state(state(last_action="stop"))
-    assert "last: stop" in row.status_label.text().lower()
+    assert "last: stop" in row.last_action_label.text().lower()

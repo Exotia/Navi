@@ -53,7 +53,6 @@ class MainWindow(QMainWindow):
         self.stale_after_seconds = stale_after_seconds
         self.video_port = video_port
         self.setWindowTitle("Asterope Ground Station")
-        self.setStyleSheet(f"QMainWindow {{ background-color: {theme.BG}; }}")
         self.ros_client_factory = ros_client_factory
         self.ros_client: RosBridgeClient | None = None
         self.drive_state = DriveCommandTracker()
@@ -81,31 +80,30 @@ class MainWindow(QMainWindow):
         # Same, for /drive_status.
         self._drive_status_at: float | None = None
 
+        # Global button style, applied at the MainWindow level so every
+        # QPushButton in the app (including ones on child widgets) gets the
+        # same filled/hover/pressed/disabled look unless overridden locally.
+        self.setStyleSheet(
+            f"QMainWindow {{ background-color: {theme.BG}; }} " + theme.button_style()
+        )
+
         input_style = (
             f"background-color: {theme.PANEL}; color: {theme.TEXT}; "
             f"border: 1px solid {theme.BORDER}; border-radius: 4px; padding: 4px 8px; "
             f"font-family: {theme.MONO_FONT_FAMILY};"
         )
-        button_style = (
-            f"QPushButton {{ background-color: {theme.PANEL}; color: {theme.TEXT}; "
-            f"border: 1px solid {theme.BORDER}; border-radius: 4px; padding: 4px 14px; }} "
-            f"QPushButton:hover {{ border-color: {theme.ACCENT}; }} "
-            f"QPushButton:pressed {{ background-color: {theme.BORDER}; }}"
+        connect_button_style = (
+            f"QPushButton {{ background-color: {theme.ACCENT}; color: #1c1200; "
+            f"border: 1px solid {theme.ACCENT}; border-radius: 6px; padding: 6px 14px; "
+            f"font-weight: 600; }} "
+            f"QPushButton:hover {{ background-color: #f0985c; }} "
+            f"QPushButton:pressed {{ background-color: #cf7333; }}"
         )
-
         self.connection_label = QLabel("ROSBRIDGE: DISCONNECTED")
-        self.connection_label.setStyleSheet(
-            f"color: {theme.TEXT_DIM}; background-color: {theme.PANEL}; "
-            f"border: 1px solid {theme.BORDER}; border-radius: 4px; padding: 6px 12px; "
-            f"font-family: {theme.MONO_FONT_FAMILY};"
-        )
+        self.connection_label.setStyleSheet(self._header_pill_style(False))
 
         self.localization_label = QLabel("LOC: NO POSE")
-        self.localization_label.setStyleSheet(
-            f"color: {theme.TEXT_DIM}; background-color: {theme.PANEL}; "
-            f"border: 1px solid {theme.BORDER}; border-radius: 4px; padding: 6px 12px; "
-            f"font-family: {theme.MONO_FONT_FAMILY};"
-        )
+        self.localization_label.setStyleSheet(self._header_pill_style(False))
 
         self.host_input = QLineEdit(initial_host or "")
         self.host_input.setPlaceholderText("rosbridge host, e.g. 192.168.1.50")
@@ -114,11 +112,13 @@ class MainWindow(QMainWindow):
         self.port_input.setFixedWidth(60)
         self.port_input.setStyleSheet(input_style)
         self.connect_button = QPushButton("Connect")
-        self.connect_button.setStyleSheet(button_style)
+        self.connect_button.setStyleSheet(connect_button_style)
         self.connect_button.clicked.connect(self._on_connect_clicked)
 
         title_label = QLabel("ASTEROPE GROUND STATION")
-        title_label.setStyleSheet(f"color: {theme.TEXT}; font-weight: 600; font-size: 16px;")
+        title_label.setStyleSheet(
+            f"color: {theme.TEXT}; font-weight: 600; font-size: {theme.FONT_SIZE_TITLE}px;"
+        )
 
         header = QWidget()
         header.setStyleSheet(f"background-color: {theme.BG};")
@@ -185,6 +185,24 @@ class MainWindow(QMainWindow):
         self._gamepad_timer = QTimer(self)
         self._gamepad_timer.timeout.connect(self._poll_gamepad)
         self._gamepad_timer.start(gamepad_poll_interval_ms)
+
+    @staticmethod
+    def _header_pill_style(ok: bool) -> str:
+        """The ROSBRIDGE/LOC header chips as pills: green fill when the
+        thing they report is up/ok, the same neutral panel chip as before
+        otherwise. Only the colour changes here - the text callers set is
+        untouched, since tests assert on it."""
+        if ok:
+            return (
+                f"color: #0c1a0e; background-color: {theme.OK}; "
+                f"border: 1px solid {theme.OK}; border-radius: 10px; padding: 6px 12px; "
+                f"font-family: {theme.MONO_FONT_FAMILY}; font-weight: 600;"
+            )
+        return (
+            f"color: {theme.TEXT_DIM}; background-color: {theme.PANEL}; "
+            f"border: 1px solid {theme.BORDER}; border-radius: 10px; padding: 6px 12px; "
+            f"font-family: {theme.MONO_FONT_FAMILY};"
+        )
 
     def _poll_nodes(self) -> None:
         if self.ros_client is not None:
@@ -287,13 +305,8 @@ class MainWindow(QMainWindow):
 
     def _on_connection_changed(self, connected: bool) -> None:
         text = "ROSBRIDGE: CONNECTED" if connected else "ROSBRIDGE: DISCONNECTED"
-        color = theme.OK if connected else theme.TEXT_DIM
         self.connection_label.setText(text)
-        self.connection_label.setStyleSheet(
-            f"color: {color}; background-color: {theme.PANEL}; "
-            f"border: 1px solid {theme.BORDER}; border-radius: 4px; padding: 6px 12px; "
-            f"font-family: {theme.MONO_FONT_FAMILY};"
-        )
+        self.connection_label.setStyleSheet(self._header_pill_style(connected))
         if not connected:
             # A dropped rosbridge connection must not leave gst-launch-1.0
             # running: Python doesn't kill Popen children at exit, and
@@ -468,6 +481,7 @@ class MainWindow(QMainWindow):
         self.localization_label.setText(
             f"LOC: x {pose['x']:.2f}  y {pose['y']:.2f}  "
             f"yaw {math.degrees(pose['yaw']):.1f}°")
+        self.localization_label.setStyleSheet(self._header_pill_style(True))
 
     def _send_map_command(self, action: str, name: str | None = None) -> None:
         if self.ros_client is None:

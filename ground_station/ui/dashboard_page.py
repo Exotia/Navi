@@ -54,6 +54,7 @@ class DashboardPage(QWidget):
 
         self._mode_group = QButtonGroup(self)
         mode_row = QHBoxLayout()
+        mode_row.setSpacing(12)
         mode_row.addWidget(mode_label)
         for radio, _ in self._modes:
             radio.setStyleSheet(f"color: {theme.TEXT};")
@@ -64,8 +65,11 @@ class DashboardPage(QWidget):
         self.manual_radio.setChecked(True)
 
         # Video goes above the drive card in its own column, so the drive
-        # readouts stay visible alongside the camera while driving.
+        # readouts stay visible alongside the camera while driving. An 8px
+        # gap between cards, consistent with the card design across the
+        # dashboard.
         left = QVBoxLayout()
+        left.setSpacing(8)
         left.addLayout(mode_row)
         left.addWidget(self.video_panel, stretch=3)
         left.addWidget(self.map_row)
@@ -73,8 +77,9 @@ class DashboardPage(QWidget):
         left.addWidget(self.drive_card, stretch=1)
 
         layout = QHBoxLayout(self)
+        layout.setSpacing(8)
         layout.addLayout(left, stretch=3)
-        layout.addWidget(self.node_list, stretch=1)
+        layout.addWidget(self.node_list)
 
     def _on_mode_toggled(self, checked: bool) -> None:
         if not checked:
