@@ -55,17 +55,31 @@ def test_spatial_mapping_is_on_with_the_numbers_the_map_was_designed_for():
     mapping = _parameters()['mapping']
 
     assert mapping['mapping_enabled'] is True
-    assert mapping['resolution'] == 0.05
-    assert mapping['max_mapping_range'] == 8.0
+    assert mapping['resolution'] == 0.02
+    assert mapping['max_mapping_range'] == 6.0
     assert mapping['fused_pointcloud_freq'] == 1.0
 
 
-def test_the_mapping_resolution_matches_the_grid_the_mapper_bins_into():
-    # A grid finer than the cloud is a comb of empty cells; a grid coarser
-    # than the cloud throws measurements away. They have to be one number.
+def test_the_mapping_resolution_is_at_least_as_fine_as_the_grid():
+    # A grid finer than the cloud is a comb of empty cells. A cloud finer
+    # than the grid is fine: the grid takes the 20th percentile of several
+    # points per cell, and the 5 cm obstacle voxels draw solid.
     from navi_localization.elevation_grid import RESOLUTION
 
-    assert _parameters()['mapping']['resolution'] == RESOLUTION
+    assert _parameters()['mapping']['resolution'] <= RESOLUTION
+
+
+def test_depth_confidence_filters_noise_but_keeps_textureless_surfaces():
+    depth = _parameters()['depth']
+    assert depth['depth_confidence'] == 70
+    assert depth['depth_texture_conf'] == 100
+
+
+def test_the_floor_is_the_map_origin_and_video_stays_640x360():
+    parameters = _parameters()
+    assert parameters['pos_tracking']['floor_alignment'] is True
+    assert parameters['general']['grab_resolution'] == 'HD1080'
+    assert parameters['general']['pub_downscale_factor'] == 3.0     # 1920/3 = 640
 
 
 def test_mapping_never_reaches_further_than_the_depth_that_is_published():
