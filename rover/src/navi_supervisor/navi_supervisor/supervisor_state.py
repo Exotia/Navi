@@ -86,6 +86,19 @@ class SupervisorState:
         return (abs(vx) > TAKEOVER_LINEAR_MPS or abs(vy) > TAKEOVER_LINEAR_MPS
                 or abs(wz) > TAKEOVER_ANGULAR_RPS)
 
+    def _leave_autonomous(self):
+        """Zero the autonomy buffer on every path out of autonomous mode.
+
+        Takeover, a localisation halt, and an explicit mode request all
+        drop out of autonomous, and Nav2 can still be winding down and
+        publishing on any of them. Whichever one fires, the stale
+        /autonomy_twist it leaves behind must not survive to replay itself
+        the instant autonomous is re-requested inside its own deadman
+        window.
+        """
+        self._autonomy = ZERO
+        self._autonomy_at = None
+
     def _take_over(self):
         """Rule 1: takeover wins instantly.
 
@@ -101,6 +114,7 @@ class SupervisorState:
         """
         self._mode = MANUAL
         self._reason = "operator takeover"
+        self._leave_autonomous()
         self._queue(CANCEL_GOAL, DEACTIVATE_NAV2, COORDINATOR_ABORT,
                     COORDINATOR_MANUAL)
 
@@ -131,6 +145,7 @@ class SupervisorState:
             self._reason = f"localisation {state}"
             self._manual = ZERO
             self._manual_at = None
+            self._leave_autonomous()
             self._stopped = True
             self._queue(CANCEL_GOAL, DEACTIVATE_NAV2, CHASSIS_STOP)
 
@@ -199,8 +214,7 @@ class SupervisorState:
             # winding down when the e-stop latch clears and keep publishing
             # in the meantime. That stale twist must not survive to drive
             # the rover the instant autonomous is re-requested.
-            self._autonomy = ZERO
-            self._autonomy_at = None
+            self._leave_autonomous()
         return None
 
     # --- output ----------------------------------------------------------

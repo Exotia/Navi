@@ -62,6 +62,7 @@ def test_the_manual_stream_does_not_feed_the_autonomy_deadman():
     s.on_autonomy_twist(1.0, 0.3, 0.0, 0.0)
     s.on_manual_twist(1.4, 0.001, 0.0, 0.0)    # non-zero, but below takeover
     assert s.output(1.4) == (0.3, 0.0, 0.0)    # the autonomy twist, not manual
+    assert s.output(1.6) == (0.0, 0.0, 0.0)    # deadman still expires on time
 
 
 def test_the_deadman_edge_queues_one_chassis_stop_not_one_per_tick():
@@ -315,6 +316,33 @@ def test_link_loss_stops_manual_via_the_deadman_and_never_clears_the_estop():
     assert s.output(61.0) == (0.0, 0.0, 0.0)
     assert s.mode == ESTOP
     assert s.estop_latched is True
+
+
+def test_takeover_zeroes_the_autonomy_buffer_before_resume():
+    # Fix round 1, finding 2: _take_over() is a second path out of
+    # autonomous, and it must zero the autonomy buffer exactly like
+    # on_mode_request's does - otherwise a resume inside the old twist's
+    # own deadman window replays it.
+    s = SupervisorState(mode=AUTONOMOUS)
+    s.on_autonomy_twist(1.0, 0.3, 0.0, 0.0)
+    s.on_manual_twist(1.05, 0.05, 0.0, 0.0)    # takeover
+    s.take_actions()
+    assert s.on_mode_request(1.15, AUTONOMOUS) is None
+    assert s.output(1.2) == (0.0, 0.0, 0.0)
+
+
+def test_localisation_halt_zeroes_the_autonomy_buffer_before_resume():
+    # Fix round 1, finding 2: on_localization_status()'s halt is the third
+    # path out of autonomous, mirroring the reviewer's probe timings - a
+    # halt followed by recovery and a prompt re-request must not replay
+    # the pre-halt Nav2 twist just because it is still inside its deadman.
+    s = SupervisorState(mode=AUTONOMOUS)
+    s.on_autonomy_twist(1.0, 0.3, 0.0, 0.0)
+    s.on_localization_status(1.05, "OFF")
+    s.take_actions()
+    s.on_localization_status(1.1, "OK")
+    assert s.on_mode_request(1.15, AUTONOMOUS) is None
+    assert s.output(1.2) == (0.0, 0.0, 0.0)
 
 
 def test_clearing_the_estop_latch_zeroes_a_stale_autonomy_buffer():
