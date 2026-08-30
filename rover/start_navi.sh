@@ -359,6 +359,7 @@ fi
 if [ "$START_BRIDGE" -eq 1 ]; then
     echo "starting bema_bridge (idle until the ground station drives)"
     ros2 run navi_teleop bema_bridge &
+    BACKGROUND_PIDS+=("$!")
 fi
 
 echo "starting manual_twist_listener (Ctrl+C to stop everything)"
