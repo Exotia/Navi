@@ -74,6 +74,17 @@ class BemaSession:
                 client.close()
         self._bema = self._coord = None
 
+    def _mark_refused(self, exc, context):
+        # An RpcError is an application-level refusal (rpclib's checkAccess
+        # answering error 1) on an otherwise healthy link - typically
+        # because the coordinator force-took the BEMA lease to disable
+        # movement. Unlike a dead link, this must not close either socket,
+        # drop the F10 heartbeat, or back off: the next tick's own
+        # re-request is what recovers it, usually within a second.
+        self._last_error = f"refused: {exc.error!r} ({context})"
+        self._lease = False
+        self._movement_sent = False
+
     # --- per-tick work ---------------------------------------------------
     def tick(self, now):
         if self._bema is None:
@@ -120,7 +131,9 @@ class BemaSession:
                 self._movement_sent = True
             vx, vy, w = self._command
             self._bema.call("F1", vx, vy, w)
-        except (RpcError, RpcTimeout, RpcDisconnected, OSError) as exc:
+        except RpcError as exc:
+            self._mark_refused(exc, "tick")
+        except (RpcTimeout, RpcDisconnected, OSError) as exc:
             self._mark_down(exc)
 
     # --- commands --------------------------------------------------------
@@ -166,7 +179,9 @@ class BemaSession:
                 self._last_error = "coordinator refused the lease for startManual"
                 return
             self._coord.call("F6")
-        except (RpcError, RpcTimeout, RpcDisconnected, OSError) as exc:
+        except RpcError as exc:
+            self._mark_refused(exc, "start_manual")
+        except (RpcTimeout, RpcDisconnected, OSError) as exc:
             self._mark_down(exc)
 
     def _safe(self, method, *args):
@@ -174,7 +189,9 @@ class BemaSession:
             return
         try:
             self._bema.call(method, *args)
-        except (RpcError, RpcTimeout, RpcDisconnected, OSError) as exc:
+        except RpcError as exc:
+            self._mark_refused(exc, method)
+        except (RpcTimeout, RpcDisconnected, OSError) as exc:
             self._mark_down(exc)
 
     def _safe_coord(self, method, *args):
@@ -182,7 +199,9 @@ class BemaSession:
             return
         try:
             self._coord.call(method, *args)
-        except (RpcError, RpcTimeout, RpcDisconnected, OSError) as exc:
+        except RpcError as exc:
+            self._mark_refused(exc, method)
+        except (RpcTimeout, RpcDisconnected, OSError) as exc:
             self._mark_down(exc)
 
     def close(self):

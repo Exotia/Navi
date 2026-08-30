@@ -72,6 +72,11 @@ class FakeBemaServer:
         self.movement_enabled = False
         self.lease_held = False
         self.coord_lease_held = False
+        # When True, __sam__request is refused (returns a normal, non-error
+        # False result rather than granting) - simulates the coordinator
+        # holding onto the BEMA lease so a session's own re-request can't
+        # win it back, the way a checkAccess refusal would.
+        self.refuse_requests = False
         self._on_drive = on_drive or (lambda vx, vy, w: None)
         self._bema = _Server(bema_port, self._bema_dispatch)
         self._coord = _Server(coordinator_port, self._coord_dispatch)
@@ -92,6 +97,8 @@ class FakeBemaServer:
     def _bema_dispatch(self, method, args):
         self.calls.append(("bema", method, args))
         if method == "__sam__request":
+            if self.refuse_requests:
+                return None, False
             self.lease_held = True
             return None, True
         if method == "__sam__ping":

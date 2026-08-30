@@ -212,6 +212,41 @@ def test_movement_enable_resent_after_lease_reacquired(server):
     assert f7 == [("F7", [True])]
 
 
+def test_an_rpc_refusal_drops_the_lease_not_the_link(server):
+    # An application-level refusal (RpcError, e.g. error 1 from checkAccess)
+    # on an otherwise healthy socket must NOT be treated like a dead link:
+    # the coordinator can force-take the BEMA lease at any moment to
+    # disable movement, and the session's own re-request can be refused
+    # too. That must drop the lease and let the next tick's re-request
+    # recover it - not tear down both sockets, drop the F10 heartbeat, and
+    # back off for 1-5s (which drops the coordinator to Disconnected).
+    clock = Clock()
+    sess = _session(server, clock)
+    sess.set_command(0.1, 0.0, 0.0)
+    sess.tick(clock.t)                       # baseline: lease held, F1 flows
+    assert sess.status()["lease"] is True
+
+    server.lease_held = False                # coordinator force-took the BEMA lease
+    server.refuse_requests = True            # our own re-request is refused too
+    clock.t = 0.6                            # >= PING_INTERVAL_S: ping notices
+    sess.tick(clock.t)
+
+    status = sess.status()
+    assert status["connected"] is True       # no teardown of the sockets
+    assert status["lease"] is False
+    assert status["last_error"] is not None
+    assert "refused" in status["last_error"].lower() or "false" in status["last_error"].lower()
+    assert status["reconnect_in_s"] is None  # no backoff scheduled
+
+    server.refuse_requests = False           # the coordinator lets go again
+    clock.t = 1.6                            # past the next ping interval
+    sess.tick(clock.t)
+
+    assert sess.status()["lease"] is True
+    f1_calls = [a for tag, m, a in server.calls if tag == "bema" and m == "F1"]
+    assert f1_calls[-1] == [pytest.approx(0.1), pytest.approx(0.0), pytest.approx(0.0)]
+
+
 def test_start_manual_takes_the_coordinator_lease_first(server):
     # CoordinatorProxy guards F6 behind checkAccess() on the coordinator's
     # OWN lease (separate from BEMA's). Without requesting it, F6 answers
