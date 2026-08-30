@@ -1150,3 +1150,48 @@ def test_the_shared_factory_budget_counts_both_kinds(writer):
 
     assert writer._factory_in_flight == 4
     assert len(writer._spawn.calls) == 4
+
+
+def test_the_height_mtl_is_written_beside_the_meshes_at_startup(writer):
+    from navi_sim_bringup.height_palette import MTL_NAME
+    mtl_path = os.path.join(writer._mesh_dir, MTL_NAME)
+    assert os.path.exists(mtl_path)
+    with open(mtl_path, 'rb') as handle:
+        assert handle.read().count(b'newmtl ') == 30
+
+
+def test_terrain_coloured_defaults_true(writer):
+    assert writer._terrain_coloured is True
+
+
+def test_a_terrain_tile_spawns_height_coloured_by_default(writer):
+    writer._on_tile(tile_message((0, 0), 1.0))
+    writer._pump(now=0.0)
+
+    request, future = writer._spawn.calls[0]
+    assert '<material>' not in request.xml       # the mesh's own bands supply it
+    future.resolve(Response())
+
+    mesh_name = writer._mesh_file[('terrain', 0, 0)]
+    with open(os.path.join(writer._mesh_dir, mesh_name), 'rb') as handle:
+        payload = handle.read()
+    assert b'mtllib navi_height.mtl' in payload
+    assert b'usemtl h' in payload
+
+
+def test_terrain_coloured_false_disables_colouring(writer):
+    # Not exposed through the constructor - flipped directly like the fixture
+    # already flips _spawn/_delete/_model_list for testing.
+    writer._terrain_coloured = False
+
+    writer._on_tile(tile_message((0, 0), 1.0))
+    writer._pump(now=0.0)
+
+    request, future = writer._spawn.calls[0]
+    assert '<material>' in request.xml           # the old flat orange-brown material
+    future.resolve(Response())
+
+    mesh_name = writer._mesh_file[('terrain', 0, 0)]
+    with open(os.path.join(writer._mesh_dir, mesh_name), 'rb') as handle:
+        payload = handle.read()
+    assert b'mtllib' not in payload

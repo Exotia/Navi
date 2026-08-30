@@ -72,6 +72,8 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 
+from navi_sim_bringup import height_palette
+
 # Vertices per side, at most. 257 x 257 is 66k vertices and 131k triangles,
 # which Gazebo loads in well under a second; the elevation grid clips at
 # 600 cells a side, which would be five times that. Subsampled by stride,
@@ -92,6 +94,11 @@ class TerrainMesh:
     cols: int               # samples along x after subsampling
     size_x: float           # extent of the sample lattice, metres
     size_y: float
+    # (m,) int64, one per face: height_palette.band_index of the face's mean
+    # z (the mean of its three vertices). None only for a TerrainMesh built
+    # some other way than terrain_mesh_from_grid; that function always fills
+    # it in.
+    face_bands: np.ndarray = None
 
 
 def _stride(cells: int) -> int:
@@ -200,6 +207,15 @@ def terrain_mesh_from_grid(elevation, resolution: float, center_x: float,
         cos_from_vertical = face_normal[:, 2] / face_normal_len
     min_cos = np.cos(np.deg2rad(max_slope_deg))
     faces = faces[cos_from_vertical >= min_cos]
+    faces = faces.astype(np.int64)
+
+    # Height-band colouring: each face's own colour is the band of its mean
+    # z (the mean of its three vertices, all at the same drawn resolution -
+    # see height_palette for why banding is absolute-z and cyclic rather
+    # than keyed to this tile's own min/max).
+    face_z_mean = vertices[faces[:, 0], 2] + vertices[faces[:, 1], 2] + vertices[faces[:, 2], 2]
+    face_z_mean /= 3.0
+    face_bands = height_palette.band_index(face_z_mean)
 
     # Normals from the height gradient: n = (-dz/dx, -dz/dy, 1), unit
     # length. Unseen samples take height 0, which only affects normals of
@@ -210,36 +226,69 @@ def terrain_mesh_from_grid(elevation, resolution: float, center_x: float,
     normals /= np.linalg.norm(normals, axis=-1, keepdims=True)
 
     return TerrainMesh(vertices=vertices, normals=normals.reshape(-1, 3),
-                       faces=faces.astype(np.int64), rows=rows, cols=cols,
-                       size_x=(cols - 1) * spacing, size_y=(rows - 1) * spacing)
+                       faces=faces, rows=rows, cols=cols,
+                       size_x=(cols - 1) * spacing, size_y=(rows - 1) * spacing,
+                       face_bands=face_bands)
 
 
-def obj_bytes(mesh: TerrainMesh) -> bytes:
-    """A Wavefront OBJ of `mesh`: vertices, normals, faces, and no material.
+def obj_bytes(mesh: TerrainMesh, coloured: bool = True) -> bytes:
+    """A Wavefront OBJ of `mesh`: vertices, normals, faces.
 
-    The SDF supplies the material, so no mtllib - Gazebo would only warn
-    that it cannot find one. Fixed-format numbers, so an unchanged grid
-    encodes to the same bytes and terrain_writer can tell a changed map
-    from a repeated one by comparing payloads.
+    `coloured=False` (or a mesh with no face_bands) reproduces the old,
+    material-free OBJ byte-for-byte - the SDF then supplies one flat
+    material, and no mtllib - Gazebo would only warn that it cannot find
+    one. `coloured=True` instead emits `mtllib navi_height.mtl` and groups
+    faces under `usemtl` per height band, so Gazebo draws each face in its
+    own band's material and the SDF must leave its own material out (see
+    terrain_sdf) or it would override every one of them.
+
+    Either way, fixed-format numbers mean an unchanged grid encodes to the
+    same bytes and terrain_writer can tell a changed map from a repeated
+    one by comparing payloads.
     """
     lines = ['# navi terrain: the ground the rover has mapped']
+    grouped = coloured and mesh.face_bands is not None
+    if grouped:
+        lines.append(f'mtllib {height_palette.MTL_NAME}')
     lines += [f'v {x:.4f} {y:.4f} {z:.4f}' for x, y, z in mesh.vertices]
     lines += [f'vn {x:.4f} {y:.4f} {z:.4f}' for x, y, z in mesh.normals]
     # OBJ indices count from one; each vertex uses its own normal.
-    lines += [f'f {a + 1}//{a + 1} {b + 1}//{b + 1} {c + 1}//{c + 1}'
-              for a, b, c in mesh.faces]
+    if grouped:
+        for material, index in height_palette.faces_by_material(mesh.face_bands):
+            lines.append(f'usemtl {material}')
+            lines += [f'f {a + 1}//{a + 1} {b + 1}//{b + 1} {c + 1}//{c + 1}'
+                      for a, b, c in mesh.faces[index]]
+    else:
+        lines += [f'f {a + 1}//{a + 1} {b + 1}//{b + 1} {c + 1}//{c + 1}'
+                  for a, b, c in mesh.faces]
     return ('\n'.join(lines) + '\n').encode()
 
 
-def terrain_sdf(mesh_uri: str, model_name: str = MODEL_NAME) -> str:
+TERRAIN_FLAT_MATERIAL = """
+        <material>
+          <!-- Orange-brown, not grey: the operator must tell the mapped
+               ground from Gazebo's grey default background at a glance. -->
+          <ambient>0.72 0.42 0.16 1</ambient>
+          <diffuse>0.80 0.47 0.18 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+        </material>"""
+
+
+def terrain_sdf(mesh_uri: str, model_name: str = MODEL_NAME, coloured: bool = True) -> str:
     """The SDF for one terrain model.
 
     Visual only and static: the rover drives on the world's ground plane and
     in semi-autonomous mode its pose comes from the real rover, so terrain
-    collision would cost physics time and buy nothing. The colour is one
-    flat orange-brown on purpose - relief is the information, and a texture
-    would suggest the rover has seen colour it has not.
+    collision would cost physics time and buy nothing.
+
+    `coloured=True` (the default) omits the `<material>` block: the mesh's
+    own OBJ/MTL height-band materials (see obj_bytes) supply the colour,
+    and an SDF `<material>` here would override every one of them with one
+    flat colour. `coloured=False` keeps the old flat orange-brown material -
+    relief was the only information available then, and a texture would
+    have suggested the rover had seen colour it had not.
     """
+    material = '' if coloured else TERRAIN_FLAT_MATERIAL
     return f"""<?xml version="1.0"?>
 <sdf version="1.6">
   <model name="{model_name}">
@@ -250,14 +299,7 @@ def terrain_sdf(mesh_uri: str, model_name: str = MODEL_NAME) -> str:
           <mesh>
             <uri>{mesh_uri}</uri>
           </mesh>
-        </geometry>
-        <material>
-          <!-- Orange-brown, not grey: the operator must tell the mapped
-               ground from Gazebo's grey default background at a glance. -->
-          <ambient>0.72 0.42 0.16 1</ambient>
-          <diffuse>0.80 0.47 0.18 1</diffuse>
-          <specular>0.05 0.05 0.05 1</specular>
-        </material>
+        </geometry>{material}
       </visual>
     </link>
   </model>

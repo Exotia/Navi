@@ -101,13 +101,13 @@ def test_a_large_map_is_subsampled_to_the_side_gazebo_can_afford():
 def test_the_obj_has_one_normal_per_vertex_and_indexes_them_from_one():
     mesh = terrain_mesh_from_grid(np.array([[0.0, 1.0], [0.0, 1.0]]), 0.10, 0.0, 0.0)
 
-    obj = obj_bytes(mesh).decode()
+    obj = obj_bytes(mesh, coloured=False).decode()
 
     lines = obj.splitlines()
     assert sum(line.startswith('v ') for line in lines) == 4
     assert sum(line.startswith('vn ') for line in lines) == 4
     assert 'mtllib' not in obj                    # the SDF supplies the material
-    for face in faces_of(obj_bytes(mesh)):
+    for face in faces_of(obj_bytes(mesh, coloured=False)):
         for corner in face:
             index, normal = corner.split('//')
             assert 1 <= int(index) <= 4 and index == normal
@@ -286,3 +286,103 @@ def test_max_slope_deg_controls_the_cutoff():
     strict = terrain_mesh_from_grid(grid, resolution, 0.0, 0.0, max_slope_deg=10.0)
 
     assert len(strict.faces) < len(lenient.faces)
+
+
+# --- Height-band colouring -------------------------------------------------
+
+
+def test_face_bands_has_one_entry_per_face():
+    grid = np.array([[0.0, 0.02], [0.01, 0.03]])
+
+    mesh = terrain_mesh_from_grid(grid, 0.10, 0.0, 0.0)
+
+    assert mesh.face_bands.shape == (len(mesh.faces),)
+
+
+def test_a_flat_grid_produces_exactly_one_band():
+    grid = np.full((4, 4), 0.05)
+
+    mesh = terrain_mesh_from_grid(grid, 0.10, 0.0, 0.0)
+
+    assert len(set(mesh.face_bands.tolist())) == 1
+
+
+def test_a_dip_produces_at_least_three_distinct_bands():
+    # A gentle 30 cm dip in the middle of an otherwise flat, gently-sloped
+    # patch: shallow enough everywhere to survive the default slope cutoff,
+    # but the dip's floor is 3 bands (30 cm / 10 cm) below the rim.
+    rows, cols = 9, 9
+    grid = np.zeros((rows, cols))
+    rr, cc = np.meshgrid(np.arange(rows), np.arange(cols), indexing='ij')
+    centre = 4
+    dist = np.maximum(np.abs(rr - centre), np.abs(cc - centre))
+    grid = np.where(dist <= 3, -0.10 * (4 - dist), 0.0)   # smooth cone-shaped dip
+
+    mesh = terrain_mesh_from_grid(grid, 0.10, 0.0, 0.0)
+
+    assert len(set(mesh.face_bands.tolist())) >= 3
+
+
+def test_obj_bytes_coloured_has_mtllib_and_usemtl():
+    grid = np.array([[0.0, 0.02], [0.01, 0.03]])
+    mesh = terrain_mesh_from_grid(grid, 0.10, 0.0, 0.0)
+
+    obj = obj_bytes(mesh, coloured=True).decode()
+
+    assert 'mtllib navi_height.mtl' in obj
+    assert '\nusemtl h' in obj
+
+
+def test_coloured_and_uncoloured_obj_have_the_same_face_count():
+    grid = np.array([[0.0, 0.02], [0.01, 0.03]])
+    mesh = terrain_mesh_from_grid(grid, 0.10, 0.0, 0.0)
+
+    coloured_faces = faces_of(obj_bytes(mesh, coloured=True))
+    uncoloured_faces = faces_of(obj_bytes(mesh, coloured=False))
+
+    assert len(coloured_faces) == len(uncoloured_faces) == len(mesh.faces)
+
+
+def test_obj_bytes_uncoloured_matches_the_pre_change_byte_format():
+    # Regression guard: coloured=False must reproduce, byte for byte, the
+    # material-free OBJ this module produced before height-band colouring
+    # existed.
+    grid = np.array([[0.0, 0.02], [0.01, 0.03]])
+    mesh = terrain_mesh_from_grid(grid, 0.10, 0.0, 0.0)
+
+    obj = obj_bytes(mesh, coloured=False)
+
+    assert obj == (
+        b'# navi terrain: the ground the rover has mapped\n'
+        b'v -0.0500 -0.0500 0.0000\n'
+        b'v 0.0500 -0.0500 0.0200\n'
+        b'v -0.0500 0.0500 0.0100\n'
+        b'v 0.0500 0.0500 0.0300\n'
+        b'vn -0.1952 -0.0976 0.9759\n'
+        b'vn -0.1952 -0.0976 0.9759\n'
+        b'vn -0.1952 -0.0976 0.9759\n'
+        b'vn -0.1952 -0.0976 0.9759\n'
+        b'f 1//1 2//2 4//4\n'
+        b'f 1//1 4//4 3//3\n'
+    )
+
+
+def test_obj_bytes_is_deterministic_coloured_and_uncoloured():
+    grid = np.array([[0.0, 0.25], [0.3, 0.05]])
+    mesh = terrain_mesh_from_grid(grid, 0.10, 1.0, 2.0)
+
+    assert obj_bytes(mesh, coloured=True) == obj_bytes(mesh, coloured=True)
+    assert obj_bytes(mesh, coloured=False) == obj_bytes(mesh, coloured=False)
+
+
+def test_terrain_sdf_coloured_has_no_material_block():
+    sdf = terrain_sdf('model://navi_terrain/meshes/terrain_0007.obj', coloured=True)
+
+    assert '<material>' not in sdf
+
+
+def test_terrain_sdf_uncoloured_keeps_the_flat_material_block():
+    sdf = terrain_sdf('model://navi_terrain/meshes/terrain_0007.obj', coloured=False)
+
+    assert '<material>' in sdf
+    assert '<ambient>0.72 0.42 0.16 1</ambient>' in sdf

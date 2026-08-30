@@ -33,6 +33,7 @@ if(BUILD_TESTING)
   ament_add_pytest_test(test_terrain_mesh test/test_terrain_mesh.py)
   ament_add_pytest_test(test_terrain_writer test/test_terrain_writer.py)
   ament_add_pytest_test(test_grid_map_round_trip test/test_grid_map_round_trip.py)
+  ament_add_pytest_test(test_height_palette test/test_height_palette.py)
 endif()
 
 ament_package()

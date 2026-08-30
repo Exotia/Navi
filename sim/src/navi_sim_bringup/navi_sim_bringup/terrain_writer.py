@@ -88,6 +88,7 @@ from grid_map_msgs.msg import GridMap
 from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2, PointField
 
+from navi_sim_bringup import height_palette
 from navi_sim_bringup.obstacle_mesh import (
     obj_bytes as obstacle_obj_bytes, obstacle_mesh_from_voxels, obstacle_sdf)
 from navi_sim_bringup.terrain_mesh import (
@@ -344,6 +345,7 @@ class TerrainWriter(Node):
         self.declare_parameter('tile_topic', '/localization/map_tile')
         self.declare_parameter('obstacle_tile_topic', '/localization/obstacle_tile')
         self.declare_parameter('draw_resolution', 0.05)
+        self.declare_parameter('terrain_coloured', True)
         self.declare_parameter(
             'model_dir', model_dir or os.path.join(
                 os.path.expanduser('~'), '.gazebo', 'models', GAZEBO_MODEL_NAME))
@@ -351,6 +353,9 @@ class TerrainWriter(Node):
         self._model_dir = str(self.get_parameter('model_dir').value)
         self._mesh_dir = os.path.join(self._model_dir, 'meshes')
         self._draw_resolution = float(self.get_parameter('draw_resolution').value)
+        # Height-band colouring can be switched off without a code change -
+        # see height_palette.py; obstacle tiles are unaffected either way.
+        self._terrain_coloured = bool(self.get_parameter('terrain_coloured').value)
         # Injectable so tests can control completion time independently of
         # dispatch time (`_pump`'s `now` argument) - see `_on_spawned`/
         # `_remove`, which stamp the policy with `self._clock_fn()` at their own
@@ -408,6 +413,13 @@ class TerrainWriter(Node):
         self._warned_no_service = False
 
         os.makedirs(self._mesh_dir, exist_ok=True)
+        # The one palette every height-coloured terrain mesh references (see
+        # height_palette.py) - written once at startup, idempotently: it is
+        # a pure function of the module, not of any tile, so overwriting it
+        # every run is harmless and there is nothing to compare payloads
+        # against the way tile meshes do.
+        with open(os.path.join(self._mesh_dir, height_palette.MTL_NAME), 'wb') as handle:
+            handle.write(height_palette.mtl_bytes())
         with open(os.path.join(self._model_dir, 'model.config'), 'w') as handle:
             handle.write(model_config_xml())
 
@@ -507,7 +519,8 @@ class TerrainWriter(Node):
             stride = max(1, int(round(self._draw_resolution / resolution)))
             mesh = terrain_mesh_from_grid(elevation[::stride, ::stride], resolution * stride,
                                           center_x, center_y)
-            payload = obj_bytes(mesh) if mesh is not None else b''
+            payload = (obj_bytes(mesh, coloured=self._terrain_coloured)
+                       if mesh is not None else b'')
         self._policy.offer(key, payload, self._clock_fn())
 
     def _on_obstacle_tile(self, message: PointCloud2) -> None:
@@ -625,8 +638,8 @@ class TerrainWriter(Node):
             with open(os.path.join(self._mesh_dir, name), 'wb') as handle:
                 handle.write(payload)
             mesh_uri = f"model://{GAZEBO_MODEL_NAME}/meshes/{name}"
-            sdf = (terrain_sdf(mesh_uri, model) if kind == 'terrain'
-                   else obstacle_sdf(mesh_uri, model))
+            sdf = (terrain_sdf(mesh_uri, model, coloured=self._terrain_coloured)
+                   if kind == 'terrain' else obstacle_sdf(mesh_uri, model))
             request = SpawnEntity.Request()
             request.name = model
             request.xml = sdf
