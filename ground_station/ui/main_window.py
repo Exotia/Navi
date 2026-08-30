@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, Q
 
 from ground_station import theme
 from ground_station.gamepad_input import GamepadReader
-from ground_station.models import DriveState, NodeRegistry
+from ground_station.models import DriveCommandTracker, NodeRegistry
 from ground_station.ros_client import RosBridgeClient
 from ground_station.ui.dashboard_page import DashboardPage
 from ground_station.ui.drive_detail_page import DriveDetailPage
@@ -56,7 +56,7 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(f"QMainWindow {{ background-color: {theme.BG}; }}")
         self.ros_client_factory = ros_client_factory
         self.ros_client: RosBridgeClient | None = None
-        self.drive_state = DriveState()
+        self.drive_state = DriveCommandTracker()
         self.node_registry = NodeRegistry()
         self.gamepad_reader = gamepad_reader if gamepad_reader is not None else GamepadReader()
         self._gamepad_was_connected = False

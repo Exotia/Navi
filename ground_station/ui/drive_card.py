@@ -2,7 +2,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel
 
 from ground_station import theme
-from ground_station.models import DriveState
+from ground_station.models import DriveCommandTracker
 
 
 class DriveCard(QWidget):
@@ -40,7 +40,7 @@ class DriveCard(QWidget):
     def _on_details_clicked(self, event):
         self.details_requested.emit()
 
-    def update_from(self, state: DriveState) -> None:
+    def update_from(self, state: DriveCommandTracker) -> None:
         if state.latest is None:
             return
         self.vx_label.setText(f"vx (cmd)  {state.latest.linear_x:.2f} m/s")
