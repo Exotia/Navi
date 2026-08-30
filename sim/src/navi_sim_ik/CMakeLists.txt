@@ -23,8 +23,34 @@ target_include_directories(navi_sim_ik_model PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 target_compile_options(navi_sim_ik_model PRIVATE -w)
 
+# The rover's model: 2.42, grt.tlc, R2023a, geometry supplied at runtime on
+# the hParams inport. Simulink-generated, compiled as found; its warnings are
+# not ours to fix and would drown anything we do need to see.
+#
+# Listed explicitly rather than GLOBed: a GLOB would silently absorb any file
+# dropped into a directory that is supposed to be frozen.
+#
+# CRITICAL: this library and navi_sim_ik_model above both define
+# `class kinematics`, with different layouts and different input structs. No
+# single binary may link both. navi_sim_ik_stepper (and through it
+# sim_ik_node) and test_ik_parity_242 link this, 2.42; only
+# test_vendored_model remains on 2.41.
+add_library(navi_sim_ik_model242 STATIC
+  vendor242/kinematics.cpp
+  vendor242/kinematics_data.cpp
+  vendor242/rt_nonfinite.cpp
+  vendor242/rtGetInf.cpp
+  vendor242/rtGetNaN.cpp)
+target_include_directories(navi_sim_ik_model242 PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/vendor242>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+target_compile_options(navi_sim_ik_model242 PRIVATE -w)
+
 add_library(navi_sim_ik_stepper STATIC src/sim_ik_stepper.cpp)
-target_link_libraries(navi_sim_ik_stepper navi_sim_ik_model)
+# 2.42, not 2.41: this is the library the node and every downstream consumer
+# get. navi_sim_ik_model (2.41) is now reachable only from
+# test_vendored_model - see the ODR note above.
+target_link_libraries(navi_sim_ik_stepper navi_sim_ik_model242)
 target_include_directories(navi_sim_ik_stepper PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 
@@ -45,6 +71,16 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_vendored_model test/test_vendored_model.cpp)
   target_link_libraries(test_vendored_model navi_sim_ik_model)
+
+  ament_add_gtest(test_vendored_model_242 test/test_vendored_model_242.cpp)
+  target_link_libraries(test_vendored_model_242 navi_sim_ik_model242)
+
+  ament_add_gtest(test_asterope_params test/test_asterope_params.cpp)
+  target_include_directories(test_asterope_params PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+  ament_add_gtest(test_ik_parity_242 test/test_ik_parity_242.cpp)
+  target_link_libraries(test_ik_parity_242 navi_sim_ik_model242)
 
   ament_add_gtest(test_sim_ik_stepper test/test_sim_ik_stepper.cpp)
   target_link_libraries(test_sim_ik_stepper navi_sim_ik_stepper)

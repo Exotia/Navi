@@ -56,7 +56,12 @@ next step).
 - Rover packages: `rover/src/navi_localization` (pose, status, elevation
   grid, tiles, voxels, mapper), `rover/src/navi_teleop` (video).
 - Simulation: `sim/src/navi_sim_bringup` (bridge, terrain/obstacle writer,
-  meshes), `sim/src/navi_sim_ik`, `sim/src/navi_sim_video`.
+  meshes), `sim/src/navi_sim_ik`, `sim/src/navi_sim_video`. `navi_sim_ik` runs
+  Simulink model 2.42 (grt, R2023a) with Asterope geometry supplied at
+  runtime from `sim/src/navi_sim_ik/include/navi_sim_ik/asterope_params.hpp`;
+  the older 2.41/Merope copy remains in `vendor/` only as a compiled-but-
+  unreferenced regression guard, and `test_ik_parity_242` pins the wheel
+  outputs against a table generated from the vendored sources.
 - Ground station: `ground_station/` with tests in `tests/`.
 - Launchers: `start_navi.sh` (rover), `start_sim.sh --mode semi`,
   `start_ground_station.sh`; Claude Code helpers in `.claude/`
