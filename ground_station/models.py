@@ -14,7 +14,7 @@ class TwistSample:
     received_at: float
 
 
-class DriveState:
+class DriveCommandTracker:
     """Tracks the latest /cmd_vel Twist message and its incoming rate."""
 
     def __init__(self, rate_window_seconds: float = 2.0):
@@ -167,3 +167,49 @@ def map_command_json(action: str, name: str | None = None) -> str:
     if name is not None:
         command["name"] = name
     return json.dumps(command)
+
+
+_COORDINATOR_STATES = {
+    0: "Disconnected", 1: "Idle", 2: "PrepareManual", 3: "Manual",
+    4: "PrepareAutonomous", 5: "Autonomous", 6: "Waiting",
+}
+
+
+def _coordinator_name(value):
+    return _COORDINATOR_STATES.get(value) if isinstance(value, int) else None
+
+
+@dataclass
+class DriveState:
+    """/drive_status as the Drive row shows it."""
+    connected: bool
+    lease: bool
+    coordinator_state: str | None
+    deadman_active: bool
+    twist_age_s: float | None
+    last_action: str | None
+    last_error: str | None
+
+
+def parse_drive_status(payload: str):
+    try:
+        status = json.loads(payload)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(status, dict):
+        return None
+    age = status.get("twist_age_s")
+    return DriveState(
+        connected=status.get("connected") is True,
+        lease=status.get("lease") is True,
+        coordinator_state=_coordinator_name(status.get("coordinator_state")),
+        deadman_active=status.get("deadman_active") is True,
+        twist_age_s=age if isinstance(age, (int, float)) else None,
+        last_action=status.get("last_action") if isinstance(
+            status.get("last_action"), str) else None,
+        last_error=status.get("last_error") if isinstance(
+            status.get("last_error"), str) else None)
+
+
+def drive_command_json(action: str) -> str:
+    return json.dumps({"action": action})

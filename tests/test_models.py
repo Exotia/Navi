@@ -1,9 +1,9 @@
 import pytest
-from ground_station.models import DriveState, NodeRegistry
+from ground_station.models import DriveCommandTracker, NodeRegistry
 
 
 def test_ingest_stores_latest_sample():
-    state = DriveState()
+    state = DriveCommandTracker()
     state.ingest(0.4, -0.05, 0.1, now=10.0)
 
     assert state.latest.linear_x == 0.4
@@ -13,14 +13,14 @@ def test_ingest_stores_latest_sample():
 
 
 def test_rate_hz_is_zero_with_fewer_than_two_samples():
-    state = DriveState()
+    state = DriveCommandTracker()
     assert state.rate_hz == 0.0
     state.ingest(0.0, 0.0, 0.0, now=10.0)
     assert state.rate_hz == 0.0
 
 
 def test_rate_hz_computes_from_recent_samples():
-    state = DriveState(rate_window_seconds=2.0)
+    state = DriveCommandTracker(rate_window_seconds=2.0)
     # 5 samples spaced 0.1s apart -> 10 Hz
     for i in range(5):
         state.ingest(0.0, 0.0, 0.0, now=10.0 + i * 0.1)
@@ -29,7 +29,7 @@ def test_rate_hz_computes_from_recent_samples():
 
 
 def test_rate_hz_drops_samples_outside_window():
-    state = DriveState(rate_window_seconds=1.0)
+    state = DriveCommandTracker(rate_window_seconds=1.0)
     state.ingest(0.0, 0.0, 0.0, now=0.0)
     state.ingest(0.0, 0.0, 0.0, now=5.0)
     state.ingest(0.0, 0.0, 0.0, now=5.5)
@@ -39,12 +39,12 @@ def test_rate_hz_drops_samples_outside_window():
 
 
 def test_seconds_since_last_none_before_any_sample():
-    state = DriveState()
+    state = DriveCommandTracker()
     assert state.seconds_since_last(now=10.0) is None
 
 
 def test_seconds_since_last_computes_elapsed_time():
-    state = DriveState()
+    state = DriveCommandTracker()
     state.ingest(0.0, 0.0, 0.0, now=10.0)
     assert state.seconds_since_last(now=10.5) == pytest.approx(0.5)
 
@@ -181,3 +181,32 @@ def test_map_status_falls_back_to_defaults_on_type_malformed_fields():
 def test_map_commands_are_the_json_the_rover_reads():
     assert json.loads(map_command_json("save", "yard")) == {"action": "save", "name": "yard"}
     assert json.loads(map_command_json("clear")) == {"action": "clear"}
+
+
+from ground_station.models import (DriveState, parse_drive_status,
+                                    drive_command_json)
+
+
+def test_parse_drive_status_reads_the_fields():
+    payload = json.dumps({"connected": True, "lease": True,
+                          "coordinator_state": 3, "deadman_active": False,
+                          "twist_age_s": 0.1, "last_action": "manual",
+                          "last_error": None})
+    state = parse_drive_status(payload)
+    assert state.connected is True and state.lease is True
+    assert state.coordinator_state == "Manual"
+    assert state.deadman_active is False and state.twist_age_s == 0.1
+
+
+def test_parse_drive_status_tolerates_garbage():
+    assert parse_drive_status("{not json") is None
+    assert parse_drive_status(json.dumps([1, 2])) is None
+    # wrong field types fall back, they do not raise
+    state = parse_drive_status(json.dumps({"connected": "yes",
+                                           "coordinator_state": "nonsense"}))
+    assert state.connected is False
+    assert state.coordinator_state is None
+
+
+def test_drive_command_json_round_trips():
+    assert json.loads(drive_command_json("stop")) == {"action": "stop"}
