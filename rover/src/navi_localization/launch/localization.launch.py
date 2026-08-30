@@ -136,9 +136,6 @@ def generate_launch_description():
         executable='elevation_mapper',
         name='elevation_mapper',
         output='screen',
-        # 5 cm cubes: the fused cloud is at 2 cm, so a 5 cm voxel gets
-        # several points and draws solid (10 cm was needed at 5 cm cloud).
-        parameters=[{'obstacle_voxel_m': 0.05}],
     )
 
     return LaunchDescription([zed, status, mapper])

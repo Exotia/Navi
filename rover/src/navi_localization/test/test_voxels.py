@@ -41,13 +41,13 @@ def test_a_point_5cm_above_ground_is_not_a_voxel_15cm_is():
     assert above[(0, 0)].tolist() == [[voxel, voxel, voxel_z]]
 
 
-def test_a_lone_point_is_noise_two_make_a_voxel():
-    # MIN_POINTS_PER_VOXEL is 2: with the fused cloud at 2 cm a real
-    # surface puts ~6 points in a 5 cm voxel, so a single point is a
-    # flying pixel (2026-08-30: "too many blocks" at 1).
+def test_a_single_point_makes_a_voxel_the_fused_cloud_is_already_filtered():
+    # MIN_POINTS_PER_VOXEL is 1: the SDK's fused cloud carries about one
+    # point per 5 cm voxel on a surface, so requiring two dropped most of
+    # the desk and walls on the bench.
     one = np.array([[1.0, 1.0, 0.20]], dtype=np.float64)
     result = occupied_voxels(one, flat_ground(0.0), rover_z=None)
-    assert result == {}
+    assert list(result) == [(0, 0)] and result[(0, 0)].shape == (1, 3)
 
     two = two_points_at(1.0, 1.0, 0.20)
     result = occupied_voxels(two, flat_ground(0.0), rover_z=None)
@@ -254,7 +254,7 @@ def test_voxel_m_is_a_parameter_not_a_constant_default_path_still_5cm():
 def test_a_10cm_voxel_is_coarser_than_the_5cm_cell():
     # A single point at (1.02, 1.02): its 5 cm cell is (20, 20), but its
     # 10 cm voxel is (10, 10) - independent index spaces.
-    one = two_points_at(1.02, 1.02, 0.20)
+    one = np.array([[1.02, 1.02, 0.20]], dtype=np.float64)
     result = occupied_voxels(one, flat_ground(0.0), rover_z=None, voxel_m=0.10)
     assert list(result) == [(0, 0)]
     voxel = int(np.floor(1.02 / 0.10))
@@ -276,7 +276,6 @@ def test_10cm_voxels_fill_holes_a_5cm_voxel_would_leave():
     # for reasons that have nothing to do with what this test checks.
     xs = 1.02 + np.arange(0, 20) * 0.05
     points = np.stack([xs, np.full_like(xs, 1.0), np.full_like(xs, 0.5)], axis=1)
-    points = np.repeat(points, 2, axis=0)          # MIN_POINTS_PER_VOXEL is 2
 
     at_5cm = occupied_voxels(points, flat_ground(0.0), rover_z=None, voxel_m=0.05)
     at_10cm = occupied_voxels(points, flat_ground(0.0), rover_z=None, voxel_m=0.10)
@@ -295,8 +294,7 @@ def test_ground_reference_and_tile_stay_at_the_5cm_cell_regardless_of_voxel_m():
         # ground is 0.25 (point at z=0.30 does not clear it).
         return np.where(ix == 20, 0.0, 0.25).astype(np.float64)
 
-    points = np.array([[1.00, 1.0, 0.30], [1.00, 1.0, 0.30],
-                       [1.06, 1.0, 0.30], [1.06, 1.0, 0.30]], dtype=np.float64)
+    points = np.array([[1.00, 1.0, 0.30], [1.06, 1.0, 0.30]], dtype=np.float64)
     result = occupied_voxels(points, per_cell_ground, rover_z=None, voxel_m=0.10)
     voxels = result[(0, 0)]
     assert voxels.shape[0] == 1
@@ -372,7 +370,6 @@ def test_tiles_interleaved_along_y_keep_every_voxel():
         [0.15, 0.05, 0.5],   # tile (0, 0), column (1, 0)
         [0.15, 3.05, 0.5],   # tile (0, 1), column (1, 30)
     ], dtype=np.float64)
-    points = np.repeat(points, 2, axis=0)          # MIN_POINTS_PER_VOXEL is 2
     obstacle_map.update(points, flat_ground(0.0), rover_z=None)
     tiles = obstacle_map.tiles()
     assert obstacle_map.voxel_count == 4
