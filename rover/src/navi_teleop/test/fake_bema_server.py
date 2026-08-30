@@ -19,6 +19,7 @@ class _Server:
         self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._srv.bind(("127.0.0.1", port))
         self._srv.listen(4)
+        self._srv.settimeout(0.2)
         self.port = self._srv.getsockname()[1]
         self._stop = False
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -29,12 +30,12 @@ class _Server:
     def _run(self):
         while not self._stop:
             try:
-                self._srv.settimeout(0.2)
                 conn, _ = self._srv.accept()
             except socket.timeout:
                 continue
             except OSError:
                 break
+            conn.settimeout(0.2)
             threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
 
     def _serve(self, conn):
@@ -42,6 +43,8 @@ class _Server:
         while not self._stop:
             try:
                 data = conn.recv(4096)
+            except socket.timeout:
+                continue
             except OSError:
                 break
             if not data:
