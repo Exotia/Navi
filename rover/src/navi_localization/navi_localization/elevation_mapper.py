@@ -62,6 +62,7 @@ MAP_TILE_TOPIC = '/localization/map_tile'
 OBSTACLE_TILE_TOPIC = '/localization/obstacle_tile'
 MAP_COMMAND_TOPIC = '/localization/map_command'
 MAP_STATUS_TOPIC = '/localization/map_status'
+LOCALIZATION_STATUS_TOPIC = '/localization/status'
 LAYER = 'elevation'
 
 # Depth of the tile writer, and how many blanking tiles a tick may send.
@@ -262,6 +263,12 @@ class ElevationMapper(Node):
         self.create_subscription(
             PointCloud2, str(self.get_parameter('cloud_topic').value), self._on_cloud, 1)
         self.create_subscription(Odometry, POSE_TOPIC, self._on_pose, 1)
+        # Clouds are fused only while the localisation says OK: a tracking
+        # blow-up (2026-08-30: z = -1764 m reported as OK by the SDK, now
+        # caught by localization_status as "pose jump") must not land in
+        # the map. No status at all (bench mocks, tests) means proceed.
+        self._localisation_ok = True
+        self.create_subscription(String, LOCALIZATION_STATUS_TOPIC, self._on_localisation_status, 1)
         self.create_subscription(String, MAP_COMMAND_TOPIC, self._on_command, 4)
         self.create_timer(float(self.get_parameter('tick_seconds').value), self._tick)
         self.create_timer(1.0, self._publish_status)
@@ -275,7 +282,21 @@ class ElevationMapper(Node):
     def _now(self) -> float:
         return self.get_clock().now().nanoseconds / 1e9
 
+    def _on_localisation_status(self, message: String) -> None:
+        try:
+            state = json.loads(message.data).get('state')
+        except (ValueError, AttributeError):
+            state = None
+        ok = state == 'OK'
+        if ok != self._localisation_ok:
+            self.get_logger().info(
+                "fusing clouds again: localisation OK" if ok else
+                f"not fusing clouds: localisation {state}")
+        self._localisation_ok = ok
+
     def _on_cloud(self, message: PointCloud2) -> None:
+        if not self._localisation_ok:
+            return
         try:
             raw_points = points_from_cloud(message)
         except ValueError as error:

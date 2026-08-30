@@ -164,7 +164,9 @@ class RosBridgeClient:
             "distance_travelled": (float(distance)
                                    if isinstance(distance, (int, float)) else 0.0),
             "mount_offset_verified": bool(status.get("mount_offset_verified", False)),
-            "detail": "",
+            # The rover's reason for not being OK ("pose jump"), shown like
+            # a parse failure would be; empty while OK.
+            "detail": str(status.get("reason") or ""),
         }
 
     def publish_video_request(self, enable: bool, host: str, port: int, width: int,

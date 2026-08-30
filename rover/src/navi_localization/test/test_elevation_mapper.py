@@ -845,3 +845,22 @@ def test_an_incremental_cut_keeps_the_band_of_the_last_full_cut_so_tiles_agree(n
     node._tick(now=0.0)
     keys = _tile_keys(node._tile_publisher.messages)
     assert (4, 4) not in keys                          # entirely above the band: not a tile
+
+
+def test_clouds_are_not_fused_while_the_localisation_is_not_ok(node):
+    node._on_localisation_status(String(data=json.dumps({"state": "SEARCHING", "reason": "pose jump"})))
+    node._on_cloud(cloud(points_at(0.1, 0.1)))
+    node._tick(now=0.0)
+    assert node._tile_publisher.messages == []
+
+    node._on_localisation_status(String(data=json.dumps({"state": "OK"})))
+    node._on_cloud(cloud(points_at(0.1, 0.1)))
+    node._tick(now=2.0)
+    assert node._tile_publisher.messages != []
+
+
+def test_an_unreadable_localisation_status_stops_fusing_rather_than_crashing(node):
+    node._on_localisation_status(String(data="{not json"))
+    node._on_cloud(cloud(points_at(0.1, 0.1)))
+    node._tick(now=0.0)
+    assert node._tile_publisher.messages == []
