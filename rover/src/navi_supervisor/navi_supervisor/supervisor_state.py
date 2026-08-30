@@ -78,6 +78,62 @@ class SupervisorState:
         self._autonomy = (float(vx), float(vy), float(wz))
         self._autonomy_at = now
 
+    def on_estop_request(self, now, reason=""):
+        """Rule 2: STOP is latched and local.
+
+        Nothing here consults the mode: an e-stop from any state is an
+        e-stop, and the goal cancel goes out unconditionally rather than
+        only when this class believes it is autonomous - a Nav2 that was
+        still winding down from a takeover must not survive the stop
+        because of a bookkeeping disagreement. The stub cancel is a no-op,
+        so the unconditional call costs nothing.
+        """
+        self._estop_latched = True
+        self._mode = ESTOP
+        self._reason = str(reason) if reason else "e-stop"
+        self._manual = ZERO
+        self._manual_at = None
+        self._autonomy = ZERO
+        self._autonomy_at = None
+        self._stopped = True
+        self._queue(CANCEL_GOAL, DEACTIVATE_NAV2, CHASSIS_STOP)
+
+    def on_mode_request(self, now, mode):
+        """Honour a /mode_request, or return the reason it was refused."""
+        if mode not in MODES:
+            return f"unknown mode {mode!r}"
+        if mode == ESTOP:
+            self.on_estop_request(now, "mode request")
+            return None
+        if self._estop_latched and mode != MANUAL:
+            # Rule 2 again: an explicit request back to manual is the only
+            # thing that clears the latch. Anything else leaves the rover
+            # stopped, and says so on /mode_status rather than silently.
+            self._reason = f"e-stop latched, {mode} refused"
+            return self._reason
+        was_autonomous = self._mode == AUTONOMOUS
+        self._estop_latched = False
+        self._mode = mode
+        self._reason = "mode request"
+        if was_autonomous and mode != AUTONOMOUS:
+            # Spec rule 1's ordering, on the path the operator actually
+            # uses: the coordinator must be aborted out of the autonomous
+            # task before anything asks it for Manual, or ERC's mission
+            # state machine is left claiming a run that is over. Same
+            # sequence as _take_over(), so the DRIVE row's Manual button
+            # and a deflected stick leave the coordinator in one state.
+            self._queue(CANCEL_GOAL, DEACTIVATE_NAV2, COORDINATOR_ABORT)
+            if mode in MANUAL_MODES:
+                self._queue(COORDINATOR_MANUAL)
+        if mode in MANUAL_MODES:
+            # Whatever manual twist is still retained predates this
+            # request - it may be the stick position from before an e-stop.
+            # It must not become the first thing the rover does on the way
+            # back; the deadman holds zero until a genuinely new one lands.
+            self._manual = ZERO
+            self._manual_at = None
+        return None
+
     # --- output ----------------------------------------------------------
     def _source_age(self, now):
         """(age of the mode's source, the deadman it is judged against).
