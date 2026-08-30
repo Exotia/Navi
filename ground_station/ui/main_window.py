@@ -78,6 +78,8 @@ class MainWindow(QMainWindow):
         # None if none has (or it has gone stale) - mirrors
         # _localization_status_at for the same reason.
         self._map_status_at: float | None = None
+        # Same, for /drive_status.
+        self._drive_status_at: float | None = None
 
         input_style = (
             f"background-color: {theme.PANEL}; color: {theme.TEXT}; "
@@ -156,6 +158,17 @@ class MainWindow(QMainWindow):
         row.load_requested.connect(lambda name: self._send_map_command("load", name))
         row.clear_requested.connect(lambda: self._send_map_command("clear"))
 
+        drive_row = self.dashboard_page.drive_row
+        drive_row.stop_requested.connect(lambda: self._send_drive_command("stop"))
+        drive_row.manual_requested.connect(lambda: self._send_drive_command("manual"))
+        drive_row.init_requested.connect(lambda: self._send_drive_command("init"))
+        drive_row.reset_encoders_requested.connect(
+            lambda: self._send_drive_command("reset_encoders"))
+        drive_row.reset_odometry_requested.connect(
+            lambda: self._send_drive_command("reset_odometry"))
+        drive_row.drive_mode_requested.connect(lambda: self._send_drive_command("drive_mode"))
+        drive_row.drive_state_requested.connect(lambda: self._send_drive_command("drive_state"))
+
         self._node_poll_timer = QTimer(self)
         self._node_poll_timer.timeout.connect(self._poll_nodes)
         self._node_poll_timer.start(node_poll_interval_ms)
@@ -233,6 +246,7 @@ class MainWindow(QMainWindow):
         self.ros_client.signals.localization_pose_received.connect(
             self._on_localization_pose)
         self.ros_client.signals.map_status_received.connect(self._on_map_status)
+        self.ros_client.signals.drive_status_received.connect(self._on_drive_status)
 
         try:
             self.ros_client.connect()
@@ -241,6 +255,7 @@ class MainWindow(QMainWindow):
             self.ros_client.subscribe_localization_status()
             self.ros_client.subscribe_localization_pose()
             self.ros_client.subscribe_map_status()
+            self.ros_client.subscribe_drive_status()
         except Exception as exc:
             print(f"ground_station: failed to connect to rosbridge: {exc}", file=sys.stderr)
 
@@ -337,6 +352,16 @@ class MainWindow(QMainWindow):
             # ten seconds after it changed and this is what ages it off
             # when the line is otherwise unchanged.
             self.dashboard_page.map_row.refresh(now)
+
+        # Same staleness rule, for the drive row: a rover that has gone
+        # quiet must not leave stale drive controls (STOP excepted, which
+        # is always enabled) looking live.
+        if (self._drive_status_at is not None
+                and now - self._drive_status_at > LOCALIZATION_STATUS_STALE_AFTER_SECONDS):
+            self._drive_status_at = None
+            self.dashboard_page.drive_row.set_state(None)
+        else:
+            self.dashboard_page.drive_row.refresh(now)
 
     def local_address_for(self, host: str, port: int) -> str:
         """Our own address on the interface that reaches the rover. The
@@ -447,6 +472,15 @@ class MainWindow(QMainWindow):
         self._map_status_at = monotonic() if state is not None else None
         self.dashboard_page.map_row.set_state(state)
 
+    def _send_drive_command(self, action: str) -> None:
+        if self.ros_client is None:
+            return
+        self.ros_client.send_drive_command(action)
+
+    def _on_drive_status(self, state) -> None:
+        self._drive_status_at = monotonic() if state is not None else None
+        self.dashboard_page.drive_row.set_state(state)
+
     def _on_mode_changed(self, mode: str) -> None:
         """Switches the panel's view source only. The twist keeps reaching
         the rover in every mode - driving stays on the gamepad/rosbridge
@@ -465,6 +499,7 @@ class MainWindow(QMainWindow):
         previous_mode = self._mode
         self._mode = mode
         self.dashboard_page.map_row.setVisible(mode == "semi_auto")
+        self.dashboard_page.drive_row.setVisible(mode == "semi_auto")
         if previous_mode not in ("simulation", "semi_auto") and mode in ("simulation", "semi_auto"):
             # What the operator had before the simulation modes forced the
             # local receiver on; restored on the way back, so a mode

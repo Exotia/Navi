@@ -4,6 +4,7 @@ from PySide6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel,
 
 from ground_station import theme
 from ground_station.ui.drive_card import DriveCard
+from ground_station.ui.drive_row import DriveRow
 from ground_station.ui.map_row import MapRow
 from ground_station.ui.node_list_widget import NodeListWidget
 from ground_station.ui.video_panel import VideoPanel
@@ -25,6 +26,8 @@ class DashboardPage(QWidget):
         self.video_panel = VideoPanel(receiver=video_receiver)
         self.map_row = MapRow()
         self.map_row.setVisible(False)
+        self.drive_row = DriveRow()
+        self.drive_row.setVisible(False)
 
         self.drive_card.details_requested.connect(self.drive_details_requested)
 
@@ -66,6 +69,7 @@ class DashboardPage(QWidget):
         left.addLayout(mode_row)
         left.addWidget(self.video_panel, stretch=3)
         left.addWidget(self.map_row)
+        left.addWidget(self.drive_row)
         left.addWidget(self.drive_card, stretch=1)
 
         layout = QHBoxLayout(self)

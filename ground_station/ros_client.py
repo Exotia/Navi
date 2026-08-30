@@ -8,7 +8,8 @@ import sys
 import roslibpy
 from PySide6.QtCore import QObject, Signal
 
-from ground_station.models import map_command_json, parse_map_status, pose_readout_from_odometry
+from ground_station.models import (drive_command_json, map_command_json, parse_drive_status,
+                                    parse_map_status, pose_readout_from_odometry)
 
 # /localization/pose is published at the ZED wrapper's ~30 Hz and is wanted
 # here for one header readout. rosbridge's own throttle_rate (milliseconds)
@@ -24,6 +25,7 @@ class RosSignals(QObject):
     localization_status_received = Signal(dict)
     localization_pose_received = Signal(dict)
     map_status_received = Signal(object)
+    drive_status_received = Signal(object)
 
 
 def _localization_status_failure(detail: str) -> dict:
@@ -49,6 +51,8 @@ class RosBridgeClient:
         self._localization_pose_topic = None
         self._map_status_topic = None
         self._map_command_topic = None
+        self._drive_status_topic = None
+        self._drive_command_topic = None
 
     def connect(self) -> None:
         self._ros.on_ready(lambda: self.signals.connection_changed.emit(True))
@@ -201,3 +205,25 @@ class RosBridgeClient:
         if self._map_command_topic is None:
             self._map_command_topic = self._topic_factory(self._ros, topic_name, "std_msgs/String")
         self._map_command_topic.publish(self._message_factory({"data": map_command_json(action, name)}))
+
+    def subscribe_drive_status(self, topic_name: str = "/drive_status") -> None:
+        """The drive coordinator's own account of itself: lease held,
+        coordinator state, deadman/twist age, and the outcome of the last
+        command. JSON in a std_msgs/String at 1 Hz."""
+        topic = self._topic_factory(self._ros, topic_name, "std_msgs/String")
+        topic.subscribe(lambda msg: self.signals.drive_status_received.emit(
+            parse_drive_status(msg.get("data", ""))))
+        self._drive_status_topic = topic
+
+    def send_drive_command(self, action: str,
+                           topic_name: str = "/drive_command") -> None:
+        """stop / manual / init / reset_encoders / reset_odometry /
+        drive_mode / drive_state, as the rover's drive coordinator reads."""
+        if not self.is_connected:
+            print("ground_station: not connected, drive command dropped", file=sys.stderr)
+            return
+        if self._drive_command_topic is None:
+            self._drive_command_topic = self._topic_factory(
+                self._ros, topic_name, "std_msgs/String")
+        self._drive_command_topic.publish(self._message_factory(
+            {"data": drive_command_json(action)}))
