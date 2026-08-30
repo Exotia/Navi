@@ -5,7 +5,7 @@ import pytest
 from navi_localization.pose_composition import (
     BASE_LINK_IN_BASE_FOOTPRINT, CAMERA_IN_BASE_FOOTPRINT, IDENTITY,
     STATIC_FRAMES, Transform, compose, footprint_pose_from_camera_pose,
-    inverse, translation_distance, yaw_of)
+    footprint_twist_from_camera_twist, inverse, translation_distance, yaw_of)
 
 
 def quat_z(yaw):
@@ -94,3 +94,50 @@ def test_no_static_frame_gives_the_wrappers_link_a_second_parent():
     children = [child for _, child, _ in STATIC_FRAMES]
     assert "zed_front_camera_link" not in children
     assert len(children) == len(set(children)), "a frame may have only one parent"
+
+
+def test_a_pure_translation_is_the_same_at_both_points():
+    linear, angular = footprint_twist_from_camera_twist((1.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+    assert linear == pytest.approx((1.0, 0.0, 0.0))
+    assert angular == pytest.approx((0.0, 0.0, 0.0))
+
+
+def test_a_yaw_rate_moves_the_footprint_sideways():
+    # base_footprint is 0.345 m behind the camera, so turning left at
+    # 1 rad/s about the camera drags it 0.345 m/s to its own right.
+    linear, angular = footprint_twist_from_camera_twist((0.0, 0.0, 0.0), (0.0, 0.0, 1.0))
+    assert linear == pytest.approx((0.0, -0.345, 0.0))
+    assert angular == pytest.approx((0.0, 0.0, 1.0))
+
+
+def test_a_pitch_rate_lifts_and_pushes_the_footprint():
+    # 0.548 m below and 0.345 m behind: pitching nose-up about the camera
+    # swings the footprint backwards and upwards.
+    linear, angular = footprint_twist_from_camera_twist((0.0, 0.0, 0.0), (0.0, 1.0, 0.0))
+    assert linear == pytest.approx((-0.548, 0.0, 0.345))
+
+
+def test_a_roll_rate_swings_the_footprint_sideways():
+    linear, angular = footprint_twist_from_camera_twist((0.0, 0.0, 0.0), (1.0, 0.0, 0.0))
+    assert linear == pytest.approx((0.0, 0.548, 0.0))
+
+
+def test_translation_and_rotation_add():
+    linear, _ = footprint_twist_from_camera_twist((0.5, 0.0, 0.0), (0.0, 0.0, 2.0))
+    assert linear == pytest.approx((0.5, -0.690, 0.0))
+
+
+def test_a_mount_offset_of_zero_changes_nothing():
+    linear, angular = footprint_twist_from_camera_twist(
+        (1.0, 2.0, 3.0), (0.1, 0.2, 0.3), IDENTITY)
+    assert linear == pytest.approx((1.0, 2.0, 3.0))
+    assert angular == pytest.approx((0.1, 0.2, 0.3))
+
+
+def test_a_rotated_mount_rotates_the_twist_into_the_footprints_axes():
+    # A camera mounted yawed 90 deg at the footprint's own origin: its +x is
+    # the footprint's +y, so a forward twist reads sideways at the rover.
+    offset = Transform(0.0, 0.0, 0.0, *quat_z(math.pi / 2))
+    linear, angular = footprint_twist_from_camera_twist((1.0, 0.0, 0.0), (0.0, 0.0, 0.5), offset)
+    assert linear == pytest.approx((0.0, 1.0, 0.0), abs=1e-9)
+    assert angular == pytest.approx((0.0, 0.0, 0.5), abs=1e-9)

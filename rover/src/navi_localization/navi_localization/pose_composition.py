@@ -74,6 +74,12 @@ def _rotate(q, v):
     )
 
 
+def _cross(a, b):
+    ax, ay, az = a
+    bx, by, bz = b
+    return (ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx)
+
+
 def compose(a: Transform, b: Transform) -> Transform:
     """a * b: apply b, then a. If a is X-in-W and b is Y-in-X, the result
     is Y-in-W."""
@@ -94,6 +100,36 @@ def footprint_pose_from_camera_pose(
         camera_in_footprint: Transform = CAMERA_IN_BASE_FOOTPRINT) -> Transform:
     """T_map_footprint = T_map_camera * inverse(T_footprint_camera)."""
     return compose(camera_in_map, inverse(camera_in_footprint))
+
+
+def footprint_twist_from_camera_twist(
+        linear, angular,
+        camera_in_footprint: Transform = CAMERA_IN_BASE_FOOTPRINT):
+    """The camera's body twist, re-expressed at base_footprint.
+
+    Both arguments are (x, y, z) in the camera's own axes - the ROS
+    convention for nav_msgs/Odometry.twist, which is expressed in
+    child_frame_id. The result is the same for base_footprint.
+
+    Two points on one rigid body do not share a linear velocity: with R and p
+    the mount's rotation and translation (camera in footprint),
+
+        omega_footprint = R * omega_camera
+        v_footprint     = R * v_camera + omega_footprint x (-p)
+
+    Not an optional refinement. The camera sits 0.345 m ahead of and 0.548 m
+    above base_footprint, so at a 0.5 rad/s yaw the two points differ by
+    0.17 m/s sideways, which is the size of the speeds the controller works
+    with.
+    """
+    q = (camera_in_footprint.qx, camera_in_footprint.qy,
+         camera_in_footprint.qz, camera_in_footprint.qw)
+    vx, vy, vz = _rotate(q, tuple(linear))
+    omega = _rotate(q, tuple(angular))
+    lx, ly, lz = _cross(omega, (-camera_in_footprint.x,
+                                -camera_in_footprint.y,
+                                -camera_in_footprint.z))
+    return (vx + lx, vy + ly, vz + lz), omega
 
 
 def yaw_of(t: Transform) -> float:
