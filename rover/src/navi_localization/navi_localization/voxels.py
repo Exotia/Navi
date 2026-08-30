@@ -45,7 +45,7 @@ from navi_localization.tiles import TILE_M
 from navi_localization.elevation_grid import RESOLUTION as VOXEL  # the grid's 5 cm cell
 OBSTACLE_MIN_ABOVE_GROUND = 0.10
 OBSTACLE_MAX_ABOVE_ROVER = 2.5
-MIN_POINTS_PER_VOXEL = 1   # the fused cloud is already the SDK's filtered map (~1 point per 5 cm voxel); 2 dropped most real surfaces on the bench
+MIN_POINTS_PER_VOXEL = 2   # with the fused cloud at 2 cm a 5 cm voxel on a real surface holds ~6 points; a lone point is noise (1 was needed when the cloud was 5 cm)
 
 _EMPTY_VOXELS = np.zeros((0, 3), dtype=np.int32)
 

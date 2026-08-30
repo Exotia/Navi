@@ -71,7 +71,7 @@ def test_the_mapping_resolution_is_at_least_as_fine_as_the_grid():
 
 def test_depth_confidence_filters_noise_but_keeps_textureless_surfaces():
     depth = _parameters()['depth']
-    assert depth['depth_confidence'] == 70
+    assert depth['depth_confidence'] == 50
     assert depth['depth_texture_conf'] == 100
 
 

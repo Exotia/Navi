@@ -15,7 +15,7 @@
             pub_frame_rate: 15.0
         depth:
             depth_mode: 'NEURAL'           # calibrated 2026-08-29, see the spec's table; NEURAL at 30 fps drops frames on this Orin
-            depth_confidence: 70          # reject the least confident depth pixels before they become map noise (SDK sample uses 50)
+            depth_confidence: 50          # reject the least confident half of depth pixels - the SDK's own mapping sample value (70 still spawned too many blocks)
             depth_texture_conf: 100       # keep depth on textureless surfaces (plain walls, concrete)
             min_depth: 0.3
             max_depth: 10.0
