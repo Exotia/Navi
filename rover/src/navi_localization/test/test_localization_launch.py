@@ -75,9 +75,10 @@ def test_depth_confidence_filters_noise_but_keeps_textureless_surfaces():
     assert depth['depth_texture_conf'] == 100
 
 
-def test_the_floor_is_the_map_origin_and_video_stays_640x360():
+def test_the_floor_is_not_the_map_origin_and_video_stays_640x360():
     parameters = _parameters()
-    assert parameters['pos_tracking']['floor_alignment'] is True
+    # floor_alignment picked floors 0.5 m apart between starts on the bench.
+    assert parameters['pos_tracking']['floor_alignment'] is False
     # HD1080 + NEURAL pinned the Orin GPU at 99 % at 25 W (2026-08-30);
     # HD720 + 2 cm mapping bursts to 99 % but averages ~60 % and holds
     # pose at 15 Hz.

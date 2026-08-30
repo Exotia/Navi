@@ -30,7 +30,7 @@
             reset_odom_with_loop_closure: true
             set_gravity_as_origin: true
             two_d_mode: false
-            floor_alignment: true         # z = 0 on the floor detected at start, not at the camera
+            floor_alignment: false        # tried 2026-08-30: the floor it picked varied by ±0.5 m between starts on the bench, shifting the clamp band; the sim lowers its plane instead
         sensors:
             publish_imu_tf: true
             sensors_pub_rate: 100.0
