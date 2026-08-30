@@ -73,10 +73,66 @@ class SupervisorState:
     def on_manual_twist(self, now, vx, vy, wz):
         self._manual = (float(vx), float(vy), float(wz))
         self._manual_at = now
+        if self._mode == AUTONOMOUS and self._is_takeover(self._manual):
+            self._take_over()
 
     def on_autonomy_twist(self, now, vx, vy, wz):
         self._autonomy = (float(vx), float(vy), float(wz))
         self._autonomy_at = now
+
+    @staticmethod
+    def _is_takeover(twist):
+        vx, vy, wz = twist
+        return (abs(vx) > TAKEOVER_LINEAR_MPS or abs(vy) > TAKEOVER_LINEAR_MPS
+                or abs(wz) > TAKEOVER_ANGULAR_RPS)
+
+    def _take_over(self):
+        """Rule 1: takeover wins instantly.
+
+        The order matters. Nav2 is stopped first, because a still-running
+        Nav2 that regains the output the moment the operator lets go is the
+        dangerous case - muting it is not enough. Only then is the
+        coordinator's mission state told the truth: abort out of the
+        autonomous task, then startManual, which is what ERC judging reads.
+
+        No chassis stop is queued: the twist that caused this takeover is
+        the command now, and stopping the wheels for one tick before
+        obeying the stick would be a stutter the operator feels as a fault.
+        """
+        self._mode = MANUAL
+        self._reason = "operator takeover"
+        self._queue(CANCEL_GOAL, DEACTIVATE_NAV2, COORDINATOR_ABORT,
+                    COORDINATOR_MANUAL)
+
+    def on_localization_status(self, now, state):
+        """Rule 3: localisation loss halts autonomy, and does not resume.
+
+        The halt drops the mode to manual rather than leaving a muted
+        autonomous, for two reasons: the operator re-issues Go by hand
+        anyway, and rule 5 keeps the ground station from streaming while
+        the mode is autonomous - a deflected stick still gets through, but
+        staying there would leave the operator with no continuous control
+        to drive the rover out of wherever it stopped.
+
+        Manual driving is deliberately untouched by this. Driving home by
+        hand is how a rover whose VIO died gets recovered; taking the
+        sticks away at that moment would be the opposite of safe. The state
+        still reaches /mode_status in every mode.
+        """
+        if not isinstance(state, str):
+            # A status with no usable state is not evidence that
+            # localisation recovered. `None` here would mean "nothing has
+            # ever arrived", which is the one value the autonomous guard
+            # lets through - so it must not be reachable from the wire.
+            return
+        self._localization = state
+        if state in ("SEARCHING", "OFF") and self._mode == AUTONOMOUS:
+            self._mode = MANUAL
+            self._reason = f"localisation {state}"
+            self._manual = ZERO
+            self._manual_at = None
+            self._stopped = True
+            self._queue(CANCEL_GOAL, DEACTIVATE_NAV2, CHASSIS_STOP)
 
     def on_estop_request(self, now, reason=""):
         """Rule 2: STOP is latched and local.
@@ -111,6 +167,13 @@ class SupervisorState:
             # stopped, and says so on /mode_status rather than silently.
             self._reason = f"e-stop latched, {mode} refused"
             return self._reason
+        if mode == AUTONOMOUS and self._localization not in (None, "OK"):
+            # A run must not start on a pose that is already wrong. `None`
+            # - no status has ever arrived - is allowed through on purpose,
+            # so a bench with no ZED can still exercise the mode; rule 3
+            # then halts the run the moment a real SEARCHING or OFF lands.
+            self._reason = f"localisation {self._localization}, autonomous refused"
+            return self._reason
         was_autonomous = self._mode == AUTONOMOUS
         self._estop_latched = False
         self._mode = mode
@@ -132,6 +195,12 @@ class SupervisorState:
             # back; the deadman holds zero until a genuinely new one lands.
             self._manual = ZERO
             self._manual_at = None
+            # Same reasoning for a stale /autonomy_twist: Nav2 can still be
+            # winding down when the e-stop latch clears and keep publishing
+            # in the meantime. That stale twist must not survive to drive
+            # the rover the instant autonomous is re-requested.
+            self._autonomy = ZERO
+            self._autonomy_at = None
         return None
 
     # --- output ----------------------------------------------------------
