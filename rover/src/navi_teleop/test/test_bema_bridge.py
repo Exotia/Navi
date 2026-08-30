@@ -121,6 +121,14 @@ def test_a_malformed_command_does_not_raise(bridge):
     # no exception = pass
 
 
+def test_status_tick_handles_session_error(bridge):
+    node, server, clock = bridge
+    # Monkeypatch session.status() to raise
+    node._session.status = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+    # Should not raise; error is logged instead
+    node._status_tick()
+
+
 def _string(payload):
     m = String()
     m.data = json.dumps(payload)

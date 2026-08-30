@@ -61,14 +61,16 @@ class BemaBridge(Node):
         self.create_timer(1.0 / DRIVE_HZ, self._drive_tick)
         self.create_timer(1.0 / STATUS_HZ, self._status_tick)
 
-        # Store the clock after timers are created so node doesn't use test clock for timers
         self._clock = clock
 
     def _on_twist(self, msg: Twist):
-        # w to the IK is degrees/second; the server negates again so a
-        # positive angular.z (CCW) reaches the model as positive u.
-        self._twist = (msg.linear.x, msg.linear.y, -degrees(msg.angular.z))
-        self._twist_at = self._clock()
+        try:
+            # w to the IK is degrees/second; the server negates again so a
+            # positive angular.z (CCW) reaches the model as positive u.
+            self._twist = (msg.linear.x, msg.linear.y, -degrees(msg.angular.z))
+            self._twist_at = self._clock()
+        except Exception as exc:
+            self.get_logger().error(f"twist callback failed: {exc!r}")
 
     def _drive_tick(self):
         try:
@@ -114,15 +116,18 @@ class BemaBridge(Node):
             self.get_logger().error(f"drive action {action} failed: {exc!r}")
 
     def _status_tick(self):
-        now = self._clock()
-        status = dict(self._session.status())
-        status["twist_age_s"] = (None if self._twist_at is None
-                                 else round(now - self._twist_at, 2))
-        status["deadman_active"] = self._deadman_active
-        status["last_action"] = self._last_action
-        msg = String()
-        msg.data = json.dumps(status)
-        self._status_pub.publish(msg)
+        try:
+            now = self._clock()
+            status = dict(self._session.status())
+            status["twist_age_s"] = (None if self._twist_at is None
+                                     else round(now - self._twist_at, 2))
+            status["deadman_active"] = self._deadman_active
+            status["last_action"] = self._last_action
+            msg = String()
+            msg.data = json.dumps(status)
+            self._status_pub.publish(msg)
+        except Exception as exc:
+            self.get_logger().error(f"status tick failed: {exc!r}")
 
     def destroy_node(self):
         try:
