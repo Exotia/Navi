@@ -129,6 +129,43 @@ def test_status_tick_handles_session_error(bridge):
     node._status_tick()
 
 
+def test_stop_command_latches_over_a_recent_fresh_twist(bridge):
+    node, server, clock = bridge
+    node._on_twist(_twist(0.4, 0.0, 0.0))
+    node._drive_tick()
+    node._on_command(_string({"action": "stop"}))
+    node._drive_tick()                     # twist was "recent" but latched off
+    seq = [(m, a) for tag, m, a in server.calls if m in ("F1", "F2")]
+    last_f1 = [a for m, a in seq if m == "F1"][-1]
+    assert last_f1 == [0.0, 0.0, 0.0]
+    assert node._twist_at is None
+
+    # a fresh twist un-latches it
+    node._on_twist(_twist(0.4, 0.0, 0.0))
+    node._drive_tick()
+    last_f1 = [a for tag, m, a in server.calls if m == "F1"][-1]
+    assert last_f1[0] == pytest.approx(0.4)
+
+
+def test_unknown_action_does_not_become_the_last_action(bridge):
+    node, server, clock = bridge
+    node._on_command(_string({"action": "manual"}))
+    assert node._last_action == "manual"
+    node._on_command(_string({"action": "no_such_action"}))
+    assert node._last_action == "manual"       # unchanged, not overwritten
+
+
+def test_status_tick_survives_an_odd_f9_value(bridge):
+    node, server, clock = bridge
+    server.state = b"weird"                # non-int F9 result
+    node._drive_tick()                     # first tick: forces a heartbeat
+    published = []
+    node._status_pub.publish = lambda msg: published.append(msg.data)
+    node._status_tick()
+    status = json.loads(published[-1])     # raises if not valid JSON
+    assert isinstance(status["coordinator_state"], str)
+
+
 def _string(payload):
     m = String()
     m.data = json.dumps(payload)

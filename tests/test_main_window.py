@@ -801,6 +801,18 @@ def test_semi_auto_mode_shows_the_map_row_and_other_modes_hide_it(qtbot):
     assert not row.isVisibleTo(window)
 
 
+def test_drive_row_stays_visible_in_every_mode(qtbot):
+    # Unlike the map row, the drive row must never disappear: the gamepad
+    # publishes /manual_twist in every mode, so STOP and the deadman/lease
+    # line have to stay reachable regardless of what the mode radio shows.
+    window, _ = make_window(qtbot)
+    row = window.dashboard_page.drive_row
+    assert row.isVisibleTo(window)
+    for mode in ("semi_auto", "manual", "simulation"):
+        window.dashboard_page.mode_changed.emit(mode)
+        assert row.isVisibleTo(window)
+
+
 def test_map_status_reaches_the_row_and_goes_stale(qtbot):
     window, client = make_window(qtbot)
     topic = next(t for t in FakeTopic.instances if t.name == "/localization/map_status")
@@ -808,6 +820,23 @@ def test_map_status_reaches_the_row_and_goes_stale(qtbot):
     assert window.dashboard_page.map_row.load_button.isEnabled()
     window._check_staleness(now=window._map_status_at + 10.0)
     assert not window.dashboard_page.map_row.load_button.isEnabled()
+
+
+def test_drive_status_clears_instantly_on_disconnect(qtbot):
+    window, client = make_window(qtbot)
+    topic = next(t for t in FakeTopic.instances if t.name == "/drive_status")
+    topic.callback({"data": json.dumps({"connected": True, "lease": True,
+                                        "coordinator_state": 3,
+                                        "deadman_active": False,
+                                        "twist_age_s": 0.1})})
+    assert window._drive_status_at is not None
+    assert window.dashboard_page.drive_row.manual_button.isEnabled()
+    # A dropped rosbridge connection must blank the drive row at once,
+    # rather than leaving stale drive controls looking live for the full
+    # 3 s staleness window.
+    window._on_connection_changed(False)
+    assert window._drive_status_at is None
+    assert not window.dashboard_page.drive_row.manual_button.isEnabled()
 
 
 def test_map_row_buttons_send_commands(qtbot):

@@ -93,6 +93,8 @@ class DriveRow(QWidget):
             parts.append(f'<span style="color: {theme.ACCENT};">deadman</span>')
         if s.twist_age_s is not None:
             parts.append(_plain(f"twist {s.twist_age_s:.1f}s"))
+        if s.last_action:
+            parts.append(_plain(f"last: {s.last_action}"))
         if s.last_error:
             parts.append(f'<span style="color: {theme.BAD};">'
                          f'{_plain(s.last_error)}</span>')

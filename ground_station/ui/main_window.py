@@ -168,6 +168,11 @@ class MainWindow(QMainWindow):
             lambda: self._send_drive_command("reset_odometry"))
         drive_row.drive_mode_requested.connect(lambda: self._send_drive_command("drive_mode"))
         drive_row.drive_state_requested.connect(lambda: self._send_drive_command("drive_state"))
+        # The gamepad publishes /manual_twist in every mode (see
+        # _poll_gamepad), so the STOP button and the deadman/lease status
+        # line must be visible in every mode too - never mode-gated like the
+        # map row, which only makes sense in semi_auto.
+        self.dashboard_page.drive_row.setVisible(True)
 
         self._node_poll_timer = QTimer(self)
         self._node_poll_timer.timeout.connect(self._poll_nodes)
@@ -314,6 +319,7 @@ class MainWindow(QMainWindow):
             if self._mode not in ("semi_auto", "simulation"):
                 self.dashboard_page.video_panel.stop_receiver(keep_failed_reason=True)
             self._on_map_status(None)
+            self._on_drive_status(None)
 
     def closeEvent(self, event) -> None:
         """Stops the local video receiver on window close for the same
@@ -499,7 +505,9 @@ class MainWindow(QMainWindow):
         previous_mode = self._mode
         self._mode = mode
         self.dashboard_page.map_row.setVisible(mode == "semi_auto")
-        self.dashboard_page.drive_row.setVisible(mode == "semi_auto")
+        # The drive row is not mode-gated - see the setVisible(True) call in
+        # __init__: the gamepad drives in every mode, so STOP and the
+        # deadman/lease line must stay visible in every mode too.
         if previous_mode not in ("simulation", "semi_auto") and mode in ("simulation", "semi_auto"):
             # What the operator had before the simulation modes forced the
             # local receiver on; restored on the way back, so a mode

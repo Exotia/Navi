@@ -11,7 +11,8 @@
 #      /localization/status
 #
 #   ./start_navi.sh              all of them, listener in the foreground
-#   ./start_navi.sh --no-bridge  no rosbridge_server or bema_bridge (or if one is already running)
+#   ./start_navi.sh --no-bridge  no rosbridge (one is already running)
+#   ./start_navi.sh --no-drive-bridge  no bema_bridge (rover drive is idle, or one is already running)
 #   ./start_navi.sh --no-video   no video_sender
 #   ./start_navi.sh --no-localization  no ZED tracking; video from the camera as a UVC device
 #   ./start_navi.sh --port 9091  serve rosbridge on a different port
@@ -33,6 +34,7 @@ set -eo pipefail
 WS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PORT=9090
 START_BRIDGE=1
+START_DRIVE_BRIDGE=1
 START_VIDEO=1
 START_LOCALIZATION=1
 CLEAN_STALE=1
@@ -40,6 +42,7 @@ CLEAN_STALE=1
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-bridge) START_BRIDGE=0; shift ;;
+        --no-drive-bridge) START_DRIVE_BRIDGE=0; shift ;;
         --no-video) START_VIDEO=0; shift ;;
         --no-localization) START_LOCALIZATION=0; shift ;;
         --keep-stale) CLEAN_STALE=0; shift ;;
@@ -356,7 +359,7 @@ if [ "$START_VIDEO" -eq 1 ]; then
     BACKGROUND_PIDS+=("$!")
 fi
 
-if [ "$START_BRIDGE" -eq 1 ]; then
+if [ "$START_DRIVE_BRIDGE" -eq 1 ]; then
     echo "starting bema_bridge (idle until the ground station drives)"
     ros2 run navi_teleop bema_bridge &
     BACKGROUND_PIDS+=("$!")

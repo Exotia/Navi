@@ -36,9 +36,22 @@ class BemaSession:
     # --- connection lifecycle -------------------------------------------
     def connect(self):
         try:
-            self._bema = self._factory(self._host, self._bema_port)
-            self._coord = self._factory(self._host, self._coord_port)
+            self._bema = self._factory(self._host, self._bema_port, timeout_s=0.3)
+            self._coord = self._factory(self._host, self._coord_port, timeout_s=0.3)
             self._lease = bool(self._bema.call("__sam__request"))
+            # Safety rule 1: reconnect must start with a stop. The link can
+            # drop mid-drive with the gamepad still streaming a nonzero
+            # twist; by the time the lease is back, the retained _command
+            # would still be that stale value, and resuming it unannounced
+            # on the fresh connection is exactly the runaway this bridge
+            # exists to prevent. So the very first thing sent on the
+            # just-opened bema client is a stop, and the retained command is
+            # cleared so nothing revives it until set_command runs again. A
+            # failure here falls through to the same except below, so it is
+            # a _mark_down like any other connect() failure, not a raise.
+            self._command = (0.0, 0.0, 0.0)
+            self._bema.call("F1", 0.0, 0.0, 0.0)
+            self._bema.call("F2")
             self._last_error = None
             self._down_since = None
             self._backoff_index = 0
@@ -74,7 +87,17 @@ class BemaSession:
                 self._last_ping = now
             if self._last_hb is None or now - self._last_hb >= HEARTBEAT_INTERVAL_S:
                 self._coord.call("F10")               # notifyConnected
-                self._coord_state = self._coord.call("F9")   # getState
+                state = self._coord.call("F9")        # getState
+                # Kept as the int enum it should be; anything else (the
+                # primary sent something odd, or a test double stands in
+                # for it) is stringified rather than stored raw, since
+                # status() below round-trips this through json.dumps and an
+                # unserialisable value there would blackout all of
+                # /drive_status, not just this one field.
+                if isinstance(state, int) and not isinstance(state, bool):
+                    self._coord_state = state
+                else:
+                    self._coord_state = str(state)
                 self._last_hb = now
             vx, vy, w = self._command
             self._bema.call("F1", vx, vy, w)
@@ -87,6 +110,12 @@ class BemaSession:
 
     def stop(self):
         self._command = (0.0, 0.0, 0.0)
+        # If the F1 zero-send itself marks the link down, _safe() nulls
+        # _bema, and the F2 below silently no-ops - stop() degrades to "the
+        # command is cleared" instead of actually reaching the primary.
+        # Accepted: the recovery is connect()'s own stop-first behaviour
+        # (see the safety-rule-1 comment there), which re-sends F1 zero then
+        # F2 on the very next successful reconnect.
         self._safe("F1", 0.0, 0.0, 0.0)
         self._safe("F2")
 

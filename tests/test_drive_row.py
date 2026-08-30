@@ -59,3 +59,10 @@ def test_manual_shows_arming_while_preparing(qtbot):
     qtbot.addWidget(row)
     row.set_state(state(coordinator_state="PrepareManual"))
     assert "arming" in row.status_label.text().lower()
+
+
+def test_status_line_shows_the_last_action(qtbot):
+    row = DriveRow()
+    qtbot.addWidget(row)
+    row.set_state(state(last_action="stop"))
+    assert "last: stop" in row.status_label.text().lower()

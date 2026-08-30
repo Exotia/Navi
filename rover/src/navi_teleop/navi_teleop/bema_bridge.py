@@ -96,7 +96,6 @@ class BemaBridge(Node):
         except (json.JSONDecodeError, TypeError, AttributeError):
             self.get_logger().warn(f"unreadable drive command: {msg.data!r}")
             return
-        self._last_action = action
         table = {
             "stop": self._session.stop,
             "manual": self._session.start_manual,
@@ -110,6 +109,18 @@ class BemaBridge(Node):
         if handler is None:
             self.get_logger().warn(f"unknown drive action: {action!r}")
             return
+        # Only recorded once the action is a real one - an unknown action
+        # must not be reported on /drive_status as the last command.
+        self._last_action = action
+        if action == "stop":
+            # Latch the GS STOP: clear the retained twist and its timestamp
+            # so the deadman re-arms immediately. Without this, a stop sent
+            # while a fresh twist is still arriving would be overwritten by
+            # the very next _drive_tick (which still sees that twist as
+            # fresh) and the rover would resume driving on its own. Zeros
+            # keep flowing until a genuinely new twist un-latches it.
+            self._twist = (0.0, 0.0, 0.0)
+            self._twist_at = None
         try:
             handler()
         except Exception as exc:
@@ -124,7 +135,10 @@ class BemaBridge(Node):
             status["deadman_active"] = self._deadman_active
             status["last_action"] = self._last_action
             msg = String()
-            msg.data = json.dumps(status)
+            # default=str: an odd (e.g. non-int) F9 value must not blackout
+            # the whole of /drive_status just because one field in it isn't
+            # natively JSON-serialisable.
+            msg.data = json.dumps(status, default=str)
             self._status_pub.publish(msg)
         except Exception as exc:
             self.get_logger().error(f"status tick failed: {exc!r}")

@@ -40,6 +40,7 @@ def test_connect_takes_the_lease(server):
 def test_tick_sends_drive_and_paces_ping_and_heartbeat(server):
     clock = Clock()
     sess = _session(server, clock)
+    server.calls.clear()   # connect() now sends its own lease/stop calls
     sess.set_command(0.1, 0.0, 5.0)
     sess.tick(clock.t)                       # t=0: drive + first ping + first hb
     clock.t = 0.2
@@ -56,6 +57,7 @@ def test_tick_sends_drive_and_paces_ping_and_heartbeat(server):
 def test_drive_carries_the_command_verbatim(server):
     clock = Clock()
     sess = _session(server, clock)
+    server.calls.clear()   # connect() now sends its own zero-command stop
     sess.set_command(0.25, -0.1, -12.0)
     sess.tick(clock.t)
     f1 = [a for tag, m, a in server.calls if m == "F1"][0]
@@ -99,3 +101,72 @@ def test_close_after_link_drop_does_not_raise(server):
     sess = _session(server, clock)
     server.stop()
     sess.close()  # should not raise AttributeError
+
+
+def test_reconnect_starts_with_a_stop(server):
+    """Safety rule 1: the link drops at speed with the gamepad still
+    streaming a nonzero command, the socket reconnects, and the old
+    F1(0.5,...) must not resume - the reconnect has to send a stop on the
+    freshly-opened bema client before anything else can reuse it, and clear
+    the retained command so nothing revives it on its own."""
+    clock = Clock()
+    ports = {"bema": server.bema_port, "coord": server.coordinator_port}
+    calls_made = []
+
+    def factory(host, port, timeout_s=1.0):
+        calls_made.append(port)
+        # connect() asks for bema first, then coord, exactly once each per
+        # call - alternate on that fixed order so a later connect() can be
+        # redirected at a freshly-started server on different ports (a new
+        # FakeBemaServer can't reuse the old one's ports).
+        target = ports["bema"] if len(calls_made) % 2 == 1 else ports["coord"]
+        return RpcClient("127.0.0.1", target, timeout_s)
+
+    sess = BemaSession("127.0.0.1", server.bema_port, server.coordinator_port,
+                       clock=clock, client_factory=factory)
+    sess.connect()
+    sess.set_command(0.5, 0.0, 0.0)
+    sess.tick(clock.t)
+    assert sess.status()["connected"] is True
+
+    server.stop()
+    clock.t = 1.0
+    sess.tick(clock.t)                     # marks down, schedules a retry
+    assert sess.status()["connected"] is False
+
+    server2 = FakeBemaServer()
+    server2.start()
+    try:
+        ports["bema"] = server2.bema_port
+        ports["coord"] = server2.coordinator_port
+        sess.connect()                     # simulate the scheduled reconnect
+
+        bema_calls = [(m, a) for tag, m, a in server2.calls if tag == "bema"]
+        names = [m for m, a in bema_calls]
+        assert names[0] == "__sam__request"
+        assert bema_calls[1] == ("F1", [0.0, 0.0, 0.0])
+        assert bema_calls[2] == ("F2", [])
+
+        clock.t = 1.1
+        sess.tick(clock.t)                 # command was cleared by connect()
+        f1_calls = [a for tag, m, a in server2.calls
+                    if tag == "bema" and m == "F1"]
+        assert f1_calls[-1] == [0.0, 0.0, 0.0]
+
+        sess.set_command(0.3, 0.0, 0.0)
+        clock.t = 1.2
+        sess.tick(clock.t)
+        f1_calls = [a for tag, m, a in server2.calls
+                    if tag == "bema" and m == "F1"]
+        assert f1_calls[-1] == [pytest.approx(0.3), pytest.approx(0.0),
+                                pytest.approx(0.0)]
+    finally:
+        server2.stop()
+
+
+def test_f9_non_int_state_is_stringified(server):
+    clock = Clock()
+    sess = _session(server, clock)
+    server.state = [1, 2, 3]       # F9 returning something other than an int
+    sess.tick(clock.t)             # forces the first heartbeat -> F9 call
+    assert isinstance(sess.status()["coordinator_state"], str)
