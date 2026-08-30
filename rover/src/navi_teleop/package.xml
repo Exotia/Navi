@@ -11,6 +11,10 @@
   <depend>rclpy</depend>
   <depend>geometry_msgs</depend>
   <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <!-- bema_bridge needs the `msgpack` Python package (pip install msgpack);
+       it is not an ament package, so it is documented here rather than
+       declared. -->
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

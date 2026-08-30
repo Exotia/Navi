@@ -5,12 +5,13 @@
 #      station publishes, so what the rover receives is visible here
 #   3. video_sender - waits on /video_request and streams the ZED 2i to
 #      whichever address the ground station asks for
-#   4. localization.launch.py - the ZED 2i wrapper with positional tracking,
+#   4. bema_bridge - the BEMA drive bridge, idle until the ground station drives
+#   5. localization.launch.py - the ZED 2i wrapper with positional tracking,
 #      plus localization_status publishing /localization/pose and
 #      /localization/status
 #
-#   ./start_navi.sh              all three, listener in the foreground
-#   ./start_navi.sh --no-bridge  no rosbridge (one is already running)
+#   ./start_navi.sh              all of them, listener in the foreground
+#   ./start_navi.sh --no-bridge  no rosbridge_server or bema_bridge (or if one is already running)
 #   ./start_navi.sh --no-video   no video_sender
 #   ./start_navi.sh --no-localization  no ZED tracking; video from the camera as a UVC device
 #   ./start_navi.sh --port 9091  serve rosbridge on a different port
@@ -235,7 +236,7 @@ if [ -n "${NAVI_FUNCTIONS_ONLY:-}" ]; then
 fi
 
 if [ "$CLEAN_STALE" -eq 1 ]; then
-    kill_stale "navi_teleop nodes" "navi_teleop/(manual_twist_listener|video_sender)"
+    kill_stale "navi_teleop nodes" "navi_teleop/(manual_twist_listener|video_sender|bema_bridge)"
     kill_stale "ros2 run wrappers" "ros2 run navi_teleop"
     # The pipeline video_sender spawns. Matched on the elements it always
     # contains, so an unrelated gst-launch on this machine is left alone.
@@ -353,6 +354,11 @@ if [ "$START_VIDEO" -eq 1 ]; then
     echo "starting video_sender (idle until the ground station asks for video)"
     ros2 run navi_teleop video_sender --ros-args -p source:=$( [ "$START_LOCALIZATION" -eq 1 ] && echo zed_topic || echo v4l2 ) &
     BACKGROUND_PIDS+=("$!")
+fi
+
+if [ "$START_BRIDGE" -eq 1 ]; then
+    echo "starting bema_bridge (idle until the ground station drives)"
+    ros2 run navi_teleop bema_bridge &
 fi
 
 echo "starting manual_twist_listener (Ctrl+C to stop everything)"

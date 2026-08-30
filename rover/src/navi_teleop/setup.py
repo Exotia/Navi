@@ -21,6 +21,7 @@ setup(
         'console_scripts': [
             'manual_twist_listener = navi_teleop.manual_twist_listener:main',
             'video_sender = navi_teleop.video_sender:main',
+            'bema_bridge = navi_teleop.bema_bridge:main',
         ],
     },
 )
