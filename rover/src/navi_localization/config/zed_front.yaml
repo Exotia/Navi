@@ -7,10 +7,10 @@
     ros__parameters:
         general:
             camera_name: 'zed_front'
-            grab_resolution: 'HD1080'      # 2026-08-30: depth error scales with pixel size; calibrated at 25 W
+            grab_resolution: 'HD720'       # 2026-08-30: HD1080 + NEURAL pins the GPU at 99 % at 25 W
             grab_frame_rate: 15
             pub_resolution: 'CUSTOM'
-            pub_downscale_factor: 3.0     # 640 x 360 images from 1920 x 1080: the video sender is their only consumer
+            pub_downscale_factor: 2.0     # 640 x 360 images from 1280 x 720: the video sender is their only consumer
             # Gates pose and odom publishing too, not just the images: at 15.0 the camera still grabs at 30 but /localization/pose ran at 14 Hz.
             pub_frame_rate: 15.0
         depth:

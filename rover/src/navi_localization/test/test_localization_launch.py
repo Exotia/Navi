@@ -78,8 +78,11 @@ def test_depth_confidence_filters_noise_but_keeps_textureless_surfaces():
 def test_the_floor_is_the_map_origin_and_video_stays_640x360():
     parameters = _parameters()
     assert parameters['pos_tracking']['floor_alignment'] is True
-    assert parameters['general']['grab_resolution'] == 'HD1080'
-    assert parameters['general']['pub_downscale_factor'] == 3.0     # 1920/3 = 640
+    # HD1080 + NEURAL pinned the Orin GPU at 99 % at 25 W (2026-08-30);
+    # HD720 + 2 cm mapping bursts to 99 % but averages ~60 % and holds
+    # pose at 15 Hz.
+    assert parameters['general']['grab_resolution'] == 'HD720'
+    assert parameters['general']['pub_downscale_factor'] == 2.0     # 1280/2 = 640
 
 
 def test_mapping_never_reaches_further_than_the_depth_that_is_published():
