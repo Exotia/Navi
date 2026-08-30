@@ -359,3 +359,47 @@ def test_a_non_numeric_distance_travelled_does_not_raise_in_the_receive_thread(q
 
     assert blocker.args[0]["state"] == "OK"
     assert blocker.args[0]["distance_travelled"] == 0.0
+
+
+def test_subscribe_mode_status_emits_a_parsed_state():
+    FakeTopic.instances.clear()
+    client = RosBridgeClient("localhost", ros_factory=FakeRos, topic_factory=FakeTopic,
+                             message_factory=fake_message_factory)
+    received = []
+    client.signals.mode_status_received.connect(received.append)
+    client.subscribe_mode_status()
+    topic = next(t for t in FakeTopic.instances if t.name == "/mode_status")
+    assert topic.msg_type == "std_msgs/String"
+    topic.callback({"data": json.dumps({"mode": "autonomous", "reason": "go"})})
+    assert received[-1].mode == "autonomous"
+
+
+def test_send_mode_request_publishes_json_when_connected():
+    FakeTopic.instances.clear()
+    client = RosBridgeClient("localhost", ros_factory=FakeRos, topic_factory=FakeTopic,
+                             message_factory=fake_message_factory)
+    client.connect()
+    client.send_mode_request("manual")
+    topic = next(t for t in FakeTopic.instances if t.name == "/mode_request")
+    assert json.loads(topic.published_messages[-1]["data"]) == {"mode": "manual"}
+
+
+def test_send_estop_request_publishes_json_when_connected():
+    FakeTopic.instances.clear()
+    client = RosBridgeClient("localhost", ros_factory=FakeRos, topic_factory=FakeTopic,
+                             message_factory=fake_message_factory)
+    client.connect()
+    client.send_estop_request("ground station STOP")
+    topic = next(t for t in FakeTopic.instances if t.name == "/estop_request")
+    assert json.loads(topic.published_messages[-1]["data"]) == {
+        "reason": "ground station STOP"}
+
+
+def test_requests_are_dropped_when_not_connected():
+    FakeTopic.instances.clear()
+    client = RosBridgeClient("localhost", ros_factory=FakeRos, topic_factory=FakeTopic,
+                             message_factory=fake_message_factory)
+    client.send_mode_request("manual")
+    client.send_estop_request("STOP")
+    assert [t for t in FakeTopic.instances
+            if t.name in ("/mode_request", "/estop_request")] == []

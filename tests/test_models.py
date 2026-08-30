@@ -1,5 +1,11 @@
+import json
+
 import pytest
-from ground_station.models import DriveCommandTracker, NodeRegistry
+from ground_station.models import (DriveCommandTracker, ModeState, NodeRegistry,
+                                   estop_request_json, is_stick_deflected,
+                                   may_publish_manual_twist,
+                                   may_publish_takeover_twist,
+                                   mode_request_json, parse_mode_status)
 
 
 def test_ingest_stores_latest_sample():
@@ -218,3 +224,84 @@ def test_parse_drive_status_rejects_json_booleans_in_numeric_fields():
     state = parse_drive_status(json.dumps({"twist_age_s": True, "coordinator_state": True}))
     assert state.twist_age_s is None
     assert state.coordinator_state is None
+
+
+def test_parse_mode_status_reads_every_field():
+    state = parse_mode_status(json.dumps({
+        "mode": "autonomous", "reason": "mode request",
+        "source": "/autonomy_twist", "deadman_active": False,
+        "estop_latched": False, "localization_state": "OK",
+        "source_age_s": 0.12}))
+    assert state == ModeState(mode="autonomous", reason="mode request",
+                              source="/autonomy_twist", deadman_active=False,
+                              estop_latched=False, localization_state="OK",
+                              source_age_s=0.12)
+
+
+def test_parse_mode_status_defaults_every_missing_field():
+    state = parse_mode_status("{}")
+    assert state.mode == ""
+    assert state.reason == ""
+    assert state.source is None
+    assert state.deadman_active is False
+    assert state.estop_latched is False
+    assert state.localization_state is None
+    assert state.source_age_s is None
+
+
+def test_parse_mode_status_returns_none_for_rubbish():
+    assert parse_mode_status("{not json") is None
+    assert parse_mode_status("[1, 2]") is None
+
+
+def test_parse_mode_status_ignores_fields_of_the_wrong_type():
+    state = parse_mode_status(json.dumps({
+        "mode": "manual", "source": 7, "source_age_s": "soon",
+        "localization_state": ["OK"]}))
+    assert state.source is None
+    assert state.source_age_s is None
+    assert state.localization_state is None
+
+
+def test_manual_twist_is_published_in_manual_and_semi_auto_only():
+    def at(mode):
+        return parse_mode_status(json.dumps({"mode": mode}))
+    assert may_publish_manual_twist(at("manual")) is True
+    assert may_publish_manual_twist(at("semi_auto")) is True
+    assert may_publish_manual_twist(at("autonomous")) is False
+    assert may_publish_manual_twist(at("estop")) is False
+
+
+def test_an_unknown_mode_is_treated_as_not_driving():
+    assert may_publish_manual_twist(parse_mode_status('{"mode": "turbo"}')) is False
+
+
+def test_no_mode_status_at_all_still_publishes():
+    # No supervisor on that rover: publishing is what it needs, and a rover
+    # that has one answers within half a second of the subscription.
+    assert may_publish_manual_twist(None) is True
+
+
+def test_a_deflected_stick_may_still_be_published_in_autonomous_only():
+    def at(mode):
+        return parse_mode_status(json.dumps({"mode": mode}))
+    assert may_publish_takeover_twist(at("autonomous")) is True
+    assert may_publish_takeover_twist(at("estop")) is False
+    assert may_publish_takeover_twist(at("manual")) is False
+    assert may_publish_takeover_twist(parse_mode_status('{"mode": "turbo"}')) is False
+    assert may_publish_takeover_twist(None) is False
+
+
+def test_a_centred_stick_is_not_deflected_but_the_smallest_output_is():
+    # gamepad_input.DEADZONE (0.1) has already been applied per axis before
+    # scaling, so a centred stick is exactly zero and the smallest thing
+    # the reader can emit is DEADZONE * MAX_LINEAR_SPEED = 0.005.
+    assert is_stick_deflected((0.0, 0.0, 0.0)) is False
+    assert is_stick_deflected((0.005, 0.0, 0.0)) is True
+    assert is_stick_deflected((0.0, 0.0, 0.01)) is True
+
+
+def test_mode_and_estop_request_json():
+    assert json.loads(mode_request_json("manual")) == {"mode": "manual"}
+    assert json.loads(estop_request_json("ground station STOP")) == {
+        "reason": "ground station STOP"}

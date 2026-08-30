@@ -8,8 +8,10 @@ import sys
 import roslibpy
 from PySide6.QtCore import QObject, Signal
 
-from ground_station.models import (drive_command_json, map_command_json, parse_drive_status,
-                                    parse_map_status, pose_readout_from_odometry)
+from ground_station.models import (drive_command_json, estop_request_json,
+                                    map_command_json, mode_request_json,
+                                    parse_drive_status, parse_map_status,
+                                    parse_mode_status, pose_readout_from_odometry)
 
 # /localization/pose is published at the ZED wrapper's ~30 Hz and is wanted
 # here for one header readout. rosbridge's own throttle_rate (milliseconds)
@@ -26,6 +28,7 @@ class RosSignals(QObject):
     localization_pose_received = Signal(dict)
     map_status_received = Signal(object)
     drive_status_received = Signal(object)
+    mode_status_received = Signal(object)
 
 
 def _localization_status_failure(detail: str) -> dict:
@@ -53,6 +56,9 @@ class RosBridgeClient:
         self._map_command_topic = None
         self._drive_status_topic = None
         self._drive_command_topic = None
+        self._mode_status_topic = None
+        self._mode_request_topic = None
+        self._estop_request_topic = None
 
     def connect(self) -> None:
         self._ros.on_ready(lambda: self.signals.connection_changed.emit(True))
@@ -227,3 +233,45 @@ class RosBridgeClient:
                 self._ros, topic_name, "std_msgs/String")
         self._drive_command_topic.publish(self._message_factory(
             {"data": drive_command_json(action)}))
+
+    def subscribe_mode_status(self, topic_name: str = "/mode_status") -> None:
+        """The supervisor's account of itself: which mode owns /rover_twist,
+        whether the deadman has fired, whether the e-stop is latched, and
+        why. JSON in a std_msgs/String at 2 Hz and on every change, the same
+        convention as /drive_status - and the thing that decides whether
+        this ground station may publish /manual_twist at all."""
+        topic = self._topic_factory(self._ros, topic_name, "std_msgs/String")
+        topic.subscribe(lambda msg: self.signals.mode_status_received.emit(
+            parse_mode_status(msg.get("data", ""))))
+        self._mode_status_topic = topic
+
+    def send_mode_request(self, mode: str,
+                          topic_name: str = "/mode_request") -> None:
+        """manual / semi_auto / autonomous / estop, as the supervisor reads.
+        A request for manual is also the only thing that clears a latched
+        e-stop, which is why the DRIVE row's Manual button sends one."""
+        if not self.is_connected:
+            print("ground_station: not connected, mode request dropped", file=sys.stderr)
+            return
+        if self._mode_request_topic is None:
+            self._mode_request_topic = self._topic_factory(
+                self._ros, topic_name, "std_msgs/String")
+        self._mode_request_topic.publish(self._message_factory(
+            {"data": mode_request_json(mode)}))
+
+    def send_estop_request(self, reason: str = "ground station STOP",
+                           topic_name: str = "/estop_request") -> None:
+        """The latched, rover-local stop.
+
+        Sent in every mode, alongside the chassis stop on /drive_command,
+        because the two do different things: this one latches on the Orin
+        and survives this link dying, that one stops the wheels through the
+        primary right now. Neither replaces the other."""
+        if not self.is_connected:
+            print("ground_station: not connected, e-stop request dropped", file=sys.stderr)
+            return
+        if self._estop_request_topic is None:
+            self._estop_request_topic = self._topic_factory(
+                self._ros, topic_name, "std_msgs/String")
+        self._estop_request_topic.publish(self._message_factory(
+            {"data": estop_request_json(reason)}))

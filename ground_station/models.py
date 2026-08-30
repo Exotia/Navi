@@ -213,3 +213,111 @@ def parse_drive_status(payload: str):
 
 def drive_command_json(action: str) -> str:
     return json.dumps({"action": action})
+
+
+# The modes in which the ground station streams /manual_twist continuously.
+# In autonomous it streams nothing - only a deflected stick is published,
+# see may_publish_takeover_twist - so a stick that does move is a real
+# takeover signal rather than one message in a 20 Hz stream of zeros; in
+# estop it publishes nothing at all, because there is nothing to say.
+DRIVING_MODES = ("manual", "semi_auto")
+AUTONOMOUS_MODE = "autonomous"
+
+
+@dataclass
+class ModeState:
+    """/mode_status as the DRIVE row's mode chip shows it."""
+    mode: str
+    reason: str
+    source: str | None
+    deadman_active: bool
+    estop_latched: bool
+    localization_state: str | None
+    source_age_s: float | None
+
+
+def parse_mode_status(payload: str):
+    """A best-effort ModeState from /mode_status's JSON.
+
+    The same defensive stance as parse_drive_status: a payload that will
+    not parse, or a field of the wrong type, falls back to that field's
+    default rather than raising inside a Qt slot while someone is driving.
+    """
+    try:
+        status = json.loads(payload)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(status, dict):
+        return None
+    age = status.get("source_age_s")
+    source = status.get("source")
+    localization = status.get("localization_state")
+    return ModeState(
+        mode=str(status.get("mode", "")),
+        reason=str(status.get("reason") or ""),
+        source=source if isinstance(source, str) else None,
+        deadman_active=status.get("deadman_active") is True,
+        estop_latched=status.get("estop_latched") is True,
+        localization_state=localization if isinstance(localization, str) else None,
+        source_age_s=(age if isinstance(age, (int, float))
+                      and not isinstance(age, bool) else None))
+
+
+def may_publish_manual_twist(state) -> bool:
+    """Spec rule 5: stream /manual_twist only in manual and semi_auto.
+
+    This is the *stream* gate. In autonomous it is False, and the takeover
+    path (may_publish_takeover_twist + is_stick_deflected) is what still
+    lets a deflected stick through - rule 5's own justification is that
+    rule 1 becomes "a real signal rather than a constant stream", not that
+    rule 1 becomes unreachable.
+
+    No mode status at all means no supervisor is running on that rover -
+    an older build, or one brought up with --no-supervisor. Then this
+    returns True, because publishing is the behaviour that rover needs and
+    the stream reaches nothing that can act on it anyway; a rover that does
+    have a supervisor answers within half a second of the subscription
+    being made, so the permissive window is short.
+
+    An unknown mode name is the other way round: a supervisor exists and
+    is in a state this ground station does not know about, and the
+    supervisor is the authority on what its own modes mean. Guessing in
+    the permissive direction there is how a takeover gets faked.
+    """
+    if state is None:
+        return True
+    return state.mode in DRIVING_MODES
+
+
+def may_publish_takeover_twist(state) -> bool:
+    """Whether a *deflected* stick may still be published in this mode.
+
+    Only autonomous: that is where rule 1 lives. In estop nothing may be
+    published, and in a mode this build does not know the supervisor is
+    the authority on what its own modes mean - guessing permissively there
+    is how a takeover gets faked. With no mode status at all the stream
+    gate is already open, so this never has to decide.
+    """
+    return state is not None and state.mode == AUTONOMOUS_MODE
+
+
+def is_stick_deflected(twist) -> bool:
+    """"Above the deadzone", in the ground station's own terms.
+
+    No new threshold: gamepad_input.GamepadReader.read_twist() has already
+    run every axis through _apply_deadzone(DEADZONE = 0.1) before scaling,
+    so a centred stick is exactly (0.0, 0.0, 0.0) and the smallest
+    deflection it can report is DEADZONE * MAX_LINEAR_SPEED = 0.005 m/s
+    (0.01 rad/s) - well above the supervisor's TAKEOVER_LINEAR_MPS of
+    0.002. A non-zero component is therefore past the deadzone by
+    construction, and gamepad_input.py stays untouched.
+    """
+    return any(float(v) != 0.0 for v in twist)
+
+
+def mode_request_json(mode: str) -> str:
+    return json.dumps({"mode": mode})
+
+
+def estop_request_json(reason: str) -> str:
+    return json.dumps({"reason": reason})
