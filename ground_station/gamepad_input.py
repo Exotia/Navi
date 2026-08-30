@@ -19,8 +19,8 @@ LEFT_STICK_Y = 1
 RIGHT_STICK_X = 3
 
 DEADZONE = 0.1
-MAX_LINEAR_SPEED = 0.5  # m/s at full stick deflection
-MAX_ANGULAR_SPEED = 1.0  # rad/s at full stick deflection
+MAX_LINEAR_SPEED = 0.05  # m/s at full stick deflection - deliberately 1/10 of the 0.5 the drive train can take, for the first careful hardware sessions
+MAX_ANGULAR_SPEED = 0.1  # rad/s at full stick deflection - same 1/10 caution factor
 
 
 def _apply_deadzone(value: float, deadzone: float = DEADZONE) -> float:
