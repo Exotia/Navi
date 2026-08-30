@@ -5,14 +5,18 @@
 #      station publishes, so what the rover receives is visible here
 #   3. video_sender - waits on /video_request and streams the ZED 2i to
 #      whichever address the ground station asks for
-#   4. bema_bridge - the BEMA drive bridge, idle until the ground station drives
-#   5. localization.launch.py - the ZED 2i wrapper with positional tracking,
+#   4. mode_supervisor - the only publisher of /rover_twist: mode
+#      arbitration, the deadman, and the latched e-stop
+#   5. bema_bridge - the BEMA drive bridge, fed from /rover_twist, idle
+#      until the ground station drives
+#   6. localization.launch.py - the ZED 2i wrapper with positional tracking,
 #      plus localization_status publishing /localization/pose and
 #      /localization/status
 #
 #   ./start_navi.sh              all of them, listener in the foreground
 #   ./start_navi.sh --no-bridge  no rosbridge (one is already running)
 #   ./start_navi.sh --no-drive-bridge  no bema_bridge (rover drive is idle, or one is already running)
+#   ./start_navi.sh --no-supervisor  no mode_supervisor (nothing publishes /rover_twist, so the rover cannot be driven)
 #   ./start_navi.sh --no-video   no video_sender
 #   ./start_navi.sh --no-localization  no ZED tracking; video from the camera as a UVC device
 #   ./start_navi.sh --port 9091  serve rosbridge on a different port
@@ -35,6 +39,7 @@ WS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PORT=9090
 START_BRIDGE=1
 START_DRIVE_BRIDGE=1
+START_SUPERVISOR=1
 START_VIDEO=1
 START_LOCALIZATION=1
 CLEAN_STALE=1
@@ -43,6 +48,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --no-bridge) START_BRIDGE=0; shift ;;
         --no-drive-bridge) START_DRIVE_BRIDGE=0; shift ;;
+        --no-supervisor) START_SUPERVISOR=0; shift ;;
         --no-video) START_VIDEO=0; shift ;;
         --no-localization) START_LOCALIZATION=0; shift ;;
         --keep-stale) CLEAN_STALE=0; shift ;;
@@ -240,7 +246,8 @@ fi
 
 if [ "$CLEAN_STALE" -eq 1 ]; then
     kill_stale "navi_teleop nodes" "navi_teleop/(manual_twist_listener|video_sender|bema_bridge)"
-    kill_stale "ros2 run wrappers" "ros2 run navi_teleop"
+    kill_stale "navi_supervisor nodes" "navi_supervisor/mode_supervisor"
+    kill_stale "ros2 run wrappers" "ros2 run navi_(teleop|supervisor)"
     # The pipeline video_sender spawns. Matched on the elements it always
     # contains, so an unrelated gst-launch on this machine is left alone.
     kill_stale "video pipelines" "gst-launch-1\.0.*v4l2src.*udpsink"
@@ -359,9 +366,19 @@ if [ "$START_VIDEO" -eq 1 ]; then
     BACKGROUND_PIDS+=("$!")
 fi
 
+if [ "$START_SUPERVISOR" -eq 1 ]; then
+    # Before the bridge: the bridge's source must have a publisher by the
+    # time it subscribes, and this is the node that owns the e-stop.
+    echo "starting mode_supervisor (sole publisher of /rover_twist)"
+    ros2 run navi_supervisor mode_supervisor &
+    BACKGROUND_PIDS+=("$!")
+fi
+
 if [ "$START_DRIVE_BRIDGE" -eq 1 ]; then
-    echo "starting bema_bridge (idle until the ground station drives)"
-    ros2 run navi_teleop bema_bridge &
+    # twist_topic is already the default; it is passed here as well so the
+    # wiring can be read at the launch site rather than only in the node.
+    echo "starting bema_bridge on /rover_twist (idle until the ground station drives)"
+    ros2 run navi_teleop bema_bridge --ros-args -p twist_topic:=/rover_twist &
     BACKGROUND_PIDS+=("$!")
 fi
 

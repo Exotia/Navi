@@ -3,8 +3,9 @@
 <package format="3">
   <name>navi_teleop</name>
   <version>0.1.0</version>
-  <description>Teleoperation bridge nodes for the Asterope rover: consumes the
-  ground station's manual /manual_twist stream.</description>
+  <description>Teleoperation bridge nodes for the Asterope rover: the drive
+  bridge consumes /rover_twist from navi_supervisor, and the video and
+  listener nodes serve the ground station.</description>
   <maintainer email="oxe.pxs@gmail.com">star</maintainer>
   <license>MIT</license>
 

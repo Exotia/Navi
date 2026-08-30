@@ -1,10 +1,21 @@
-"""The rover-side node that turns /manual_twist into real wheel commands.
+"""The rover-side node that turns /rover_twist into real wheel commands.
 
 It owns the timers; bema_session owns the protocol. A twist is forwarded
 to the primary's IK at 20 Hz; if the stream stops for deadman_s the wheels
 are zeroed and stopped, and kept stopped until a fresh twist arrives.
 /drive_command (JSON) drives the coordinator/BEMA buttons the ground
 station shows; /drive_status (JSON, 1 Hz) reports what is happening.
+
+The source is /rover_twist, which mode_supervisor is the only publisher
+of - never /manual_twist directly, or the operator's stream would reach
+the wheels around the arbitration and the e-stop. `twist_topic` can point
+this elsewhere for a bench test; the default is the safe wiring, and
+start_navi.sh passes it explicitly anyway so the wiring can be read at the
+launch site.
+
+This node's own 1 s deadman is kept even though the supervisor has one:
+two in series is deliberate - the supervisor's protects against Nav2
+hanging, this one against the whole Orin-side graph dying.
 
 Nothing here calls init() or startManual() on its own - the rover only
 moves after the operator presses a button.
@@ -40,7 +51,7 @@ class BemaBridge(Node):
         self.declare_parameter("bema_port", 21022)
         self.declare_parameter("coordinator_port", 21031)
         self.declare_parameter("deadman_s", 1.0)
-        self.declare_parameter("twist_topic", "/manual_twist")
+        self.declare_parameter("twist_topic", "/rover_twist")
 
         self._deadman_s = float(self.get_parameter("deadman_s").value)
         self._twist = (0.0, 0.0, 0.0)

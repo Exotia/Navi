@@ -173,6 +173,16 @@ def test_status_tick_survives_an_odd_f9_value(bridge):
     assert isinstance(status["coordinator_state"], str)
 
 
+def test_the_bridge_defaults_to_rover_twist_not_manual_twist(bridge):
+    # The default is what matters: a bridge started by hand must not be
+    # drivable around the supervisor's arbitration and e-stop.
+    node, server, clock = bridge
+    assert node.get_parameter("twist_topic").value == "/rover_twist"
+    subscribed = {s.topic_name for s in node.subscriptions}
+    assert "/rover_twist" in subscribed
+    assert "/manual_twist" not in subscribed
+
+
 def _string(payload):
     m = String()
     m.data = json.dumps(payload)
