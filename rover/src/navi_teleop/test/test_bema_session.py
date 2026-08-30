@@ -170,3 +170,43 @@ def test_f9_non_int_state_is_stringified(server):
     server.state = [1, 2, 3]       # F9 returning something other than an int
     sess.tick(clock.t)             # forces the first heartbeat -> F9 call
     assert isinstance(sess.status()["coordinator_state"], str)
+
+
+def test_manual_state_makes_the_session_enable_movement(server):
+    # The coordinator cannot push setMovementEnabled itself while this
+    # session holds the exclusive lease (its polite request is refused), so
+    # on seeing Manual the session must send F7 true - once, not per tick.
+    clock = Clock()
+    sess = _session(server, clock)
+    server.set_state(3)                      # Manual
+    server.calls.clear()
+    sess.tick(clock.t)                       # heartbeat reads state 3
+    clock.t = 1.1
+    sess.tick(clock.t)                       # next heartbeat, still Manual
+    f7 = [(m, a) for tag, m, a in server.calls if tag == "bema" and m == "F7"]
+    assert f7 == [("F7", [True])]
+    assert server.movement_enabled is True
+
+
+def test_movement_enable_not_sent_while_idle(server):
+    clock = Clock()
+    sess = _session(server, clock)
+    server.set_state(1)                      # Idle
+    server.calls.clear()
+    sess.tick(clock.t)
+    assert not [m for tag, m, a in server.calls if m == "F7"]
+
+
+def test_movement_enable_resent_after_lease_reacquired(server):
+    clock = Clock()
+    sess = _session(server, clock)
+    server.set_state(3)
+    sess.tick(clock.t)                       # F7 goes out once
+    server.lease_held = False                # coordinator force-took the lease
+    server.calls.clear()
+    clock.t = 0.6
+    sess.tick(clock.t)                       # ping false -> re-request -> re-enable
+    clock.t = 1.2
+    sess.tick(clock.t)
+    f7 = [(m, a) for tag, m, a in server.calls if m == "F7"]
+    assert f7 == [("F7", [True])]

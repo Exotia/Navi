@@ -29,6 +29,7 @@ class BemaSession:
         self._last_hb = None
         self._last_error = None
         self._coord_state = None
+        self._movement_sent = False
         self._down_since = None
         self._backoff_index = 0
         self._retry_at = None
@@ -62,6 +63,7 @@ class BemaSession:
     def _mark_down(self, exc):
         self._last_error = str(exc)
         self._lease = False
+        self._movement_sent = False
         if self._down_since is None:
             self._down_since = self._clock()
         delay = _BACKOFF[min(self._backoff_index, len(_BACKOFF) - 1)]
@@ -84,6 +86,9 @@ class BemaSession:
             if self._last_ping is None or now - self._last_ping >= PING_INTERVAL_S:
                 if not self._bema.call("__sam__ping"):
                     self._lease = bool(self._bema.call("__sam__request"))
+                    # A lost lease usually means the coordinator force-took
+                    # it to disable movement; re-enable once it is ours again.
+                    self._movement_sent = False
                 self._last_ping = now
             if self._last_hb is None or now - self._last_hb >= HEARTBEAT_INTERVAL_S:
                 self._coord.call("F10")               # notifyConnected
@@ -99,6 +104,20 @@ class BemaSession:
                 else:
                     self._coord_state = str(state)
                 self._last_hb = now
+            # BemaServer::drive() is gated on m_movementEnabled, which only
+            # the coordinator's movementUpdateLoop would set - and its polite
+            # lease request (ServerAccessManager::request) is refused for as
+            # long as this session holds the exclusive lease, so its
+            # setMovementEnabled(true) can never land. Send it ourselves,
+            # once per Manual entry: we hold the lease, so F7 passes
+            # checkAccess. Disabling stays the coordinator's job - its
+            # forceCapability path still wins whenever the state machine
+            # leaves Manual.
+            if self._coord_state != 3:                   # 3 = Manual
+                self._movement_sent = False
+            elif self._lease and not self._movement_sent:
+                self._bema.call("F7", True)
+                self._movement_sent = True
             vx, vy, w = self._command
             self._bema.call("F1", vx, vy, w)
         except (RpcError, RpcTimeout, RpcDisconnected, OSError) as exc:
