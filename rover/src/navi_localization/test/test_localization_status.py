@@ -136,3 +136,51 @@ def test_the_magnetometer_is_never_subscribed(node):
     topics = [s.topic_name for s in node.subscriptions]
     assert not any("mag" in t for t in topics)
     assert "/zed_front/zed_node/pose" in topics
+
+
+def test_the_wrappers_odom_is_republished_at_base_footprint(node):
+    from nav_msgs.msg import Odometry
+
+    node._odom_local_publisher = Recorder()
+    msg = Odometry()
+    msg.header.frame_id = "odom"
+    msg.header.stamp.sec = 7
+    msg.child_frame_id = "zed_front_camera_link"
+    msg.pose.pose.position.x = 0.345
+    msg.pose.pose.position.z = 0.548
+    msg.pose.pose.orientation.w = 1.0
+    msg.twist.twist.angular.z = 1.0
+
+    node._on_odom(msg)
+
+    assert len(node._odom_local_publisher.messages) == 1
+    out = node._odom_local_publisher.messages[0]
+    assert out.header.frame_id == "odom"
+    assert out.child_frame_id == "base_footprint"
+    assert out.header.stamp.sec == 7
+    assert out.pose.pose.position.x == pytest.approx(0.0, abs=1e-9)
+    assert out.twist.twist.linear.y == pytest.approx(-0.345)
+
+
+def test_odom_local_is_not_gated_by_the_tracker(node):
+    # odom is the continuous frame Nav2 reads for velocity feedback. Holding
+    # it back while the map pose is SEARCHING would tell the controller the
+    # rover had stopped when it has not.
+    from nav_msgs.msg import Odometry
+
+    node._odom_local_publisher = Recorder()
+    node._on_status(status(False))
+    msg = Odometry()
+    msg.pose.pose.orientation.w = 1.0
+    msg.twist.twist.linear.x = 0.3
+
+    node._on_odom(msg)
+
+    assert len(node._odom_local_publisher.messages) == 1
+    assert node._odom_local_publisher.messages[-1].twist.twist.linear.x == pytest.approx(0.3)
+
+
+def test_the_odom_subscription_is_the_wrappers_and_not_the_magnetometers(node):
+    topics = [s.topic_name for s in node.subscriptions]
+    assert "/zed_front/zed_node/odom" in topics
+    assert not any("mag" in t for t in topics)
