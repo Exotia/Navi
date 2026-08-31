@@ -5,36 +5,45 @@ from ground_station.ui.node_list_widget import NodeListWidget
 from ground_station.ui.dashboard_page import DashboardPage
 
 
-def test_drive_card_shows_dash_before_any_data(qtbot):
+def test_drive_card_starts_stopped_with_no_data(qtbot):
+    # The card is the steering picture now; the vx/vy/wz readouts moved
+    # behind "numbers →" (DriveDetailPage), where a value you read digit by
+    # digit belongs.
     card = DriveCard()
     qtbot.addWidget(card)
-    assert "--" in card.vx_label.text()
+    assert not card.wheel_view.moving
+    assert not hasattr(card, "vx_label")
 
 
-def test_drive_card_updates_from_state(qtbot):
-    card = DriveCard()
-    qtbot.addWidget(card)
-    state = DriveCommandTracker()
-    state.ingest(0.42, -0.05, 0.10, now=10.0)
-
-    card.update_from(state)
-
-    assert "0.42" in card.vx_label.text()
-    assert "-0.05" in card.vy_label.text()
-    assert "0.10" in card.wz_label.text()
-
-
-def test_drive_card_mark_stale_shows_zero_hz_no_data(qtbot):
+def test_drive_card_steers_the_wheels_from_the_commanded_twist(qtbot):
     card = DriveCard()
     qtbot.addWidget(card)
     state = DriveCommandTracker()
-    state.ingest(0.42, -0.05, 0.10, now=10.0)
+    state.ingest(0.42, 0.0, 0.10, now=10.0)
+
     card.update_from(state)
+
+    assert card.wheel_view.moving
+    # A left turn: the left-hand wheels are the inner pair (see
+    # test_wheel_view) and steer hardest, so the front pair is not straight.
+    assert any(abs(a) > 0.01 for a in card.wheel_view.angles)
+
+
+def test_drive_card_mark_stale_keeps_the_geometry_but_drops_the_claim(qtbot):
+    # Stale means "no fresh command", not "the wheels straightened": the
+    # steering really is still where it was.
+    card = DriveCard()
+    qtbot.addWidget(card)
+    state = DriveCommandTracker()
+    state.ingest(0.42, 0.0, 0.10, now=10.0)
+    card.update_from(state)
+    turning = card.wheel_view.angles
 
     card.mark_stale()
 
-    assert "0 Hz" in card.rate_label.text()
-    assert "no data" in card.rate_label.text()
+    assert card.wheel_view.stale
+    assert not card.wheel_view.moving
+    assert card.wheel_view.angles == turning
 
 
 def test_drive_card_update_from_clears_stale_indication(qtbot):
@@ -43,11 +52,10 @@ def test_drive_card_update_from_clears_stale_indication(qtbot):
     card.mark_stale()
 
     state = DriveCommandTracker()
-    state.ingest(0.42, -0.05, 0.10, now=10.0)
-    state.ingest(0.42, -0.05, 0.10, now=10.1)
+    state.ingest(0.42, 0.0, 0.10, now=10.0)
     card.update_from(state)
 
-    assert "no data" not in card.rate_label.text()
+    assert not card.wheel_view.stale
 
 
 def test_drive_card_emits_details_requested_on_click(qtbot):

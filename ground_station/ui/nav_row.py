@@ -167,8 +167,10 @@ class NavRow(QWidget):
         coords.setSpacing(4)
         for w in (self.x_input, self.y_input, self.yaw_input):
             w.setMinimumWidth(0)
+            w.setMaximumWidth(120)
             coords.addWidget(w)
         coords.addWidget(self.add_button)
+        coords.addStretch()
         editor.addLayout(coords)
 
         verbs = QHBoxLayout()
@@ -176,21 +178,29 @@ class NavRow(QWidget):
         for w in (self.remove_button, self.clear_button, self.up_button,
                   self.down_button):
             verbs.addWidget(w)
+        # Left-aligned at their natural width: stretched across the bottom
+        # card these four read as a toolbar of unrelated giant buttons.
+        verbs.addStretch()
         editor.addLayout(verbs)
 
-        editor_panel = QWidget()
-        editor_panel.setLayout(editor)
-        editor_panel.setFixedWidth(300)
+        # Built here (this row owns the waypoint state) but NOT added to
+        # this row's layout: the dashboard places it in the bottom card,
+        # beside the wheels, so the map and the camera get the whole upper
+        # half of the window. Qt re-parents it on the way in.
+        self.editor_panel = QWidget()
+        self.editor_panel.setLayout(editor)
+        # Its own card once it leaves this row: sitting on the dashboard
+        # background beside the WHEELS card, an unstyled panel read as a
+        # stray group of controls rather than a card of its own.
+        self.editor_panel.setObjectName("waypointPanel")
+        self.editor_panel.setAttribute(Qt.WA_StyledBackground, True)
+        self.editor_panel.setStyleSheet(
+            f"QWidget#waypointPanel {{ {theme.card_style()} }}")
 
         map_column = QVBoxLayout()
         map_column.setSpacing(6)
         map_column.addWidget(self.map_view, stretch=1)
         map_column.addLayout(map_tools)
-
-        upper = QHBoxLayout()
-        upper.setSpacing(8)
-        upper.addLayout(map_column, stretch=1)
-        upper.addWidget(editor_panel)
 
         mission_layout = QHBoxLayout()
         mission_layout.setSpacing(8)
@@ -219,7 +229,7 @@ class NavRow(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
-        layout.addLayout(upper, stretch=1)
+        layout.addLayout(map_column, stretch=1)
         layout.addLayout(mission_layout)
         layout.addLayout(reason_layout)
 

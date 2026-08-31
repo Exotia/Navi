@@ -89,9 +89,14 @@ class WheelView(QWidget):
         # keeps its steering where it was, and so does this picture.
         self._angles = [0.0, 0.0, 0.0, 0.0]
         self._moving = False
+        # No fresh command has arrived recently. The drawn geometry is still
+        # where the steering is; only the caption stops claiming it is a
+        # live command.
+        self._stale = False
 
     def set_twist(self, vx: float, vy: float, wz: float) -> None:
         self._twist = (float(vx), float(vy), float(wz))
+        self._stale = False
         self._moving = max(abs(v) for v in self._twist) > MOVING_EPS
         if self._moving:
             angles = display_angles(*self._twist)
@@ -107,6 +112,15 @@ class WheelView(QWidget):
     @property
     def moving(self) -> bool:
         return self._moving
+
+    @property
+    def stale(self) -> bool:
+        return self._stale
+
+    def mark_stale(self) -> None:
+        self._stale = True
+        self._moving = False
+        self.update()
 
     def paintEvent(self, event) -> None:      # pragma: no cover - painting
         painter = QPainter(self)
@@ -149,7 +163,9 @@ class WheelView(QWidget):
         painter.drawPolygon(nose)
 
         vx, _vy, _wz = self._twist
-        if self._moving:
+        if self._stale:
+            wheel_colour = QColor(theme.OFF)
+        elif self._moving:
             wheel_colour = QColor(theme.ACCENT if vx >= 0 else theme.BAD)
         else:
             wheel_colour = QColor(theme.OFF)
@@ -181,6 +197,9 @@ class WheelView(QWidget):
         if not IK_AVAILABLE:
             painter.drawText(QRectF(0, h - 16, w, 14), Qt.AlignCenter,
                              "steering model unavailable")
+        elif self._stale:
+            painter.drawText(QRectF(0, h - 16, w, 14), Qt.AlignCenter,
+                             "no command")
         elif self._moving:
             # The front pair, left then right as they appear on screen.
             painter.drawText(

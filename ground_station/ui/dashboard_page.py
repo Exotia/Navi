@@ -12,6 +12,10 @@ from ground_station.ui.video_panel import VideoPanel
 
 
 class DashboardPage(QWidget):
+    #: The bottom card row - waypoint editor and wheels - is a fixed slice,
+    #: so every pixel the window gains goes to the camera and the plan grid.
+    BOTTOM_CARD_HEIGHT = 190
+
     drive_details_requested = Signal()
     # Emits "manual", "semi_auto", "autonomous" or "simulation". The switch
     # selects a view source and nothing else - the twist keeps reaching the
@@ -83,23 +87,43 @@ class DashboardPage(QWidget):
         mode_row.addStretch()
         self.manual_radio.setChecked(True)
 
-        # Video goes above the drive card in its own column, so the drive
-        # readouts stay visible alongside the camera while driving. An 8px
-        # gap between cards, consistent with the card design across the
-        # dashboard.
+        # The stage: the camera and the plan grid SIDE BY SIDE, sharing the
+        # whole upper half. Stacked, each got half the height and the
+        # operator watched the one that mattered through a letterbox; side
+        # by side both are full height, and a hidden nav row gives the
+        # camera the entire width in the other views.
+        stage = QHBoxLayout()
+        stage.setSpacing(8)
+        stage.addWidget(self.video_panel, stretch=1)
+        stage.addWidget(self.nav_row, stretch=1)
+
+        # The bottom card carries the waypoint editor (built by the NAV row,
+        # placed here) beside the wheels: list-editing is a before-the-run
+        # job, so it belongs under the stage rather than eating into it.
+        self.waypoint_panel = self.nav_row.editor_panel
+        self.waypoint_panel.setVisible(False)
+        # Capped, and deliberately: the point of moving the editor down here
+        # was to give the stage the height, which a list that grows to fill
+        # the window would hand straight back.
+        self.waypoint_panel.setMaximumHeight(self.BOTTOM_CARD_HEIGHT)
+        self.drive_card.setMaximumHeight(self.BOTTOM_CARD_HEIGHT)
+        # A box, not a banner: with the waypoint editor hidden (every view
+        # but autonomy) an unbounded card stretched the wheels across the
+        # whole window with the diagram marooned in the middle.
+        self.drive_card.setMaximumWidth(260)
+        bottom = QHBoxLayout()
+        bottom.setSpacing(8)
+        bottom.addWidget(self.waypoint_panel, stretch=1)
+        bottom.addStretch()
+        bottom.addWidget(self.drive_card)
+
         left = QVBoxLayout()
         left.setSpacing(8)
         left.addLayout(mode_row)
-        left.addWidget(self.video_panel, stretch=3)
-        # The NAV row takes a share rather than its bare minimum: in the
-        # autonomy view the plan map is what the operator watches, and at
-        # no stretch it was squeezed to its 320 px floor under a camera
-        # that had three times the room. Hidden widgets contribute no
-        # stretch, so every other view still gives the camera everything.
-        left.addWidget(self.nav_row, stretch=4)
+        left.addLayout(stage, stretch=1)
         left.addWidget(self.map_row)
         left.addWidget(self.drive_row)
-        left.addWidget(self.drive_card, stretch=1)
+        left.addLayout(bottom)
 
         layout = QHBoxLayout(self)
         layout.setSpacing(8)

@@ -128,7 +128,15 @@ class MainWindow(QMainWindow):
             f"QPushButton:hover {{ background-color: #f0985c; }} "
             f"QPushButton:pressed {{ background-color: #cf7333; }}"
         )
-        self.connection_label = QLabel("ROSBRIDGE: DISCONNECTED")
+        # "LINK OK" / "LINK DOWN", not "ROSBRIDGE: CONNECTED": the long
+        # form cost 200 px of a header that also carries rover mode,
+        # localisation, the clock and STOP - and the header's fixed contents
+        # were overflowing 1600 px, clipping the wordmark mid-word. What
+        # the link IS lives in the tooltip; what matters at a glance is
+        # whether it is up.
+        self.connection_label = QLabel("LINK DOWN")
+        self.connection_label.setToolTip(
+            "The rosbridge websocket to the rover.")
         self.connection_label.setStyleSheet(self._header_pill_style(False))
 
         # The rover's OWN mode, in the header rather than buried in the DRIVE
@@ -209,6 +217,17 @@ class MainWindow(QMainWindow):
         # The node list is a drawer, not a permanent column: it is a
         # diagnostic read a few times a session, and as a fixed 240 px
         # column it took width from the map and the camera in every view.
+        # Host/port/Connect are touched once a session, and they were
+        # holding ~290 px of a header that has rover state to show. They
+        # collapse behind this, and manage themselves: open while the link
+        # is down (which is exactly when you need them), closed once it is
+        # up. The button stays, so a reconnect elsewhere is one click away.
+        self.link_button = QPushButton("Link ▸")
+        self.link_button.setCheckable(True)
+        self.link_button.setChecked(True)
+        self.link_button.setToolTip("Show or hide the rosbridge host and port.")
+        self.link_button.toggled.connect(self._on_link_toggled)
+
         self.nodes_button = QPushButton("Nodes ▸")
         self.nodes_button.setCheckable(True)
         self.nodes_button.setToolTip("Show or hide the system-node list.")
@@ -231,9 +250,15 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.mission_timer)
         header_layout.addSpacing(14)
         header_layout.addWidget(self.connection_label)
-        header_layout.addWidget(self.host_input)
-        header_layout.addWidget(self.port_input)
-        header_layout.addWidget(self.connect_button)
+        self.link_panel = QWidget()
+        link_layout = QHBoxLayout(self.link_panel)
+        link_layout.setContentsMargins(0, 0, 0, 0)
+        link_layout.setSpacing(6)
+        link_layout.addWidget(self.host_input)
+        link_layout.addWidget(self.port_input)
+        link_layout.addWidget(self.connect_button)
+        header_layout.addWidget(self.link_panel)
+        header_layout.addWidget(self.link_button)
         header_layout.addWidget(self.nodes_button)
         header_layout.addSpacing(16)
         header_layout.addWidget(self.stop_button)
@@ -451,7 +476,9 @@ class MainWindow(QMainWindow):
         self.dashboard_page.node_list.update_from(self.node_registry.snapshot())
 
     def _on_connection_changed(self, connected: bool) -> None:
-        text = "ROSBRIDGE: CONNECTED" if connected else "ROSBRIDGE: DISCONNECTED"
+        text = "LINK OK" if connected else "LINK DOWN"
+        # Out of the way once the link is up; back the moment it drops.
+        self.link_button.setChecked(not connected)
         self.connection_label.setText(text)
         self.connection_label.setStyleSheet(self._header_pill_style(connected))
         if not connected:
@@ -663,7 +690,7 @@ class MainWindow(QMainWindow):
             coords = (f"x {pose['x']:.2f}  y {pose['y']:.2f}  "
                       f"{math.degrees(pose['yaw']):.0f}°")
             text = f"LOC: {state}  {coords}" if state else f"LOC: {coords}"
-        self.localization_label.setText(text)
+        self._set_elided(self.localization_label, text, 260)
 
         if state == "OK":
             self.localization_label.setStyleSheet(theme.pill_style(theme.OK, "#0c1a0e"))
@@ -706,6 +733,21 @@ class MainWindow(QMainWindow):
         self.dashboard_page.drive_row.set_mode_state(state)
         self.dashboard_page.nav_row.set_mode_state(state)
 
+    @staticmethod
+    def _set_elided(label, text: str, max_px: int) -> None:
+        """Header chips carry rover text of unknown length (a mode reason, a
+        pose). Left to grow they squeezed the wordmark and each other until
+        Qt clipped them mid-word - "ASTEROPE GROUND S", "ROSBRIDGE: CONNECTEI".
+        Bounded and elided instead, with the full text in the tooltip."""
+        label.setMaximumWidth(max_px)
+        metrics = label.fontMetrics()
+        label.setText(metrics.elidedText(str(text), Qt.ElideRight, max_px - 20))
+        label.setToolTip(str(text))
+
+    def _on_link_toggled(self, shown: bool) -> None:
+        self.link_panel.setVisible(shown)
+        self.link_button.setText("Link ▾" if shown else "Link ▸")
+
     def _on_nodes_toggled(self, shown: bool) -> None:
         self.dashboard_page.node_list.setVisible(shown)
         self.nodes_button.setText("Nodes ▾" if shown else "Nodes ▸")
@@ -731,7 +773,7 @@ class MainWindow(QMainWindow):
         # "mode request" is just an echo of their own last press.
         if reason and reason not in ("mode request", "startup"):
             text = f"{text} - {reason}"
-        self.rover_mode_pill.setText(str(text))
+        self._set_elided(self.rover_mode_pill, text, 300)
         self.rover_mode_pill.setStyleSheet(theme.pill_style(bg, fg))
 
     def _on_autonomous_requested(self) -> None:
@@ -821,6 +863,10 @@ class MainWindow(QMainWindow):
         self._mode = mode
         self.dashboard_page.map_row.setVisible(mode == "semi_auto")
         self.dashboard_page.nav_row.setVisible(mode == "autonomous")
+        # The waypoint editor lives in the bottom card (see DashboardPage),
+        # so it is no longer hidden by the nav row's own visibility and has
+        # to be switched with it.
+        self.dashboard_page.waypoint_panel.setVisible(mode == "autonomous")
         # The drive row is not mode-gated - see the setVisible(True) call in
         # __init__: the gamepad drives in every mode, so STOP and the
         # deadman/lease line must stay visible in every mode too.

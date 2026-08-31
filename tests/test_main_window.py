@@ -165,28 +165,28 @@ def test_twist_message_updates_drive_card(qtbot):
     msg = {"linear": {"x": 0.4, "y": 0.0, "z": 0.0}, "angular": {"x": 0.0, "y": 0.0, "z": 0.1}}
     window._on_twist(msg)
 
-    assert "0.40" in window.dashboard_page.drive_card.vx_label.text()
+    assert "0.40" in window.drive_detail_page.vx_label.text()
 
 
 def test_connection_changed_updates_label(qtbot):
     window, _ = make_window(qtbot, initial_host=None)
 
-    assert window.connection_label.text() == "ROSBRIDGE: DISCONNECTED"
+    assert window.connection_label.text() == "LINK DOWN"
 
     window._connect_to("localhost", 9090)
 
-    assert window.connection_label.text() == "ROSBRIDGE: CONNECTED"
+    assert window.connection_label.text() == "LINK OK"
 
 
 def test_mid_session_disconnect_updates_label_back_to_disconnected(qtbot):
     window, client = make_window(qtbot)
     client.connect()
-    assert window.connection_label.text() == "ROSBRIDGE: CONNECTED"
+    assert window.connection_label.text() == "LINK OK"
 
     ros = FakeRos.instances[-1]
     ros.trigger_event("close", None)
 
-    assert window.connection_label.text() == "ROSBRIDGE: DISCONNECTED"
+    assert window.connection_label.text() == "LINK DOWN"
 
 
 def test_check_staleness_marks_drive_displays_stale_after_threshold(qtbot):
@@ -200,8 +200,8 @@ def test_check_staleness_marks_drive_displays_stale_after_threshold(qtbot):
 
     window._check_staleness()
 
-    assert "0 Hz" in window.dashboard_page.drive_card.rate_label.text()
-    assert "no data" in window.dashboard_page.drive_card.rate_label.text()
+    assert "0 Hz" in window.drive_detail_page.link_label.text()
+    assert "no data" in window.drive_detail_page.link_label.text()
     assert "no data" in window.drive_detail_page.link_label.text()
 
 
@@ -216,7 +216,7 @@ def test_check_staleness_does_not_mark_fresh_data_stale(qtbot):
 
     window._check_staleness()
 
-    assert "no data" not in window.dashboard_page.drive_card.rate_label.text()
+    assert "no data" not in window.drive_detail_page.link_label.text()
     assert "no data" not in window.drive_detail_page.link_label.text()
 
 
@@ -225,12 +225,12 @@ def test_new_twist_after_stale_clears_stale_indication(qtbot):
     window.stale_after_seconds = 1.0
     window.drive_state.ingest(0.4, 0.0, 0.1, now=0.0)
     window._check_staleness()
-    assert "no data" in window.dashboard_page.drive_card.rate_label.text()
+    assert "no data" in window.drive_detail_page.link_label.text()
 
     msg = {"linear": {"x": 0.4, "y": 0.0, "z": 0.0}, "angular": {"x": 0.0, "y": 0.0, "z": 0.1}}
     window._on_twist(msg)
 
-    assert "no data" not in window.dashboard_page.drive_card.rate_label.text()
+    assert "no data" not in window.drive_detail_page.link_label.text()
     assert "no data" not in window.drive_detail_page.link_label.text()
 
 
@@ -254,7 +254,7 @@ def test_no_initial_host_leaves_ros_client_unset(qtbot):
     assert client is None
     assert window.ros_client is None
     assert window.host_input.text() == ""
-    assert window.connection_label.text() == "ROSBRIDGE: DISCONNECTED"
+    assert window.connection_label.text() == "LINK DOWN"
 
 
 def test_initial_host_prefills_but_does_not_auto_connect(qtbot):
@@ -279,7 +279,7 @@ def test_connect_button_with_typed_host_connects(qtbot):
     window._on_connect_clicked()
 
     assert window.ros_client is not None
-    assert window.connection_label.text() == "ROSBRIDGE: CONNECTED"
+    assert window.connection_label.text() == "LINK OK"
 
 
 def test_connect_button_with_blank_host_does_nothing(qtbot):
@@ -321,7 +321,7 @@ def test_gamepad_publishes_manual_twist_when_gamepad_and_rosbridge_both_present(
     }]
     # the local display path is independent of the connection, but should
     # of course also reflect the same reading
-    assert "0.40" in window.dashboard_page.drive_card.vx_label.text()
+    assert "0.40" in window.drive_detail_page.vx_label.text()
 
 
 def test_gamepad_disconnected_does_not_publish(qtbot):
@@ -344,8 +344,8 @@ def test_gamepad_updates_local_display_even_without_a_rosbridge_connection(qtbot
 
     window._poll_gamepad()
 
-    assert "0.40" in window.dashboard_page.drive_card.vx_label.text()
-    assert "0.20" in window.dashboard_page.drive_card.wz_label.text()
+    assert "0.40" in window.drive_detail_page.vx_label.text()
+    assert "0.20" in window.drive_detail_page.wz_label.text()
     # no rosbridge connection at all yet, so nothing to publish on
     assert FakeTopic.instances == []
 
@@ -366,7 +366,7 @@ def test_gamepad_disconnect_sends_one_zero_velocity_stop_then_stays_quiet(qtbot)
         "linear": {"x": 0.0, "y": 0.0, "z": 0.0},
         "angular": {"x": 0.0, "y": 0.0, "z": 0.0},
     }
-    assert "0.00" in window.dashboard_page.drive_card.vx_label.text()
+    assert "0.00" in window.drive_detail_page.vx_label.text()
 
     # still disconnected on a later poll - must not publish (or re-display) again
     window._poll_gamepad()
@@ -1046,7 +1046,7 @@ def test_a_deflected_stick_is_published_in_autonomous_mode(qtbot):
     topic = next(t for t in FakeTopic.instances if t.name == "/manual_twist")
     assert len(topic.published_messages) == 1
     # the local display still shows what the sticks are doing
-    assert "0.04" in window.dashboard_page.drive_card.vx_label.text()
+    assert "0.04" in window.drive_detail_page.vx_label.text()
 
 
 def test_manual_twist_is_not_published_while_estopped(qtbot):
@@ -1301,6 +1301,9 @@ def test_the_header_names_the_rovers_own_mode_and_why(qtbot):
     assert window.rover_mode_pill.text() == "AUTONOMOUS"
     _mode_status(window, "manual", reason="localisation SEARCHING")
     assert window.rover_mode_pill.text() == "MANUAL - localisation SEARCHING"
+    # Long text is elided, never clipped mid-word by the layout, and the
+    # tooltip always carries the whole of it.
+    assert window.rover_mode_pill.toolTip() == "MANUAL - localisation SEARCHING"
     # The operator's own last press is not an explanation worth the space.
     _mode_status(window, "manual", reason="mode request")
     assert window.rover_mode_pill.text() == "MANUAL"
@@ -1353,3 +1356,17 @@ def test_the_header_carries_the_team_mark_and_a_mission_clock(qtbot):
     assert window.logo.toolTip() == "STAR Dresden e.V."
     assert window.mission_timer.time_label.text() == "00:00"
     assert not window.mission_timer.running
+
+
+def test_the_link_controls_get_out_of_the_way_once_the_link_is_up(qtbot):
+    # Host/port/Connect are a once-a-session job holding header width that
+    # rover state needs. They show themselves exactly when they are needed.
+    window, _ = make_window(qtbot, initial_host=None)
+    assert window.link_panel.isVisibleTo(window)      # nothing connected yet
+    window._connect_to("localhost", 9090)
+    assert not window.link_panel.isVisibleTo(window)
+    assert window.connection_label.text() == "LINK OK"
+
+    ros = FakeRos.instances[-1]
+    ros.trigger_event("close", None)
+    assert window.link_panel.isVisibleTo(window)      # back the moment it drops
