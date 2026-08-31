@@ -1,7 +1,7 @@
 import math
 import socket
 import sys
-from time import monotonic
+from time import monotonic, time
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -11,7 +11,7 @@ from ground_station import theme
 from ground_station.gamepad_input import GamepadReader
 from ground_station.models import (DriveCommandTracker, NodeRegistry,
                                    is_stick_deflected, may_publish_manual_twist,
-                                   may_publish_takeover_twist)
+                                   may_publish_takeover_twist, new_run_id)
 from ground_station.ros_client import RosBridgeClient
 from ground_station.ui.dashboard_page import DashboardPage
 from ground_station.ui.drive_detail_page import DriveDetailPage
@@ -87,6 +87,16 @@ class MainWindow(QMainWindow):
         # /manual_twist stream into an autonomous run the moment the link
         # hiccuped - which rule 1 would then read as a takeover.
         self._mode_state = None
+        # monotonic() when the last /nav_status arrived, or None if none has
+        # (or it has gone stale) - mirrors _localization_status_at for the
+        # same reason.
+        self._nav_status_at: float | None = None
+        # The run id the rover last reported on /nav_status, or the one we
+        # minted for our own last Go - whichever is freshest. pause/resume/
+        # abort act on this, not on a value the ground station invented
+        # unilaterally, so a reconnect mid-run still targets the run that is
+        # actually happening.
+        self._nav_run_id: str | None = None
 
         # Global button style, applied at the MainWindow level so every
         # QPushButton in the app (including ones on child widgets) gets the
@@ -176,6 +186,14 @@ class MainWindow(QMainWindow):
             lambda: self._send_drive_command("reset_odometry"))
         drive_row.drive_mode_requested.connect(lambda: self._send_drive_command("drive_mode"))
         drive_row.drive_state_requested.connect(lambda: self._send_drive_command("drive_state"))
+
+        nav_row = self.dashboard_page.nav_row
+        nav_row.autonomous_requested.connect(self._on_autonomous_requested)
+        nav_row.go_requested.connect(self._on_go_requested)
+        nav_row.pause_requested.connect(lambda: self._send_nav_request("pause"))
+        nav_row.resume_requested.connect(lambda: self._send_nav_request("resume"))
+        nav_row.abort_requested.connect(lambda: self._send_nav_request("abort"))
+
         # The gamepad publishes /manual_twist in every mode (see
         # _poll_gamepad), so the STOP button and the deadman/lease status
         # line must be visible in every mode too - never mode-gated like the
@@ -294,6 +312,9 @@ class MainWindow(QMainWindow):
         self.ros_client.signals.map_status_received.connect(self._on_map_status)
         self.ros_client.signals.drive_status_received.connect(self._on_drive_status)
         self.ros_client.signals.mode_status_received.connect(self._on_mode_status)
+        self.ros_client.signals.nav_status_received.connect(self._on_nav_status)
+        self.ros_client.signals.nav_path_summary_received.connect(
+            self._on_nav_path_summary)
 
         try:
             # Subscribe BEFORE connecting: roslibpy's Ros.run() raises
@@ -314,6 +335,8 @@ class MainWindow(QMainWindow):
             self.ros_client.subscribe_map_status()
             self.ros_client.subscribe_drive_status()
             self.ros_client.subscribe_mode_status()
+            self.ros_client.subscribe_nav_status()
+            self.ros_client.subscribe_nav_path_summary()
             self.ros_client.connect()
         except Exception as exc:
             print(f"ground_station: failed to connect to rosbridge: {exc}", file=sys.stderr)
@@ -418,6 +441,15 @@ class MainWindow(QMainWindow):
         else:
             self.dashboard_page.drive_row.refresh(now)
 
+        # Same staleness rule, for the NAV row: a rover that has gone quiet
+        # must not leave a stale run status looking live.
+        if (self._nav_status_at is not None
+                and now - self._nav_status_at > LOCALIZATION_STATUS_STALE_AFTER_SECONDS):
+            self._nav_status_at = None
+            self.dashboard_page.nav_row.set_state(None)
+        else:
+            self.dashboard_page.nav_row.refresh(now)
+
     def local_address_for(self, host: str, port: int) -> str:
         """Our own address on the interface that reaches the rover. The
         rover cannot discover this itself - it is the server side of
@@ -518,6 +550,7 @@ class MainWindow(QMainWindow):
             f"LOC: x {pose['x']:.2f}  y {pose['y']:.2f}  "
             f"yaw {math.degrees(pose['yaw']):.1f}°")
         self.localization_label.setStyleSheet(self._header_pill_style(True))
+        self.dashboard_page.nav_row.set_pose(pose)
 
     def _send_map_command(self, action: str, name: str | None = None) -> None:
         if self.ros_client is None:
@@ -547,6 +580,43 @@ class MainWindow(QMainWindow):
             return
         self._mode_state = state
         self.dashboard_page.drive_row.set_mode_state(state)
+        self.dashboard_page.nav_row.set_mode_state(state)
+
+    def _on_autonomous_requested(self) -> None:
+        """The NAV row's Autonomous button. Only a /mode_request: the
+        supervisor is the single authority on mode, and goal_relay
+        refuses Go until it says autonomous."""
+        if self.ros_client is None:
+            return
+        self.ros_client.send_mode_request("autonomous")
+
+    def _on_go_requested(self, waypoints) -> None:
+        if self.ros_client is None:
+            return
+        self._nav_run_id = new_run_id(time())
+        self.ros_client.send_nav_request("go", waypoints, self._nav_run_id)
+
+    def _send_nav_request(self, action: str) -> None:
+        """pause / resume / abort, always against the run the rover
+        reported. A ground station that reconnected mid-run adopts the
+        rover's run id from /nav_status rather than its own, so the
+        buttons act on the run that is actually happening."""
+        if self.ros_client is None or self._nav_run_id is None:
+            return
+        self.ros_client.send_nav_request(action, run_id=self._nav_run_id)
+
+    def _on_nav_status(self, state) -> None:
+        if state is None:
+            return
+        self._nav_status_at = monotonic()
+        if state.run_id:
+            self._nav_run_id = state.run_id
+        self.dashboard_page.nav_row.set_state(state)
+
+    def _on_nav_path_summary(self, summary) -> None:
+        if summary is None:
+            return
+        self.dashboard_page.nav_row.set_path_summary(summary)
 
     def _on_stop_requested(self) -> None:
         """STOP does two different things, in this order.
@@ -591,6 +661,7 @@ class MainWindow(QMainWindow):
         previous_mode = self._mode
         self._mode = mode
         self.dashboard_page.map_row.setVisible(mode == "semi_auto")
+        self.dashboard_page.nav_row.setVisible(mode == "autonomous")
         # The drive row is not mode-gated - see the setVisible(True) call in
         # __init__: the gamepad drives in every mode, so STOP and the
         # deadman/lease line must stay visible in every mode too.
@@ -601,12 +672,19 @@ class MainWindow(QMainWindow):
             self._rover_video_before_simulation = panel.streaming
 
         if mode == "autonomous":
-            # Unreachable from the UI (the radio is disabled). Reached only
-            # if something emits the signal directly, and then the honest
-            # thing is to leave the view exactly as it is rather than
-            # half-configure a panel for a mode with nothing behind it.
-            print("ground_station: autonomous mode is not implemented",
-                  file=sys.stderr)
+            # Autonomous is a semi-autonomous view with a NAV row on top: the
+            # operator watches the Gazebo mirror with the plan drawn in it -
+            # the whole point of the map view - while the rover's own mode
+            # changes only when Autonomous is pressed on that row, not by
+            # switching this radio.
+            self._request_rover_video(False)
+            panel.set_source("simulation", SIM_VIDEO_PORT,
+                             dead_reckoning=False,
+                             reports_remote_status=False,
+                             show_localization=True)
+            panel.set_localization_status(self._localization_status)
+            if not panel.streaming:
+                panel.set_streaming(True)
             return
 
         if mode in ("simulation", "semi_auto"):

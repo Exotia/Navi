@@ -1,5 +1,7 @@
 import json
+from time import monotonic
 
+from ground_station.models import Waypoint, parse_path_summary
 from ground_station.ros_client import RosBridgeClient
 from ground_station.ui import main_window
 from ground_station.ui.main_window import MainWindow
@@ -579,18 +581,20 @@ def test_semi_auto_shows_the_simulation_without_the_dead_reckoning_marker(qtbot)
     assert _last_video_request()["enable"] is False
 
 
-def test_autonomous_changes_nothing_because_nothing_is_built(qtbot):
-    # The radio is disabled so this cannot happen from the UI. If the signal
-    # is emitted anyway (a test, a future caller), the window must not put
-    # the panel into a half-configured state - it leaves the view alone and
-    # says so on stderr.
+def test_autonomous_shows_the_nav_row_and_the_gazebo_view(qtbot):
+    # Autonomous is a semi-autonomous view with a NAV row on top: the
+    # operator watches the Gazebo mirror, placed by localisation like
+    # semi_auto, with the plan drawn in it - the rover's own mode changes
+    # only when Autonomous is pressed on the NAV row, not by this radio.
     window, _ = make_window(qtbot)
-    port_before = window.dashboard_page.video_panel.receiver.port
 
     window.dashboard_page.mode_changed.emit("autonomous")
 
     assert window._mode == "autonomous"
-    assert window.dashboard_page.video_panel.receiver.port == port_before
+    assert window.dashboard_page.nav_row.isVisibleTo(window)
+    assert window.dashboard_page.video_panel.receiver.port == 5601
+    assert window.dashboard_page.video_panel.dead_reckoning is False
+    assert _last_video_request()["enable"] is False
 
 
 def test_the_video_toggle_does_not_command_the_rover_in_simulation(qtbot, monkeypatch):
@@ -833,9 +837,10 @@ def test_drive_row_stays_visible_in_every_mode(qtbot):
     window, _ = make_window(qtbot)
     row = window.dashboard_page.drive_row
     assert row.isVisibleTo(window)
-    for mode in ("semi_auto", "manual", "simulation"):
+    for mode in ("semi_auto", "manual", "simulation", "autonomous"):
         window.dashboard_page.mode_changed.emit(mode)
         assert row.isVisibleTo(window)
+        assert row.stop_button.isEnabled()
 
 
 def test_map_status_reaches_the_row_and_goes_stale(qtbot):
@@ -969,7 +974,7 @@ def test_a_timed_out_first_connect_still_registers_every_subscription(qtbot):
     assert names == {
         "/manual_twist", "/video_status", "/localization/status",
         "/localization/pose", "/localization/map_status", "/drive_status",
-        "/mode_status",
+        "/mode_status", "/nav_status", "/nav_path_summary",
     }
     client = window.ros_client
     assert client._manual_twist_topic is not None
@@ -979,6 +984,8 @@ def test_a_timed_out_first_connect_still_registers_every_subscription(qtbot):
     assert client._map_status_topic is not None
     assert client._drive_status_topic is not None
     assert client._mode_status_topic is not None
+    assert client._nav_status_topic is not None
+    assert client._nav_path_summary_topic is not None
 
 
 def _mode_status(window, mode):
@@ -1141,3 +1148,107 @@ def test_the_mode_status_reaches_the_drive_row(qtbot):
 def test_the_window_subscribes_to_mode_status_on_connect(qtbot):
     make_window(qtbot, initial_host="localhost")
     assert any(t.name == "/mode_status" for t in FakeTopic.instances)
+
+
+def connected_window(qtbot):
+    """make_window's window half. make_window returns (window, client);
+    these tests only ever need the window, and unpacking it once here
+    keeps the eight below from having to."""
+    window, _ = make_window(qtbot)
+    return window
+
+
+def published(window, topic_name):
+    """Every JSON payload published on `topic_name`, decoded, in order.
+
+    FakeTopic records the raw roslibpy message, which for every JSON topic
+    here is {"data": "<json string>"} - so a test comparing against a dict
+    has to decode. /manual_twist is NOT one of these: twists are published
+    as plain dicts, so its assertion below reads call_log directly."""
+    return [json.loads(message["data"])
+            for name, message in FakeTopic.call_log if name == topic_name]
+
+
+def _nav_status(window, **fields):
+    from ground_station.models import parse_nav_status
+    window.ros_client.signals.nav_status_received.emit(
+        parse_nav_status(json.dumps({"state": "idle", **fields})))
+
+
+def test_the_nav_row_is_shown_only_in_autonomous_mode(qtbot):
+    # isVisibleTo(window), not isVisible(): a widget added with
+    # qtbot.addWidget is never shown, so isVisible() is False in every
+    # branch and the test would pass without asserting anything. This is
+    # the form test_semi_auto_mode_shows_the_map_row already uses.
+    window, _ = make_window(qtbot)
+    assert not window.dashboard_page.nav_row.isVisibleTo(window)
+    window.dashboard_page.mode_changed.emit("autonomous")
+    assert window.dashboard_page.nav_row.isVisibleTo(window)
+    window.dashboard_page.mode_changed.emit("manual")
+    assert not window.dashboard_page.nav_row.isVisibleTo(window)
+
+
+def test_the_autonomous_button_sends_a_mode_request(qtbot):
+    window = connected_window(qtbot)
+    window.dashboard_page.nav_row.autonomous_requested.emit()
+    assert published(window, "/mode_request")[-1] == {"mode": "autonomous"}
+
+
+def test_go_sends_the_waypoints_with_a_fresh_run_id(qtbot):
+    window = connected_window(qtbot)
+    window.dashboard_page.nav_row.go_requested.emit([Waypoint(3.0, -1.5)])
+    request = published(window, "/nav_request")[-1]
+    assert request["action"] == "go" and request["run_id"].startswith("gs-")
+    assert request["waypoints"] == [{"x": 3.0, "y": -1.5, "yaw": None}]
+
+
+def test_pause_resume_and_abort_carry_the_run_id_the_rover_reported(qtbot):
+    window = connected_window(qtbot)
+    _nav_status(window, state="running", run_id="gs-7")
+    window.dashboard_page.nav_row.pause_requested.emit()
+    assert published(window, "/nav_request")[-1] == {
+        "action": "pause", "run_id": "gs-7", "frame_id": "map", "waypoints": []}
+    window.dashboard_page.nav_row.abort_requested.emit()
+    assert published(window, "/nav_request")[-1]["action"] == "abort"
+
+
+def test_nav_status_reaches_the_row(qtbot):
+    window = connected_window(qtbot)
+    _nav_status(window, state="running", run_id="gs-7", waypoint_count=2)
+    assert window.dashboard_page.nav_row._state.state == "running"
+
+
+def test_the_path_summary_reaches_the_canvas(qtbot):
+    window = connected_window(qtbot)
+    window.ros_client.signals.nav_path_summary_received.emit(
+        parse_path_summary(json.dumps({"points": [[0.0, 0.0], [1.0, 1.0]]})))
+    assert window.dashboard_page.nav_row.map_view.path_points == [(0.0, 0.0), (1.0, 1.0)]
+
+
+def test_the_pose_reaches_the_canvas(qtbot):
+    window = connected_window(qtbot)
+    window.ros_client.signals.localization_pose_received.emit(
+        {"x": 3.0, "y": 4.0, "yaw": 0.0})
+    assert window.dashboard_page.nav_row.map_view.pose["x"] == 3.0
+
+
+def test_a_quiet_rover_blanks_the_nav_row_the_way_it_blanks_the_drive_row(qtbot):
+    window = connected_window(qtbot)
+    _nav_status(window, state="running", run_id="gs-7")
+    window._check_staleness(monotonic() + 10.0)
+    assert window.dashboard_page.nav_row._state is None
+
+
+def test_the_mode_chip_still_drives_the_publish_gate_in_autonomous(qtbot):
+    # The NAV row must not have changed the /manual_twist policy: a centred
+    # stick still publishes nothing in autonomous, a deflected one still
+    # takes over. This is the regression that would let a NAV row quietly
+    # break the takeover path.
+    window = connected_window(qtbot)
+    _mode_status(window, "autonomous")
+    window.dashboard_page.mode_changed.emit("autonomous")
+    window.gamepad_reader.set_twist((0.0, 0.0, 0.0))
+    window._poll_gamepad()
+    # Raw, not published(): /manual_twist carries a plain dict, not
+    # {"data": "<json>"}, so decoding it would raise rather than assert.
+    assert [m for n, m in FakeTopic.call_log if n == "/manual_twist"] == []

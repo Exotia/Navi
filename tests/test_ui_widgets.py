@@ -158,16 +158,20 @@ def test_dashboard_page_offers_the_four_modes(qtbot):
     assert page.manual_radio.isChecked() is True
 
 
-def test_autonomous_is_present_but_cannot_be_selected(qtbot):
-    # Present so the operator can see the fourth mode exists and is not
-    # hidden from them; disabled because nothing behind it is built. A
-    # missing button would read as "this project has three modes"; an
-    # enabled one would read as "try it".
+def test_autonomous_can_be_selected(qtbot):
+    # Autonomous is now a real mode the operator can pick: the radio is
+    # enabled, and checking it emits mode_changed("autonomous") like every
+    # other mode radio.
     page = DashboardPage()
     qtbot.addWidget(page)
 
-    assert page.autonomous_radio.isEnabled() is False
-    assert page.autonomous_radio.toolTip() == "not implemented"
+    assert page.autonomous_radio.isEnabled() is True
+
+    modes = []
+    page.mode_changed.connect(modes.append)
+    page.autonomous_radio.setChecked(True)
+
+    assert modes == ["autonomous"]
 
 
 def test_each_radio_emits_its_own_mode_name(qtbot):

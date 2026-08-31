@@ -6,6 +6,7 @@ from ground_station import theme
 from ground_station.ui.drive_card import DriveCard
 from ground_station.ui.drive_row import DriveRow
 from ground_station.ui.map_row import MapRow
+from ground_station.ui.nav_row import NavRow
 from ground_station.ui.node_list_widget import NodeListWidget
 from ground_station.ui.video_panel import VideoPanel
 
@@ -26,6 +27,8 @@ class DashboardPage(QWidget):
         self.video_panel = VideoPanel(receiver=video_receiver)
         self.map_row = MapRow()
         self.map_row.setVisible(False)
+        self.nav_row = NavRow()
+        self.nav_row.setVisible(False)
         self.drive_row = DriveRow()
         self.drive_row.setVisible(False)
 
@@ -46,11 +49,9 @@ class DashboardPage(QWidget):
             (self.autonomous_radio, "autonomous"),
             (self.simulation_radio, "simulation"),
         ]
-        # Shown, not hidden: the operator should be able to see that a fourth
-        # mode exists and is not built. Disabled and labelled, so nobody
-        # discovers that by clicking it mid-drive.
-        self.autonomous_radio.setEnabled(False)
-        self.autonomous_radio.setToolTip("not implemented")
+        self.autonomous_radio.setToolTip(
+            "Show the NAV row and the plan view. The rover's own mode "
+            "changes only when you press Autonomous on that row.")
 
         self._mode_group = QButtonGroup(self)
         mode_row = QHBoxLayout()
@@ -72,6 +73,7 @@ class DashboardPage(QWidget):
         left.setSpacing(8)
         left.addLayout(mode_row)
         left.addWidget(self.video_panel, stretch=3)
+        left.addWidget(self.nav_row)
         left.addWidget(self.map_row)
         left.addWidget(self.drive_row)
         left.addWidget(self.drive_card, stretch=1)
