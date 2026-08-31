@@ -16,23 +16,48 @@ someone is listening, the same count_subscribers guard the ZED wrapper uses
 for its fused cloud. The 0.92 MB OccupancyGrid seed is what Nav2 reads and
 always goes out, latched, so a Nav2 that starts later gets a map instantly
 instead of planning on nothing.
+
+"The wheels have been here": the rover starts on ground the camera has never
+seen, and unknown = wall (correct, per spec) means Nav2 refuses to move at
+all. The ground the rover is already sitting on at start-up is
+proof-of-traversable, so this node also subscribes to the rover's pose (the
+same source tile_aggregator uses), takes the *first* pose it sees as the
+centre of one startup patch, and clears a disc of UNKNOWN cells there on
+every published seed thereafter - never touching a measured cell, so a
+camera-seen lethal still wins, permanently, the instant it is seen.
+
+This is deliberately one fixed patch, not a disc that follows the rover
+around as it drives (a "track"). The disc is wider than the wheels that
+would supposedly prove it, so a moving disc would slowly "chip away"
+(the operator's words) at unseen ground beside a big obstacle as the rover
+drove past it - clearing ground the wheels never actually touched. One
+startup patch avoids that: it proves exactly the ground the rover was
+demonstrably on, once, at start-up. A node restart re-seeds the patch at
+wherever the rover is then, which the wheels prove again.
+
+Only the OccupancyGrid seed is touched; the GridMap layers stay exactly what
+the elevation says, because elevation data is never faked.
 """
 
 import rclpy
 from grid_map_msgs.msg import GridMap
-from nav_msgs.msg import OccupancyGrid
+from nav_msgs.msg import Odometry, OccupancyGrid
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 
 from navi_autonomy.grid_map_io import (
     ELEVATION_LAYER, build_grid_map, build_occupancy_grid, layer_from_message)
-from navi_autonomy.tile_aggregator import MAP_TOPIC, latched_qos
-from navi_autonomy.traversability import seed_from_elevation
+from navi_autonomy.tile_aggregator import MAP_TOPIC, POSE_TOPIC, latched_qos
+from navi_autonomy.traversability import clear_startup_patch, seed_from_elevation
 from navi_localization.elevation_grid import RESOLUTION
 
 TRAVERSABILITY_TOPIC = '/autonomy/traversability'
 COSTMAP_SEED_TOPIC = '/autonomy/costmap_seed'
 LAYER_ORDER = ('slope', 'step', 'roughness', 'valid')
+
+# The costmap's robot_radius (nav2_rover.yaml) is 0.80 m; the operator's
+# margin on top of it is 10 cm. 0.90 m is the startup patch's disc radius.
+STARTUP_CLEAR_RADIUS_M = 0.90
 
 
 def view_qos() -> QoSProfile:
@@ -46,14 +71,22 @@ class TraversabilityLayer(Node):
     def __init__(self):
         super().__init__('traversability_layer')
         self.declare_parameter('map_topic', MAP_TOPIC)
+        self.declare_parameter('pose_topic', POSE_TOPIC)
         self.declare_parameter('traversability_topic', TRAVERSABILITY_TOPIC)
         self.declare_parameter('costmap_seed_topic', COSTMAP_SEED_TOPIC)
         self.declare_parameter('frame_id', 'map')
+        self.declare_parameter('startup_clear_radius_m', STARTUP_CLEAR_RADIUS_M)
 
         self._frame_id = str(self.get_parameter('frame_id').value)
+        self._startup_clear_radius_m = float(
+            self.get_parameter('startup_clear_radius_m').value)
         self.maps_processed = 0
         self.rejected_maps = 0
         self._rejected_logged = False
+        # (x, y) metres of the first pose this node ever saw; None until then.
+        # Fixed for the node's lifetime - see the module docstring for why a
+        # single patch, not a disc that follows the rover around.
+        self._startup_pose = None
 
         self._traversability_topic = str(self.get_parameter('traversability_topic').value)
         self._traversability_publisher = self.create_publisher(
@@ -64,9 +97,17 @@ class TraversabilityLayer(Node):
         self.create_subscription(
             GridMap, str(self.get_parameter('map_topic').value), self._on_map,
             latched_qos())
+        self.create_subscription(
+            Odometry, str(self.get_parameter('pose_topic').value), self._on_pose, 1)
 
     def _traversability_subscribers(self) -> int:
         return self.count_subscribers(self._traversability_topic)
+
+    def _on_pose(self, message: Odometry) -> None:
+        if self._startup_pose is not None:
+            return          # the patch is fixed at the first pose, permanently
+        self._startup_pose = (float(message.pose.pose.position.x),
+                              float(message.pose.pose.position.y))
 
     def _on_map(self, message: GridMap) -> None:
         resolution = float(message.info.resolution)
@@ -90,6 +131,16 @@ class TraversabilityLayer(Node):
         origin_iy = int(round(float(message.info.pose.position.y) / resolution - n_y / 2.0))
 
         layers, cost = seed_from_elevation(elevation, resolution)
+        if self._startup_pose is not None:
+            # The stored pose is metres; the seed's cells are indexed from
+            # this tick's origin, which moves as the rolling window
+            # recentres - so the conversion is redone every tick, never
+            # cached, even though the metres it starts from never change.
+            x, y = self._startup_pose
+            centre_cell = (int(round(y / resolution)) - origin_iy,
+                          int(round(x / resolution)) - origin_ix)
+            radius_cells = int(round(self._startup_clear_radius_m / resolution))
+            clear_startup_patch(cost, centre_cell, radius_cells)
         stamp = message.header.stamp
         self._seed_publisher.publish(build_occupancy_grid(
             cost, origin_ix, origin_iy, resolution, self._frame_id, stamp))

@@ -9,9 +9,10 @@ import numpy as np
 import pytest
 import rclpy
 from builtin_interfaces.msg import Time
+from nav_msgs.msg import Odometry
 
 from navi_autonomy.grid_map_io import build_grid_map, layer_from_message
-from navi_autonomy.traversability import LETHAL, UNKNOWN
+from navi_autonomy.traversability import LETHAL, UNKNOWN, clear_startup_patch
 from navi_autonomy.traversability_layer import (
     COSTMAP_SEED_TOPIC, MAP_TOPIC, TRAVERSABILITY_TOPIC, TraversabilityLayer)
 
@@ -122,3 +123,67 @@ def test_a_map_without_an_elevation_layer_is_refused(node):
     node._on_map(message)
     assert node._seed_publisher.messages == []
     assert node.rejected_maps == 1
+
+
+# -- "the wheels have been here" (one startup patch) ------------------------
+
+def pose_at(x, y):
+    message = Odometry()
+    message.pose.pose.position.x = float(x)
+    message.pose.pose.position.y = float(y)
+    return message
+
+
+def test_a_startup_pose_clears_a_disc_of_unknown_ground_around_it(node):
+    # 50x50 so the far corner sits outside the ~18-cell disc (0.90 m / 0.05 m).
+    grid = np.full((50, 50), np.nan, dtype=np.float32)     # nothing seen anywhere
+    message = build_grid_map({'elevation': grid}, -25, -25, 0.05, 'map', Time())
+
+    node._on_pose(pose_at(0.0, 0.0))       # rover starts at the map's origin
+    node._on_map(message)
+
+    seed = node._seed_publisher.messages[0]
+    cost = np.asarray(seed.data, dtype=np.int8).reshape(seed.info.height, seed.info.width)
+    # origin_ix = origin_iy = -25, so (x, y) = (0, 0) is cell (25, 25)
+    assert cost[25, 25] == 0
+    assert cost[49, 49] == UNKNOWN         # far corner, well outside the disc
+
+
+def test_a_measured_cell_inside_the_startup_patch_is_never_overwritten(node):
+    # A locally-mapped, mostly flat patch around the pose, with a small pit
+    # in it (measured LETHAL rim, spec section 5's usual fixture) surrounded
+    # by genuinely unseen (NaN) ground everywhere else in the 50x50 window.
+    grid = np.full((50, 50), np.nan, dtype=np.float32)
+    grid[10:35, 10:35] = 0.0
+    grid[21:27, 21:27] = -0.2              # a 0.2 m pit, well inside the flat patch
+    message = build_grid_map({'elevation': grid}, -25, -25, 0.05, 'map', Time())
+
+    node._on_pose(pose_at(0.0, 0.0))       # (x, y) = (0, 0) is cell (25, 25)
+    node._on_map(message)
+
+    seed = node._seed_publisher.messages[0]
+    cost = np.asarray(seed.data, dtype=np.int8).reshape(seed.info.height, seed.info.width)
+    assert cost[20, 20] == LETHAL          # the pit's measured rim survives the patch
+    assert cost[25, 8] == 0                # unseen ground inside the disc, outside the
+                                            # flat patch, is cleared (col 8 is 17 cells
+                                            # from the centre, radius is 18)
+
+
+def test_a_second_pose_does_not_move_or_add_a_patch(node):
+    grid = np.full((40, 40), np.nan, dtype=np.float32)
+    message = build_grid_map({'elevation': grid}, -20, -20, 0.05, 'map', Time())
+
+    node._on_pose(pose_at(0.0, 0.0))       # the startup pose -> cell (20, 20)
+    node._on_pose(pose_at(5.0, 5.0))       # the rover has since moved - ignored
+    node._on_map(message)
+
+    seed = node._seed_publisher.messages[0]
+    cost = np.asarray(seed.data, dtype=np.int8).reshape(seed.info.height, seed.info.width)
+    assert cost[20, 20] == 0               # patch still centred on the first pose
+
+    # A single disc's worth of clearing, and nothing more, proves the second
+    # pose neither moved the patch nor added one of its own.
+    radius_cells = int(round(0.90 / 0.05))
+    only_patch = np.full((40, 40), UNKNOWN, dtype=np.int8)
+    clear_startup_patch(only_patch, (20, 20), radius_cells)
+    assert (cost == 0).sum() == (only_patch == 0).sum()

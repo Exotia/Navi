@@ -198,6 +198,67 @@ def costmap_seed(slope, step, roughness, valid) -> np.ndarray:
     return cost
 
 
+def _disc_offsets(radius_cells: int) -> np.ndarray:
+    """(dy, dx) integer offsets of every cell within `radius_cells` of (0, 0),
+    on a Euclidean disc. Computed once per `clear_startup_patch` call."""
+    r = int(radius_cells)
+    if r < 0:
+        raise ValueError(f"radius_cells must be >= 0, got {radius_cells}")
+    ys, xs = np.mgrid[-r:r + 1, -r:r + 1]
+    disc = (ys * ys + xs * xs) <= r * r
+    return np.stack((ys[disc], xs[disc]), axis=1)
+
+
+def clear_startup_patch(cost: np.ndarray, centre_cell, radius_cells: int) -> np.ndarray:
+    """"The wheels have been here" - the ground the rover is already sitting
+    on at start-up is proof-of-traversable, so it overrides the "unknown =
+    wall" default for one disc around the rover's first-seen pose.
+
+    `centre_cell` is a single (row, col) cell coordinate - the node's first
+    pose after start-up, converted once and reused for the node's lifetime.
+    Every cell within `radius_cells` (a disc, not a square) of it that is
+    currently UNKNOWN (-1) is set to free (0). Pass `None` to clear nothing
+    (no pose seen yet).
+
+    This is deliberately a single fixed patch, not a clearing disc that
+    follows the rover as it drives (a "track"). A moving disc is wider than
+    the wheels that supposedly proved it, so as the rover drives past a big
+    obstacle the disc would slowly clear unseen ground beside it that the
+    wheels never touched - "chipping away" at ground that may not be
+    traversable at all. One startup patch avoids that: it proves exactly the
+    ground the rover was demonstrably sitting on, once. A node restart
+    re-seeds the patch at wherever the rover is then, which the wheels prove
+    again.
+
+    A *measured* cell is never touched, in either direction: anything already
+    >= 0 - including a camera-seen LETHAL 100 - is left exactly as it is,
+    now and forever after. The instant the camera maps a patch cell, that
+    measurement wins and keeps winning; the patch only fills in what the
+    camera has not yet reached.
+
+    Mutates `cost` in place (and returns it, for chaining) - the caller
+    already owns a fresh seed array by the time this runs, so there is
+    nothing to protect by copying.
+    """
+    cost = np.asarray(cost)
+    if cost.ndim != 2:
+        raise ValueError(f"a cost grid is 2-D, got shape {cost.shape}")
+    rows, cols = cost.shape
+    if centre_cell is None or radius_cells <= 0:
+        return cost
+
+    row, col = centre_cell
+    offsets = _disc_offsets(radius_cells)
+    ry = offsets[:, 0] + int(row)
+    rx = offsets[:, 1] + int(col)
+    in_bounds = (ry >= 0) & (ry < rows) & (rx >= 0) & (rx < cols)
+    ry = ry[in_bounds]
+    rx = rx[in_bounds]
+    unknown = cost[ry, rx] == UNKNOWN
+    cost[ry[unknown], rx[unknown]] = 0
+    return cost
+
+
 def seed_from_elevation(elevation, resolution: float = RESOLUTION) -> tuple:
     """(the four layers, the int8 cost grid) - the whole derive in one call."""
     layers = derive(elevation, resolution)

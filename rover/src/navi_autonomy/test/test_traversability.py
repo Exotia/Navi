@@ -12,8 +12,8 @@ import pytest
 
 from navi_autonomy.traversability import (
     LETHAL, MAX_SCALED_COST, ROUGHNESS_REF_M, SLOPE_LETHAL_DEG, SLOPE_LETHAL_RAD,
-    STEP_LETHAL_M, UNKNOWN, costmap_seed, derive, roughness_layer, seed_from_elevation,
-    slope_layer, step_layer, valid_layer)
+    STEP_LETHAL_M, UNKNOWN, clear_startup_patch, costmap_seed, derive, roughness_layer,
+    seed_from_elevation, slope_layer, step_layer, valid_layer)
 
 
 def pit(depth=0.2, size=6, extent=24):
@@ -230,3 +230,50 @@ def test_the_seed_never_emits_a_value_outside_the_occupancy_grid_range():
     _, cost = seed_from_elevation(grid)
     assert cost.min() >= -1 and cost.max() <= 100
     assert set(np.unique(cost)) <= set(range(-1, 101))
+
+
+# -- "the wheels have been here" (one startup patch) -----------------------
+
+def test_the_startup_patch_clears_a_disc_of_the_right_radius_leaving_the_rest_unknown():
+    cost = np.full((21, 21), UNKNOWN, dtype=np.int8)
+    clear_startup_patch(cost, (10, 10), radius_cells=3)
+    # the centre and its axial neighbours at the radius are cleared
+    assert cost[10, 10] == 0
+    assert cost[7, 10] == 0
+    assert cost[10, 13] == 0
+    # a corner outside the Euclidean disc, at (3, 3) offset, is not
+    assert cost[7, 7] == UNKNOWN
+    # far away, still unknown
+    assert cost[0, 0] == UNKNOWN
+    # exactly the disc's cell count for radius 3 (a diamond-ish 29-cell disc)
+    expected = int(((np.mgrid[-3:4, -3:4][0] ** 2 + np.mgrid[-3:4, -3:4][1] ** 2) <= 9).sum())
+    assert (cost == 0).sum() == expected
+
+
+def test_a_measured_lethal_cell_inside_the_disc_beats_the_patch():
+    cost = np.full((11, 11), UNKNOWN, dtype=np.int8)
+    cost[5, 6] = LETHAL           # a camera-seen obstacle right beside the centre
+    clear_startup_patch(cost, (5, 5), radius_cells=3)
+    assert cost[5, 6] == LETHAL   # untouched
+    assert cost[5, 4] == 0        # unknown neighbour still cleared
+
+
+def test_a_measured_free_or_scaled_cell_inside_the_disc_is_unchanged():
+    cost = np.full((11, 11), UNKNOWN, dtype=np.int8)
+    cost[5, 6] = 0                # already measured free
+    cost[5, 4] = 42               # a measured, scaled cost
+    clear_startup_patch(cost, (5, 5), radius_cells=3)
+    assert cost[5, 6] == 0
+    assert cost[5, 4] == 42
+
+
+def test_no_centre_clears_nothing():
+    cost = np.full((5, 5), UNKNOWN, dtype=np.int8)
+    result = clear_startup_patch(cost, None, radius_cells=3)
+    assert (result == UNKNOWN).all()
+
+
+def test_a_centre_off_the_grid_clears_nothing_in_bounds():
+    cost = np.full((5, 5), UNKNOWN, dtype=np.int8)
+    clear_startup_patch(cost, (100, 100), radius_cells=2)
+    assert (cost == UNKNOWN).all()
