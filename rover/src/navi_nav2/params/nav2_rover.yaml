@@ -67,7 +67,11 @@ planner_server:
     SmacBased:
       # The A/B second opinion (spec section 5).  Same costmap, same goal.
       plugin: "nav2_smac_planner/SmacPlanner2D"
-      tolerance: 0.5    # how far Smac may shift an obstructed goal to the nearest valid pose (the BT fallback relies on this)
+      tolerance: 1.5    # how far Smac may shift an obstructed goal to the nearest
+      # standable pose. 0.5 failed live: a corner's inflation blanketed the
+      # whole half-metre ring around the clicked goal and Smac gave up -
+      # 1.5 means "stop as close to the click as the world allows", which
+      # is what the operator expects of a goal beside an obstacle.
       downsample_costmap: false
       downsampling_factor: 1
       allow_unknown: true      # same night-ground reason as GridBased above
