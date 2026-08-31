@@ -120,11 +120,16 @@ class BemaSession:
             # lease request (ServerAccessManager::request) is refused for as
             # long as this session holds the exclusive lease, so its
             # setMovementEnabled(true) can never land. Send it ourselves,
-            # once per Manual entry: we hold the lease, so F7 passes
-            # checkAccess. Disabling stays the coordinator's job - its
-            # forceCapability path still wins whenever the state machine
-            # leaves Manual.
-            if self._coord_state != 3:                   # 3 = Manual
+            # once per entry into a movement-permitted state: we hold the
+            # lease, so F7 passes checkAccess. Manual (3) AND Autonomous (5)
+            # - the coordinator permits movement in both, and in both its
+            # polite enable is refused for the same lease reason (the
+            # Autonomous case surfaced live as "refused: 1 (tick)" with the
+            # wheels dead: PrepareAutonomous force-disables, and nothing
+            # could re-enable once Autonomous arrived). Disabling stays the
+            # coordinator's job - its forceCapability path still wins
+            # whenever the state machine leaves Manual/Autonomous.
+            if self._coord_state not in (3, 5):     # 3 = Manual, 5 = Autonomous
                 self._movement_sent = False
             elif self._lease and not self._movement_sent:
                 self._bema.call("F7", True)

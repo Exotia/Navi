@@ -338,3 +338,20 @@ def test_pause_and_resume_are_the_coordinators_f4_and_f5(server):
     assert "F4" in coord and "F5" in coord
     assert coord.count("__sam__request") == 2   # both are guarded
     assert sess.status()["last_error"] is None
+
+
+def test_autonomous_state_makes_the_session_enable_movement_too(server):
+    # The Autonomous twin of the Manual case above, found live on the rack:
+    # PrepareAutonomous force-disables movement, and once Autonomous arrives
+    # the coordinator's polite enable is refused for the lease this session
+    # holds - so the session must send F7 true itself, exactly as in Manual.
+    clock = Clock()
+    sess = _session(server, clock)
+    server.set_state(5)                      # Autonomous
+    server.calls.clear()
+    sess.tick(clock.t)
+    clock.t = 1.1
+    sess.tick(clock.t)                       # still Autonomous: F7 once, not twice
+    f7 = [(m, a) for tag, m, a in server.calls if tag == "bema" and m == "F7"]
+    assert f7 == [("F7", [True])]
+    assert server.movement_enabled is True
