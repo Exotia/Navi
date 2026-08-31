@@ -74,12 +74,37 @@ class ActionClientNav2Goals(Nav2Goals):
         self._node = node
         self._logger = node.get_logger()
         self._client = ActionClient(node, NavigateToPose, action_name)
+        # The supervisor PAUSEs the Nav2 lifecycle on every exit from
+        # autonomous (takeover, e-stop, localisation loss - SP5 rule 1), and
+        # nothing else resumes it, so an inactive bt_navigator rejects the
+        # next run's goal outright. resume() below is called by goal_relay
+        # when a run starts; the coordinator's 5 s arming window is ample
+        # time for the nodes to reactivate before the goal goes out.
+        from nav2_msgs.srv import ManageLifecycleNodes
+        self._manage_srv_type = ManageLifecycleNodes
+        self._manage_client = node.create_client(
+            ManageLifecycleNodes, "/lifecycle_manager_navigation/manage_nodes")
         # One slot for the goal in flight: [goal_handle_or_None, on_succeeded,
         # on_failed, on_feedback]. Cleared as a unit by cancel() (and by a
         # goal ending on its own), which is what makes a late callback bound
         # to a superseded slot a no-op - `self._active is not slot` below,
         # checked in every one of the three callbacks.
         self._active = None
+
+    def resume(self):
+        # Fire-and-forget, same non-blocking rule as the supervisor's
+        # deactivate: never wait on the executor thread. RESUME on an
+        # already-active stack is a no-op on the lifecycle manager's side.
+        if not self._manage_client.service_is_ready():
+            self._logger.info("lifecycle manager not there; resume skipped")
+            return
+        request = self._manage_srv_type.Request()
+        request.command = self._manage_srv_type.Request.RESUME
+        try:
+            self._manage_client.call_async(request)
+            self._logger.info("asked the Nav2 lifecycle to resume for the run")
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(f"Nav2 lifecycle resume failed to send: {exc!r}")
 
     def send_goal(self, x, y, yaw, on_succeeded, on_failed, on_feedback):
         if yaw is None:

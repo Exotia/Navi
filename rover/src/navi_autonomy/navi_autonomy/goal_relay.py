@@ -251,6 +251,12 @@ class GoalRelay(Node):
 
     def _dispatch(self, action, payload):
         if action == rules.START_TASK:
+            # The supervisor paused Nav2 when the last run ended (rule 1);
+            # wake it back up now, so it is active again by the time the
+            # observed-Autonomous transition releases the goal (>= 5 s).
+            resume = getattr(self._nav2, "resume", None)
+            if resume is not None:
+                resume()
             self._task.start_task(payload)
         elif action == rules.SEND_GOAL:
             index, x, y, yaw = payload
