@@ -38,6 +38,34 @@ def test_nothing_else_in_the_tree_drives_backwards(tree):
         "assisted teleop is a second velocity source; the supervisor owns that job"
 
 
+def test_follow_path_success_is_verified_against_the_real_goal():
+    """Nav2 humble's controller checks the goal in the odom frame against the
+    path end transformed map->odom, and ignores a failed transform - the
+    comparison then runs against a default pose at the odom origin, which is
+    where the rover sits while it point-turns at the start of a run.  The
+    tree must therefore re-measure the distance to the true goal in the map
+    frame before the navigation may report success."""
+    root = ET.parse(os.path.join(TREES, 'navigate_to_pose_no_reverse.xml')).getroot()
+    guards = list(root.iter('GoalReached'))
+    assert len(guards) == 1, "exactly one arrival verification"
+    guard = guards[0]
+    assert guard.get('goal') == '{goal}'
+    assert guard.get('global_frame') == 'map'
+    assert guard.get('robot_base_frame') == 'base_footprint'
+    # It must sit AFTER FollowPath inside the same sequence, so it gates the
+    # success rather than the start.
+    for sequence in root.iter('Sequence'):
+        children = list(sequence)
+        if any(child.tag == 'GoalReached' for child in children):
+            assert children[-1].tag == 'GoalReached'
+            assert any(child.iter('FollowPath') is not None and
+                       list(child.iter('FollowPath')) for child in children[:-1]), \
+                "the guard must follow the FollowPath it verifies"
+            break
+    else:
+        raise AssertionError("GoalReached is not inside a Sequence")
+
+
 # -- the launch wiring ------------------------------------------------------
 
 def test_the_lifecycle_manager_owns_exactly_the_six_servers():

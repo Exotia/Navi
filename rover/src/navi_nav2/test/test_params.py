@@ -207,3 +207,17 @@ def test_the_footprint_is_the_rovers_rectangle_with_a_5cm_shell():
     for which in ('global_costmap', 'local_costmap'):
         assert '0.445' in str(costmap(which)['footprint'])
         assert 'robot_radius' not in costmap(which)
+
+
+def test_the_arrival_guard_is_looser_than_the_goal_checker_but_still_tight():
+    """The GoalReached verification in navigate_to_pose_no_reverse.xml reads
+    goal_reached_tol off bt_navigator.  It must sit strictly above the
+    controller's xy tolerance (so a genuine arrival never flaps between the
+    two frames) and well below any real leg length (so the tf-glitch success
+    at the odom origin - the instant point-turn arrival seen live - can
+    never pass)."""
+    xy = node('controller_server')['general_goal_checker']['xy_goal_tolerance']
+    guard = node('bt_navigator')['goal_reached_tol']
+    assert xy == 0.25
+    assert guard == 0.50
+    assert xy < guard <= 1.0

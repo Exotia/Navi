@@ -14,10 +14,26 @@
             <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
           </RecoveryNode>
         </RateController>
-        <RecoveryNode number_of_retries="1" name="FollowPath">
-          <FollowPath path="{path}" controller_id="FollowPath"/>
-          <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
-        </RecoveryNode>
+        <Sequence name="FollowPathVerified">
+          <RecoveryNode number_of_retries="1" name="FollowPath">
+            <FollowPath path="{path}" controller_id="FollowPath"/>
+            <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+          </RecoveryNode>
+          <!-- The controller's own goal check runs in the odom frame against
+               the path end transformed map->odom, and Nav2 humble ignores a
+               failed transform there (nav2_controller isGoalReached), so a tf
+               hiccup compares the rover against a default-constructed pose at
+               the odom origin - which is exactly where the rover sits while it
+               point-turns at the start of a run.  With yaw freed at the goal
+               checker that comparison passes and the goal "succeeds" the
+               moment the turn begins.  This condition re-measures the distance
+               to the real goal in the map frame (goal_reached_tol on
+               bt_navigator, looser than the controller's 0.25 so a genuine
+               arrival never flaps) and fails safe when the pose is not
+               available: a run that cannot know where it is must not claim
+               arrival. -->
+          <GoalReached goal="{goal}" global_frame="map" robot_base_frame="base_footprint"/>
+        </Sequence>
       </PipelineSequence>
       <ReactiveFallback name="RecoveryFallback">
         <GoalUpdated/>

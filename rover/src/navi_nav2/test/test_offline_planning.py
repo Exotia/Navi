@@ -150,9 +150,11 @@ def test_the_controller_is_the_shim_and_will_not_reverse(stack):
 
 
 def test_the_speed_caps_reached_the_smoother(stack):
+    # 0.2 rad/s since the rotation was doubled through the whole chain
+    # (ddbd7c0); test_params.py carries the file-level twin of this number.
     smoother = running_params('velocity_smoother')
-    assert list(smoother['max_velocity']) == [0.05, 0.0, 0.1]
-    assert list(smoother['min_velocity']) == [-0.15, 0.0, -0.1]
+    assert list(smoother['max_velocity']) == [0.05, 0.0, 0.2]
+    assert list(smoother['min_velocity']) == [-0.15, 0.0, -0.2]
     assert smoother['odom_topic'] == '/localization/odom_local'
 
 
