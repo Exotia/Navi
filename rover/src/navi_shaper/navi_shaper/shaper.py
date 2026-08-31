@@ -81,7 +81,7 @@ class ShaperConfig:
     #: Section 10 caps, as a backstop. The smoother and gamepad_input.py own
     #: these numbers; this is where a misconfigured one is caught.
     backstop_max_vx: float = 0.05
-    backstop_max_wz: float = 0.1
+    backstop_max_wz: float = 0.2
     #: A gap longer than this means the chassis has settled whatever it was
     #: doing; drop any hold rather than carrying a stale one across a dropout.
     max_dt_s: float = 1.0

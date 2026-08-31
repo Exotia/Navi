@@ -31,8 +31,8 @@ def costmap(which):
 
 def test_the_velocity_smoother_carries_the_manual_cap():
     smoother = node('velocity_smoother')
-    assert smoother['max_velocity'] == [0.05, 0.0, 0.1]
-    assert smoother['min_velocity'] == [-0.15, 0.0, -0.1]
+    assert smoother['max_velocity'] == [0.05, 0.0, 0.2]
+    assert smoother['min_velocity'] == [-0.15, 0.0, -0.2]
 
 
 def test_vy_is_pinned_to_zero_at_the_smoother():
@@ -53,7 +53,7 @@ def test_the_controller_never_asks_for_more_than_the_smoother_passes():
     follow = node('controller_server')['FollowPath']
     smoother = node('velocity_smoother')
     assert follow['desired_linear_vel'] == smoother['max_velocity'][0] == 0.05
-    assert follow['rotate_to_heading_angular_vel'] == smoother['max_velocity'][2] == 0.1
+    assert follow['rotate_to_heading_angular_vel'] == smoother['max_velocity'][2] == 0.2
 
 
 # -- no reversing (spec section 5) ------------------------------------------

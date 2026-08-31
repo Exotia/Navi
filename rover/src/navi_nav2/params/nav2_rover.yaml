@@ -102,7 +102,7 @@ controller_server:
       rotate_to_goal_heading: false
       simulate_ahead_time: 1.0
       # -- shared by shim and RPP (one key, both read it)
-      rotate_to_heading_angular_vel: 0.1
+      rotate_to_heading_angular_vel: 0.2
       max_angular_accel: 0.5
       # -- regulated pure pursuit
       desired_linear_vel: 0.05
@@ -161,7 +161,7 @@ behavior_server:
     robot_base_frame: base_footprint
     transform_tolerance: 0.5
     simulate_ahead_time: 2.0
-    max_rotational_vel: 0.1
+    max_rotational_vel: 0.2
     min_rotational_vel: 0.05
     rotational_acc_lim: 0.5
     # NOTE: this node has no odom_topic parameter - its OdomSmoother
@@ -176,8 +176,8 @@ velocity_smoother:
     feedback: "OPEN_LOOP"
     # Spec section 10.  The y band is zero in both directions: this is
     # where vy is pinned for the whole stack.
-    max_velocity: [0.05, 0.0, 0.1]
-    min_velocity: [-0.15, 0.0, -0.1]
+    max_velocity: [0.05, 0.0, 0.2]
+    min_velocity: [-0.15, 0.0, -0.2]
     max_accel: [0.5, 0.0, 0.5]
     max_decel: [-0.5, 0.0, -0.5]
     odom_topic: "/localization/odom_local"
