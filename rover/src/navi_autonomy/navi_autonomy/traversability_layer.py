@@ -48,7 +48,8 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from navi_autonomy.grid_map_io import (
     ELEVATION_LAYER, build_grid_map, build_occupancy_grid, layer_from_message)
 from navi_autonomy.tile_aggregator import MAP_TOPIC, POSE_TOPIC, latched_qos
-from navi_autonomy.traversability import clear_startup_patch, seed_from_elevation
+from navi_autonomy.traversability import (STEP_LETHAL_M, clear_startup_patch,
+                                          seed_from_elevation)
 from navi_localization.elevation_grid import RESOLUTION
 
 TRAVERSABILITY_TOPIC = '/autonomy/traversability'
@@ -76,10 +77,14 @@ class TraversabilityLayer(Node):
         self.declare_parameter('costmap_seed_topic', COSTMAP_SEED_TOPIC)
         self.declare_parameter('frame_id', 'map')
         self.declare_parameter('startup_clear_radius_m', STARTUP_CLEAR_RADIUS_M)
+        # The spec's 0.14 m by default; raise for night sessions where ZED
+        # depth noise fabricates phantom steps (see costmap_seed).
+        self.declare_parameter('step_lethal_m', STEP_LETHAL_M)
 
         self._frame_id = str(self.get_parameter('frame_id').value)
         self._startup_clear_radius_m = float(
             self.get_parameter('startup_clear_radius_m').value)
+        self._step_lethal_m = float(self.get_parameter('step_lethal_m').value)
         self.maps_processed = 0
         self.rejected_maps = 0
         self._rejected_logged = False
@@ -130,7 +135,8 @@ class TraversabilityLayer(Node):
         origin_ix = int(round(float(message.info.pose.position.x) / resolution - n_x / 2.0))
         origin_iy = int(round(float(message.info.pose.position.y) / resolution - n_y / 2.0))
 
-        layers, cost = seed_from_elevation(elevation, resolution)
+        layers, cost = seed_from_elevation(elevation, resolution,
+                                           step_lethal_m=self._step_lethal_m)
         if self._startup_pose is not None:
             # The stored pose is metres; the seed's cells are indexed from
             # this tick's origin, which moves as the rolling window

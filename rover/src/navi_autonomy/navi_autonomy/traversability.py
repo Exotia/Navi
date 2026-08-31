@@ -167,7 +167,8 @@ UNKNOWN = -1
 MAX_SCALED_COST = 99
 
 
-def costmap_seed(slope, step, roughness, valid) -> np.ndarray:
+def costmap_seed(slope, step, roughness, valid,
+                 step_lethal_m: float = STEP_LETHAL_M) -> np.ndarray:
     """The four layers as one int8 cost grid for /autonomy/costmap_seed.
 
         s = clip(slope     / SLOPE_LETHAL_RAD, 0, 1)
@@ -188,13 +189,18 @@ def costmap_seed(slope, step, roughness, valid) -> np.ndarray:
     roughness = np.nan_to_num(np.asarray(roughness, dtype=np.float32), nan=0.0)
     valid = np.asarray(valid, dtype=np.float32)
 
+    # step_lethal_m defaults to the spec's 0.14; the layer node exposes it
+    # as a parameter because night sessions showed ZED depth noise in the
+    # dark fabricating >0.14 m phantom steps - lethal cells on ground the
+    # operator can see is flat. Raising it at night trades hole-margin for
+    # not walling off the whole yard; the spec value stays the default.
     worst = np.maximum(
         np.maximum(np.clip(slope / SLOPE_LETHAL_RAD, 0.0, 1.0),
-                   np.clip(step / STEP_LETHAL_M, 0.0, 1.0)),
+                   np.clip(step / float(step_lethal_m), 0.0, 1.0)),
         np.clip(roughness / ROUGHNESS_REF_M, 0.0, 1.0))
     cost = np.rint(MAX_SCALED_COST * worst).astype(np.int8)
     cost[valid < 0.5] = UNKNOWN
-    cost[(step >= STEP_LETHAL_M) | (slope >= SLOPE_LETHAL_RAD)] = LETHAL
+    cost[(step >= float(step_lethal_m)) | (slope >= SLOPE_LETHAL_RAD)] = LETHAL
     return cost
 
 
@@ -259,9 +265,11 @@ def clear_startup_patch(cost: np.ndarray, centre_cell, radius_cells: int) -> np.
     return cost
 
 
-def seed_from_elevation(elevation, resolution: float = RESOLUTION) -> tuple:
+def seed_from_elevation(elevation, resolution: float = RESOLUTION,
+                        step_lethal_m: float = STEP_LETHAL_M) -> tuple:
     """(the four layers, the int8 cost grid) - the whole derive in one call."""
     layers = derive(elevation, resolution)
     cost = costmap_seed(layers['slope'], layers['step'],
-                        layers['roughness'], layers['valid'])
+                        layers['roughness'], layers['valid'],
+                        step_lethal_m=step_lethal_m)
     return layers, cost
