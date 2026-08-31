@@ -166,42 +166,54 @@ class BemaSession:
     def change_drive_state(self):
         self._safe("F6")
 
-    def start_manual(self):
-        # CoordinatorProxy guards F6 (startManual) behind checkAccess() on
-        # the coordinator's OWN lease - a separate ServerAccessManager from
+    def _coord_guarded(self, method, *args, label=None):
+        # CoordinatorProxy binds F0-F7 behind checkAccess() on the
+        # coordinator's OWN ServerAccessManager - a separate lease from
         # BEMA's. Acquire it just-in-time; it lapses by itself after 4 s of
-        # guarded-call silence, and the unguarded F9/F10 heartbeat neither
+        # guarded-call silence, and the unguarded F8/F9/F10 traffic neither
         # needs nor refreshes it.
         if self._coord is None:
             return
         try:
             if not self._coord.call("__sam__request"):
-                self._last_error = "coordinator refused the lease for startManual"
+                self._last_error = ("coordinator refused the lease for "
+                                    f"{label or method}")
                 return
-            self._coord.call("F6")
+            self._coord.call(method, *args)
         except RpcError as exc:
-            self._mark_refused(exc, "start_manual")
+            self._mark_refused(exc, label or method)
         except (RpcTimeout, RpcDisconnected, OSError) as exc:
             self._mark_down(exc)
 
+    def start_manual(self):
+        self._coord_guarded("F6", label="start_manual")
+
     def abort(self):
         # F7 on the COORDINATOR is abort - not BEMA's F7, which is
-        # setMovementEnabled(bool) on a different server on a different
-        # port. Like startManual it sits behind CoordinatorProxy's
-        # checkAccess() on the coordinator's own ServerAccessManager, so
-        # the lease is acquired just-in-time here too; it lapses by itself
-        # after 4 s of guarded-call silence.
-        if self._coord is None:
-            return
-        try:
-            if not self._coord.call("__sam__request"):
-                self._last_error = "coordinator refused the lease for abort"
-                return
-            self._coord.call("F7")
-        except RpcError as exc:
-            self._mark_refused(exc, "abort")
-        except (RpcTimeout, RpcDisconnected, OSError) as exc:
-            self._mark_down(exc)
+        # setMovementEnabled(bool) on a different server on a different port.
+        self._coord_guarded("F7", label="abort")
+
+    def start_navi_task(self, waypoints):
+        # CoordinatorProxy binds F0 (startNaViTask) behind checkAccess() on
+        # the coordinator's own ServerAccessManager - same just-in-time lease
+        # as start_manual() and abort(). waypoints is a list of (x, y, yaw)
+        # floats; the coordinator relays them straight back to us as NaVi F3.
+        self._coord_guarded("F0", [[float(x), float(y), float(w)]
+                                   for x, y, w in waypoints])
+
+    def pause_task(self):
+        self._coord_guarded("F4")
+
+    def resume_task(self):
+        self._coord_guarded("F5")
+
+    def notify_task_finished(self, tag):
+        # CoordinatorProxy binds F8 (notifyTaskFinished) with no
+        # checkAccess() - it is @noguard in Coordinator.idl - so this needs
+        # no lease and cannot fight anything for one. That is exactly why
+        # navi_rpc_server reports progress through this session instead of
+        # opening a second client to the primary.
+        self._safe_coord("F8", int(tag))
 
     def _safe(self, method, *args):
         if self._bema is None:

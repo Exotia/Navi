@@ -131,6 +131,8 @@ class FakeBemaServer:
             return None, self.state
         if method == "F10":            # notifyConnected - unguarded
             return None, None
+        if method == "F8":             # notifyTaskFinished - @noguard
+            return None, None
         # F0-F6 sit behind checkAccess() on the real CoordinatorProxy: an
         # un-leased call is answered with error 1 and the handler never runs.
         if not self.coord_lease_held:

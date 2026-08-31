@@ -193,3 +193,46 @@ def _bad_string(raw):
     m = String()
     m.data = raw
     return m
+
+
+def test_a_task_finished_command_reaches_the_coordinator(bridge):
+    node, server, clock = bridge
+    node._on_command(_string({"action": "task_finished", "tag": 0x31}))
+    assert ("coord", "F8", [0x31]) in server.calls
+    node._on_command(_string({"action": "task_finished", "tag": 0x32}))
+    assert ("coord", "F8", [0x32]) in server.calls
+
+
+def test_a_task_finished_command_with_a_foreign_tag_is_refused(bridge):
+    node, server, clock = bridge
+    server.calls.clear()
+    node._on_command(_string({"action": "task_finished", "tag": 7}))
+    node._on_command(_string({"action": "task_finished"}))
+    node._on_command(_string({"action": "task_finished", "tag": "0x31"}))
+    assert not any(m == "F8" for tag, m, a in server.calls)
+
+
+def test_the_task_commands_reach_the_coordinator(bridge):
+    node, server, clock = bridge
+    server.calls.clear()
+    node._on_command(_string({"action": "navi_task",
+                              "waypoints": [[1.0, 2.0, 0.0]]}))
+    assert ("coord", "F0", [[[1.0, 2.0, 0.0]]]) in server.calls
+    node._on_command(_string({"action": "pause_task"}))
+    node._on_command(_string({"action": "resume_task"}))
+    coord = [m for tag, m, a in server.calls if tag == "coord"]
+    assert "F4" in coord and "F5" in coord
+
+
+def test_a_navi_task_command_with_malformed_waypoints_is_refused(bridge):
+    node, server, clock = bridge
+    server.calls.clear()
+    for bad in ({"action": "navi_task"},
+                {"action": "navi_task", "waypoints": []},
+                {"action": "navi_task", "waypoints": "1,2,3"},
+                {"action": "navi_task", "waypoints": [[1.0, 2.0]]},
+                {"action": "navi_task", "waypoints": [[1.0, 2.0, "x"]]},
+                {"action": "navi_task", "waypoints": [[1.0, 2.0, True]]},
+                {"action": "navi_task", "waypoints": [[0.0, 0.0, 0.0]] * 65}):
+        node._on_command(_string(bad))
+    assert not any(m == "F0" for tag, m, a in server.calls)

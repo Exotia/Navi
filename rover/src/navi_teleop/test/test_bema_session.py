@@ -281,3 +281,60 @@ def test_start_manual_takes_the_coordinator_lease_first(server):
     assert coord.index(("__sam__request", [])) < coord.index(("F6", []))
     assert server.state == 3                      # startManual actually ran
     assert sess.status()["connected"] is True     # and nothing marked down
+
+
+def test_notify_task_finished_calls_the_coordinators_f8(server):
+    clock = Clock()
+    sess = _session(server, clock)
+    server.calls.clear()
+    sess.notify_task_finished(0x31)
+    assert ("coord", "F8", [0x31]) in server.calls
+
+
+def test_notify_task_finished_needs_no_coordinator_lease(server):
+    clock = Clock()
+    sess = _session(server, clock)
+    server.coord_lease_held = False
+    server.calls.clear()
+    sess.notify_task_finished(0x32)
+    assert ("coord", "F8", [0x32]) in server.calls
+    assert not any(m == "__sam__request" for tag, m, a in server.calls
+                   if tag == "coord")
+    assert sess.status()["last_error"] is None
+
+
+def test_start_navi_task_takes_the_coordinator_lease_and_calls_f0(server):
+    clock = Clock()
+    sess = _session(server, clock)
+    server.calls.clear()
+    sess.start_navi_task([(1.0, 2.0, 0.0), (3.0, 4.0, 1.5)])
+    coord = [(m, a) for tag, m, a in server.calls if tag == "coord"]
+    # The lease first, then the guarded call - the same order start_manual
+    # and abort use, because CoordinatorProxy guards F0 the same way.
+    assert coord[0][0] == "__sam__request"
+    assert ("F0", [[[1.0, 2.0, 0.0], [3.0, 4.0, 1.5]]]) in coord
+
+
+def test_start_navi_task_packs_every_waypoint_as_three_floats(server):
+    clock = Clock()
+    sess = _session(server, clock)
+    server.calls.clear()
+    sess.start_navi_task([(1, 2, 0)])          # ints on the way in
+    sent = [a for tag, m, a in server.calls if tag == "coord" and m == "F0"]
+    # F0 takes ONE positional arg (the waypoint array), same as the two-
+    # waypoint case above: a = [rows], so sent = [[rows]] one level deeper
+    # than the row itself.
+    assert sent == [[[[1.0, 2.0, 0.0]]]]
+    assert all(isinstance(c, float) for c in sent[0][0][0])
+
+
+def test_pause_and_resume_are_the_coordinators_f4_and_f5(server):
+    clock = Clock()
+    sess = _session(server, clock)
+    server.calls.clear()
+    sess.pause_task()
+    sess.resume_task()
+    coord = [m for tag, m, a in server.calls if tag == "coord"]
+    assert "F4" in coord and "F5" in coord
+    assert coord.count("__sam__request") == 2   # both are guarded
+    assert sess.status()["last_error"] is None

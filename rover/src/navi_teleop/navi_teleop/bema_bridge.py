@@ -5,6 +5,10 @@ to the primary's IK at 20 Hz; if the stream stops for deadman_s the wheels
 are zeroed and stopped, and kept stopped until a fresh twist arrives.
 /drive_command (JSON) drives the coordinator/BEMA buttons the ground
 station shows; /drive_status (JSON, 1 Hz) reports what is happening.
+navi_rpc_server uses the same topic to send the coordinator its waypoint
+progress, because F8 is unguarded and needs no lease; navi_task/pause_task/
+resume_task go the other way, to the coordinator's guarded F0/F4/F5, and
+are how an autonomous run is armed at all.
 
 The source is /rover_twist, which mode_supervisor is the only publisher
 of - never /manual_twist directly, or the operator's stream would reach
@@ -22,7 +26,7 @@ moves after the operator presses a button.
 """
 
 import json
-from math import degrees
+from math import degrees, isfinite
 from time import monotonic
 
 import rclpy
@@ -43,6 +47,37 @@ def _default_session_factory(host, bema_port, coordinator_port, clock):
 
 
 class BemaBridge(Node):
+    _TASK_TAGS = (0x31, 0x32)
+    _MAX_WAYPOINTS = 64
+
+    @staticmethod
+    def _waypoints(value):
+        """[[x, y, w], ...] of finite non-bool numbers, or None.
+
+        The same shape navi_rpc_state.parse_targets enforces on the way in
+        from the coordinator, applied here on the way back out to it: this
+        is a JSON topic anyone on the graph can publish to, and F0 arms an
+        autonomous run.
+        """
+        if isinstance(value, (str, bytes)) or not isinstance(value, list):
+            return None
+        if not value or len(value) > BemaBridge._MAX_WAYPOINTS:
+            return None
+        out = []
+        for point in value:
+            if isinstance(point, (str, bytes)) or not isinstance(point, list) \
+                    or len(point) != 3:
+                return None
+            row = []
+            for component in point:
+                if isinstance(component, bool) \
+                        or not isinstance(component, (int, float)) \
+                        or not isfinite(float(component)):
+                    return None
+                row.append(float(component))
+            out.append(row)
+        return out
+
     def __init__(self, session_factory=_default_session_factory,
                  clock=monotonic, parameter_overrides=None):
         super().__init__("bema_bridge",
@@ -103,9 +138,40 @@ class BemaBridge(Node):
 
     def _on_command(self, msg: String):
         try:
-            action = json.loads(msg.data).get("action")
+            payload = json.loads(msg.data)
+            action = payload.get("action")
         except (json.JSONDecodeError, TypeError, AttributeError):
             self.get_logger().warn(f"unreadable drive command: {msg.data!r}")
+            return
+        if action == "task_finished":
+            # navi_rpc_server's progress, on its way to the coordinator's F8.
+            # The tag is whitelisted: TAG_WaypointReached (0x31) and
+            # TAG_DestinationReached (0x32) are the only two the coordinator
+            # acts on, and an arbitrary one would drive a state machine we do
+            # not own.
+            tag = payload.get("tag")
+            if not isinstance(tag, int) or isinstance(tag, bool) \
+                    or tag not in self._TASK_TAGS:
+                self.get_logger().warn(f"refusing task_finished tag {tag!r}")
+                return
+            self._last_action = action
+            try:
+                self._session.notify_task_finished(tag)
+            except Exception as exc:
+                self.get_logger().error(f"task_finished failed: {exc!r}")
+            return
+        if action == "navi_task":
+            # The operator's Go, on its way to the coordinator's guarded F0.
+            waypoints = self._waypoints(payload.get("waypoints"))
+            if waypoints is None:
+                self.get_logger().warn(
+                    f"refusing navi_task waypoints {payload.get('waypoints')!r}")
+                return
+            self._last_action = action
+            try:
+                self._session.start_navi_task(waypoints)
+            except Exception as exc:
+                self.get_logger().error(f"navi_task failed: {exc!r}")
             return
         table = {
             "stop": self._session.stop,
@@ -116,6 +182,8 @@ class BemaBridge(Node):
             "reset_odometry": self._session.reset_odometry,
             "drive_mode": self._session.change_drive_mode,
             "drive_state": self._session.change_drive_state,
+            "pause_task": self._session.pause_task,
+            "resume_task": self._session.resume_task,
         }
         handler = table.get(action)
         if handler is None:
