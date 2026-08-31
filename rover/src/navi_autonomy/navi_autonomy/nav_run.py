@@ -43,7 +43,7 @@ ARM_TIMEOUT_S = 12.0
 
 # The Spec section 10 first-stage speed cap, used only to turn remaining
 # metres into an ETA - never to command a speed.
-NOMINAL_SPEED_MPS = 0.05
+NOMINAL_SPEED_MPS = 0.3
 
 # This build only plans in the map frame.
 PLAN_FRAME = "map"

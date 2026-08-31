@@ -31,7 +31,7 @@ def costmap(which):
 
 def test_the_velocity_smoother_carries_the_manual_cap():
     smoother = node('velocity_smoother')
-    assert smoother['max_velocity'] == [0.05, 0.0, 0.2]
+    assert smoother['max_velocity'] == [0.3, 0.0, 0.2]
     assert smoother['min_velocity'] == [-0.15, 0.0, -0.2]
 
 
@@ -52,7 +52,7 @@ def test_the_angular_acceleration_limit_is_the_one_the_spec_names():
 def test_the_controller_never_asks_for_more_than_the_smoother_passes():
     follow = node('controller_server')['FollowPath']
     smoother = node('velocity_smoother')
-    assert follow['desired_linear_vel'] == smoother['max_velocity'][0] == 0.05
+    assert follow['desired_linear_vel'] == smoother['max_velocity'][0] == 0.3
     assert follow['rotate_to_heading_angular_vel'] == smoother['max_velocity'][2] == 0.2
 
 
