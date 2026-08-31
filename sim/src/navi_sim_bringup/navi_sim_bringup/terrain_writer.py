@@ -76,6 +76,7 @@ never created it, the model-list poll finds it absent and untracks it for
 free.
 """
 
+import json
 import os
 import re
 import time
@@ -87,8 +88,11 @@ from rclpy.executors import ExternalShutdownException
 from grid_map_msgs.msg import GridMap
 from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2, PointField
+from std_msgs.msg import String
 
 from navi_sim_bringup import height_palette
+from navi_sim_bringup.nav_path_mesh import (
+    nav_path_sdf, obj_bytes as nav_path_obj_bytes, path_mesh_from_points)
 from navi_sim_bringup.obstacle_mesh import (
     obj_bytes as obstacle_obj_bytes, obstacle_mesh_from_voxels, obstacle_sdf)
 from navi_sim_bringup.terrain_mesh import (
@@ -149,7 +153,7 @@ def model_name(key, generation: int, run_id: str) -> str:
 # been spawned in those older forms). Used by the start-up sweep, which must
 # clean up leftovers from *any* previous run, not just ones this build wrote.
 LEFTOVER_MODEL_RE = re.compile(
-    r'^(?:terrain|obst)_-?\d+_-?\d+_(?:[0-9a-f]{6}_g\d+|g\d+|[ab])$')
+    r'^(?:terrain|obst|plan)_-?\d+_-?\d+_(?:[0-9a-f]{6}_g\d+|g\d+|[ab])$')
 
 
 def elevation_from_message(message: GridMap):
@@ -344,6 +348,7 @@ class TerrainWriter(Node):
         super().__init__('terrain_writer')
         self.declare_parameter('tile_topic', '/localization/map_tile')
         self.declare_parameter('obstacle_tile_topic', '/localization/obstacle_tile')
+        self.declare_parameter('nav_path_topic', '/nav_path_summary')
         self.declare_parameter('draw_resolution', 0.05)
         self.declare_parameter('terrain_coloured', True)
         self.declare_parameter(
@@ -431,6 +436,9 @@ class TerrainWriter(Node):
         self.create_subscription(
             PointCloud2, str(self.get_parameter('obstacle_tile_topic').value),
             self._on_obstacle_tile, 64)
+        self.create_subscription(
+            String, str(self.get_parameter('nav_path_topic').value),
+            self._on_nav_path, 1)
         self.create_timer(0.25, self._pump)
         self.get_logger().info(
             f"terrain tiles under {self._model_dir}; one model per 2.5 m tile, "
@@ -542,6 +550,25 @@ class TerrainWriter(Node):
             payload = obstacle_obj_bytes(mesh) if mesh is not None else b''
         self._policy.offer(key, payload, self._clock_fn())
 
+    def _on_nav_path(self, message: String) -> None:
+        try:
+            summary = json.loads(message.data)
+            points = [(float(p[0]), float(p[1])) for p in summary.get('points') or []]
+            waypoints = [(float(p[0]), float(p[1]))
+                         for p in summary.get('waypoints') or []]
+        except (ValueError, TypeError, IndexError, KeyError) as error:
+            # Same reasoning as _on_tile: this is a subscription callback,
+            # and anything that escapes it ends the node and takes the
+            # whole terrain view down with it.
+            self.get_logger().error(f"unreadable nav path summary: {error!r}")
+            return
+        mesh = path_mesh_from_points(points, waypoints)
+        # b'' is the policy's "this is gone" payload - an empty summary is
+        # how a finished run erases its plan, and it travels the same
+        # delete path a vanished tile does.
+        payload = nav_path_obj_bytes(mesh) if mesh is not None else b''
+        self._policy.offer(('plan', 0, 0), payload, self._clock_fn())
+
     def _pump(self, now: float = None) -> None:
         now = self._clock_fn() if now is None else now
         if not (self._spawn.service_is_ready() and self._delete.service_is_ready()
@@ -618,8 +645,8 @@ class TerrainWriter(Node):
         self._version += 1
         # Mesh file prefix is not the same as the model-name prefix
         # (`tile_` predates the `terrain_`/`obst_` model-name split and stays
-        # as-is for terrain; `obst_` is the new kind's own).
-        prefix = 'tile' if kind == 'terrain' else 'obst'
+        # as-is for terrain; `obst_`/`plan_` are each new kind's own).
+        prefix = {'terrain': 'tile', 'obst': 'obst', 'plan': 'plan'}[kind]
         name = f"{prefix}_{ix}_{iy}_v{self._version:05d}.obj"
         generation = self._generation.get(key, -1) + 1
         # Committed here, at dispatch, not in `_on_spawned` on success. A
@@ -638,8 +665,12 @@ class TerrainWriter(Node):
             with open(os.path.join(self._mesh_dir, name), 'wb') as handle:
                 handle.write(payload)
             mesh_uri = f"model://{GAZEBO_MODEL_NAME}/meshes/{name}"
-            sdf = (terrain_sdf(mesh_uri, model, coloured=self._terrain_coloured)
-                   if kind == 'terrain' else obstacle_sdf(mesh_uri, model))
+            if kind == 'terrain':
+                sdf = terrain_sdf(mesh_uri, model, coloured=self._terrain_coloured)
+            elif kind == 'plan':
+                sdf = nav_path_sdf(mesh_uri, model)
+            else:
+                sdf = obstacle_sdf(mesh_uri, model)
             request = SpawnEntity.Request()
             request.name = model
             request.xml = sdf

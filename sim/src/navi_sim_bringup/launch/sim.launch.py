@@ -19,6 +19,18 @@ from launch_ros.actions import Node
 
 from navi_sim_bringup.world_composition import compose_world, site_scan_required
 
+# The topics sim_bridge carries whenever it runs at all (mode:=semi - see
+# `if external_pose:` below), fixed regardless of any launch argument. Kept
+# at module level, not built inside `_actions()`, so a test can read this
+# list without calling `_actions()`, which raises RuntimeError when the
+# gitignored Model3D_mesh2.obj map mesh is absent - i.e. on any clean
+# checkout.
+BRIDGED_TOPICS = ["/localization/pose:nav_msgs/msg/Odometry",
+                  "/localization/status:std_msgs/msg/String",
+                  "/localization/map_tile:grid_map_msgs/msg/GridMap",
+                  "/localization/obstacle_tile:sensor_msgs/msg/PointCloud2",
+                  "/nav_path_summary:std_msgs/msg/String"]
+
 
 def _robot_description(xacro_path, planar_move: bool):
     """Expands the xacro into a URDF string, or raises.
@@ -191,12 +203,9 @@ def _world_with_mesh(context, *args, **kwargs):
     if external_pose:
         # The twist entry follows twist_topic: with --twist-topic pointed at
         # a scratch topic, the bridge has to carry that one or the wheels in
-        # the picture never move.
-        bridged = [f"{twist_topic}:geometry_msgs/msg/Twist",
-                   "/localization/pose:nav_msgs/msg/Odometry",
-                   "/localization/status:std_msgs/msg/String",
-                   "/localization/map_tile:grid_map_msgs/msg/GridMap",
-                   "/localization/obstacle_tile:sensor_msgs/msg/PointCloud2"]
+        # the picture never move. Everything else is fixed - see
+        # BRIDGED_TOPICS.
+        bridged = [f"{twist_topic}:geometry_msgs/msg/Twist"] + BRIDGED_TOPICS
         arguments = ["--rover-domain", str(rover_domain),
                      "--sim-domain", str(sim_domain)]
         for spec in bridged:
