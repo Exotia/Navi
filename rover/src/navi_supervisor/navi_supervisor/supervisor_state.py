@@ -22,6 +22,14 @@ MANUAL_MODES = (MANUAL, SEMI_AUTO)
 MANUAL_DEADMAN_S = 1.0
 AUTONOMY_DEADMAN_S = 0.5
 
+# Rule 3's tolerance for SEARCHING, and only SEARCHING: the ZED's VIO
+# routinely blips to SEARCHING for a moment when the rover point-turns in
+# poor light and recovers by itself - halting the run on the first such
+# status killed every night run at the opening turn (operator asked for
+# 3 s, 2026-08-31). OFF still halts immediately: a tracking module that is
+# off is not going to blink back.
+LOCALIZATION_GRACE_S = 3.0
+
 # Above these a /manual_twist counts as the operator taking over. The
 # ground station's smallest non-zero output is its gamepad deadzone times
 # its speed cap - 0.1 * 0.05 = 0.005 m/s and 0.1 * 0.1 = 0.01 rad/s - so
@@ -53,6 +61,9 @@ class SupervisorState:
         self._autonomy = ZERO
         self._autonomy_at = None
         self._localization = None          # None means none has arrived yet
+        # When SEARCHING first arrived during THIS autonomous stretch, or
+        # None while localisation is fine - the clock the grace runs on.
+        self._localization_lost_at = None
         self._reason = "startup"
         self._estop_latched = False
         # Whether the chassis has already been told to stop. Starts True so
@@ -140,14 +151,28 @@ class SupervisorState:
             # lets through - so it must not be reachable from the wire.
             return
         self._localization = state
-        if state in ("SEARCHING", "OFF") and self._mode == AUTONOMOUS:
-            self._mode = MANUAL
-            self._reason = f"localisation {state}"
-            self._manual = ZERO
-            self._manual_at = None
-            self._leave_autonomous()
-            self._stopped = True
-            self._queue(CANCEL_GOAL, DEACTIVATE_NAV2, CHASSIS_STOP)
+        if state not in ("SEARCHING", "OFF") or self._mode != AUTONOMOUS:
+            self._localization_lost_at = None
+            return
+        if state == "SEARCHING":
+            # The grace: SEARCHING alone starts a clock instead of a halt,
+            # because a point-turn in poor light blips the VIO and it
+            # recovers in a moment. An OK in between resets the clock (the
+            # branch above). Only SEARCHING sustained past the grace halts;
+            # OFF below never waits.
+            if self._localization_lost_at is None:
+                self._localization_lost_at = now
+                return
+            if now - self._localization_lost_at < LOCALIZATION_GRACE_S:
+                return
+        self._localization_lost_at = None
+        self._mode = MANUAL
+        self._reason = f"localisation {state}"
+        self._manual = ZERO
+        self._manual_at = None
+        self._leave_autonomous()
+        self._stopped = True
+        self._queue(CANCEL_GOAL, DEACTIVATE_NAV2, CHASSIS_STOP)
 
     def on_estop_request(self, now, reason=""):
         """Rule 2: STOP is latched and local.

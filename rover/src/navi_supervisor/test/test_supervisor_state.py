@@ -5,7 +5,8 @@ from navi_supervisor.supervisor_state import (AUTONOMOUS, AUTONOMY_DEADMAN_S,
                                               CANCEL_GOAL, CHASSIS_STOP,
                                               COORDINATOR_ABORT,
                                               COORDINATOR_MANUAL,
-                                              DEACTIVATE_NAV2, ESTOP, MANUAL,
+                                              DEACTIVATE_NAV2, ESTOP,
+                                              LOCALIZATION_GRACE_S, MANUAL,
                                               MANUAL_DEADMAN_S, SEMI_AUTO,
                                               SupervisorState)
 
@@ -234,16 +235,37 @@ def test_a_stick_while_estopped_does_not_take_over():
     assert s.take_actions() == []
 
 
-def test_localisation_searching_halts_autonomy_and_says_why():
+def test_localisation_searching_halts_autonomy_only_past_the_grace():
+    # A SEARCHING blip during a point turn recovers by itself; the halt
+    # comes only when SEARCHING has been the state for the whole grace.
     s = SupervisorState(mode=AUTONOMOUS)
     s.on_autonomy_twist(1.0, 0.3, 0.0, 0.0)
     s.on_localization_status(1.1, "SEARCHING")
+    assert s.mode == AUTONOMOUS
+    assert s.take_actions() == []
+    s.on_localization_status(1.1 + LOCALIZATION_GRACE_S - 0.1, "SEARCHING")
+    assert s.mode == AUTONOMOUS
+    s.on_localization_status(1.1 + LOCALIZATION_GRACE_S + 0.1, "SEARCHING")
     assert s.mode == MANUAL
     assert s.take_actions() == [CANCEL_GOAL, DEACTIVATE_NAV2, CHASSIS_STOP]
-    assert s.output(1.1) == (0.0, 0.0, 0.0)
-    status = s.status(1.1)
+    assert s.output(4.3) == (0.0, 0.0, 0.0)
+    status = s.status(4.3)
     assert status["reason"] == "localisation SEARCHING"
     assert status["localization_state"] == "SEARCHING"
+
+
+def test_a_searching_blip_that_recovers_keeps_the_run_and_resets_the_clock():
+    s = SupervisorState(mode=AUTONOMOUS)
+    s.on_autonomy_twist(1.0, 0.3, 0.0, 0.0)
+    s.on_localization_status(1.0, "SEARCHING")
+    s.on_localization_status(2.0, "OK")           # recovered inside the grace
+    assert s.mode == AUTONOMOUS
+    # A fresh SEARCHING much later starts a fresh clock - the old start
+    # time must not count against it.
+    s.on_localization_status(10.0, "SEARCHING")
+    s.on_localization_status(10.5, "SEARCHING")
+    assert s.mode == AUTONOMOUS
+    assert s.take_actions() == []
 
 
 def test_localisation_off_halts_autonomy_too():

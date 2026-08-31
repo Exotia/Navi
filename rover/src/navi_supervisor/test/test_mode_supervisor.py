@@ -134,6 +134,13 @@ def test_localisation_loss_halts_autonomy_with_the_reason_in_the_status(node):
     supervisor._on_mode_request(_string({"mode": "autonomous"}))
     supervisor._on_autonomy_twist(_twist(0.3, 0.0, 0.0))
     supervisor._publish_tick()
+    # The first SEARCHING starts the grace clock; only one sustained past
+    # LOCALIZATION_GRACE_S halts the run (the wire-level twin of
+    # test_supervisor_state's grace tests).
+    supervisor._on_localization_status(_string({"state": "SEARCHING"}))
+    supervisor._publish_tick()
+    assert nav2.calls == []
+    clock.t += 3.1
     supervisor._on_localization_status(_string({"state": "SEARCHING"}))
     supervisor._publish_tick()
     assert twists[-1] == pytest.approx((0.0, 0.0, 0.0))
