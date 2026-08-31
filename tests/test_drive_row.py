@@ -10,18 +10,13 @@ def state(**over):
     return DriveState(**base)
 
 
-def test_stop_is_always_enabled_even_with_no_status(qtbot):
+def test_this_row_does_not_own_stop(qtbot):
+    # STOP is the window's header button now: one of it, visible in every
+    # view, at a size that needs no aiming. A second STOP here would make
+    # an emergency a choice between two buttons.
     row = DriveRow()
     qtbot.addWidget(row)
-    row.set_state(None)
-    assert row.stop_button.isEnabled()
-
-
-def test_stop_emits_without_confirmation(qtbot):
-    row = DriveRow()
-    qtbot.addWidget(row)
-    with qtbot.waitSignal(row.stop_requested):
-        row.stop_button.click()
+    assert not hasattr(row, "stop_button")
 
 
 def test_manual_and_init_are_disabled_with_no_status(qtbot):
@@ -29,7 +24,19 @@ def test_manual_and_init_are_disabled_with_no_status(qtbot):
     qtbot.addWidget(row)
     assert not row.manual_button.isEnabled()
     assert not row.init_button.isEnabled()
-    assert row.stop_button.isEnabled()
+
+
+def test_the_setup_drawer_starts_closed_and_toggles(qtbot):
+    # The five once-per-boot buttons (two of which move the wheels) stay
+    # out of the way of the one that is pressed constantly.
+    row = DriveRow()
+    qtbot.addWidget(row)
+    assert not row.setup_panel.isVisible()
+    row.setup_toggle.click()
+    assert row.setup_panel.isVisibleTo(row)
+    assert "▾" in row.setup_toggle.text()
+    row.setup_toggle.click()
+    assert not row.setup_panel.isVisibleTo(row)
 
 
 def test_init_asks_for_confirmation_before_emitting(qtbot):
@@ -130,7 +137,7 @@ def test_a_cancelled_init_stays_clickable(qtbot):
 def test_every_button_explains_itself(qtbot):
     row = DriveRow()
     qtbot.addWidget(row)
-    for b in (row.stop_button, row.manual_button, row.init_button,
+    for b in (row.manual_button, row.init_button,
               row.reset_enc_button, row.reset_odom_button,
               row.mode_button, row.state_button):
         assert b.toolTip(), b.text()
@@ -148,32 +155,3 @@ def mode(**over):
     return ModeState(**base)
 
 
-def test_the_mode_pill_is_hidden_until_a_mode_status_arrives(qtbot):
-    row = DriveRow()
-    qtbot.addWidget(row)
-    assert not row.mode_pill.isVisibleTo(row)
-
-
-def test_the_mode_pill_names_the_mode(qtbot):
-    row = DriveRow()
-    qtbot.addWidget(row)
-    row.set_mode_state(mode(mode="semi_auto"))
-    assert row.mode_pill.text() == "SEMI_AUTO"
-    row.set_mode_state(mode(mode="autonomous"))
-    assert row.mode_pill.text() == "AUTONOMOUS"
-
-
-def test_a_latched_estop_is_what_the_mode_pill_says(qtbot):
-    row = DriveRow()
-    qtbot.addWidget(row)
-    row.set_mode_state(mode(mode="estop", estop_latched=True, source=None))
-    assert row.mode_pill.text() == "E-STOP LATCHED"
-
-
-def test_the_mode_pill_survives_a_drive_status_going_away(qtbot):
-    row = DriveRow()
-    qtbot.addWidget(row)
-    row.set_mode_state(mode(mode="autonomous"))
-    row.set_state(None)                # the bridge went quiet, not the supervisor
-    assert row.mode_pill.text() == "AUTONOMOUS"
-    assert row.mode_pill.isVisibleTo(row)

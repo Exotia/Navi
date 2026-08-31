@@ -1,6 +1,7 @@
 import json
 from time import monotonic
 
+from ground_station import theme
 from ground_station.models import Waypoint, parse_path_summary
 from ground_station.ros_client import RosBridgeClient
 from ground_station.ui import main_window
@@ -840,7 +841,10 @@ def test_drive_row_stays_visible_in_every_mode(qtbot):
     for mode in ("semi_auto", "manual", "simulation", "autonomous"):
         window.dashboard_page.mode_changed.emit(mode)
         assert row.isVisibleTo(window)
-        assert row.stop_button.isEnabled()
+        # STOP is in the header now, which is outside the view switch
+        # entirely - so it cannot be hidden by any view at all.
+        assert window.stop_button.isEnabled()
+        assert window.stop_button.isVisibleTo(window)
 
 
 def test_map_status_reaches_the_row_and_goes_stale(qtbot):
@@ -988,9 +992,12 @@ def test_a_timed_out_first_connect_still_registers_every_subscription(qtbot):
     assert client._nav_path_summary_topic is not None
 
 
-def _mode_status(window, mode):
+def _mode_status(window, mode, reason=None):
     from ground_station.models import parse_mode_status
-    window._on_mode_status(parse_mode_status(json.dumps({"mode": mode})))
+    payload = {"mode": mode}
+    if reason is not None:
+        payload["reason"] = reason
+    window._on_mode_status(parse_mode_status(json.dumps(payload)))
 
 
 def test_manual_twist_is_published_in_manual_mode(qtbot):
@@ -1098,7 +1105,7 @@ def test_an_unreadable_mode_status_does_not_reopen_the_stream(qtbot):
 def test_stop_sends_both_the_estop_request_and_the_chassis_stop(qtbot):
     window, _ = make_window(qtbot, initial_host="localhost")
 
-    window.dashboard_page.drive_row.stop_requested.emit()
+    window.stop_button.click()
 
     # A cross-topic sequence, not two independent published_messages[-1]
     # checks: those pass even if the two sends happened in the other order.
@@ -1114,7 +1121,7 @@ def test_stop_sends_the_estop_request_in_autonomous_mode_too(qtbot):
     window, _ = make_window(qtbot, initial_host="localhost")
     _mode_status(window, "autonomous")
 
-    window.dashboard_page.drive_row.stop_requested.emit()
+    window.stop_button.click()
 
     estop = next(t for t in FakeTopic.instances if t.name == "/estop_request")
     assert len(estop.published_messages) == 1
@@ -1139,10 +1146,15 @@ def test_manual_asks_for_the_mode_before_the_coordinator(qtbot):
     assert json.loads(command.published_messages[-1]["data"]) == {"action": "manual"}
 
 
-def test_the_mode_status_reaches_the_drive_row(qtbot):
+def test_the_mode_status_reaches_the_header_and_both_rows(qtbot):
+    # One /mode_status fans out to the three places that gate on it: the
+    # header chip (which draws it), and the two rows that enable or refuse
+    # their buttons by it.
     window, _ = make_window(qtbot, initial_host="localhost")
     _mode_status(window, "autonomous")
-    assert window.dashboard_page.drive_row.mode_pill.text() == "AUTONOMOUS"
+    assert window.rover_mode_pill.text() == "AUTONOMOUS"
+    assert window.dashboard_page.drive_row._mode_state.mode == "autonomous"
+    assert window.dashboard_page.nav_row._mode_state.mode == "autonomous"
 
 
 def test_the_window_subscribes_to_mode_status_on_connect(qtbot):
@@ -1273,3 +1285,51 @@ def test_the_mode_chip_still_drives_the_publish_gate_in_autonomous(qtbot):
     # Raw, not published(): /manual_twist carries a plain dict, not
     # {"data": "<json>"}, so decoding it would raise rather than assert.
     assert [m for n, m in FakeTopic.call_log if n == "/manual_twist"] == []
+
+
+# -- the header: rover mode, localisation health, STOP ----------------------
+
+def test_the_header_names_the_rovers_own_mode_and_why(qtbot):
+    # The rover's mode belongs in the header, not buried in a chip row: it
+    # is what gates Go, and it is not the VIEW radios. The reason rides
+    # along, because "MANUAL - localisation SEARCHING" is the difference
+    # between an operator who knows why their run stopped and one who does
+    # not - that exact reason ended live runs.
+    window, _ = make_window(qtbot)
+    assert window.rover_mode_pill.text() == "ROVER: NO STATUS"
+    _mode_status(window, "autonomous")
+    assert window.rover_mode_pill.text() == "AUTONOMOUS"
+    _mode_status(window, "manual", reason="localisation SEARCHING")
+    assert window.rover_mode_pill.text() == "MANUAL - localisation SEARCHING"
+    # The operator's own last press is not an explanation worth the space.
+    _mode_status(window, "manual", reason="mode request")
+    assert window.rover_mode_pill.text() == "MANUAL"
+
+
+def test_the_localisation_chip_carries_tracking_state_not_just_coordinates(qtbot):
+    # A pose with no tracking behind it is a number that stopped being true
+    # a moment ago, so SEARCHING must not read as healthy just because
+    # coordinates keep arriving.
+    window, _ = make_window(qtbot)
+    window._on_localization_pose({"x": 1.0, "y": 2.0, "yaw": 0.0})
+    window._on_localization_status({"state": "OK"})
+    assert "OK" in window.localization_label.text()
+    assert "x 1.00" in window.localization_label.text()
+    assert theme.OK in window.localization_label.styleSheet()
+
+    window._on_localization_status({"state": "SEARCHING"})
+    assert "SEARCHING" in window.localization_label.text()
+    assert theme.BAD in window.localization_label.styleSheet()
+
+
+def test_escape_stops_the_rover_from_anywhere_in_the_window(qtbot):
+    # A stop pressed by accident costs a re-arm; a stop the operator could
+    # not reach costs the rover.
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QKeySequence
+    window, _ = make_window(qtbot, initial_host="localhost")
+    assert window._stop_shortcut.key() == QKeySequence(Qt.Key.Key_Escape)
+    window._stop_shortcut.activated.emit()
+    qtbot.wait(150)          # animateClick is a timed press
+    assert [name for name, _ in FakeTopic.call_log] == [
+        "/estop_request", "/drive_command"]

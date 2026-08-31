@@ -34,11 +34,19 @@ class DashboardPage(QWidget):
 
         self.drive_card.details_requested.connect(self.drive_details_requested)
 
-        mode_label = QLabel("MODE:")
+        # "VIEW", not "MODE". These radios choose which picture and which
+        # controls are on screen; the rover's own mode is the header pill
+        # and is changed only by the Manual/Autonomous buttons. Labelling
+        # both "mode" is what left an operator pressing Autonomous here and
+        # wondering why the rover would not take a goal.
+        mode_label = QLabel("VIEW:")
         mode_label.setStyleSheet(f"color: {theme.TEXT_DIM}; font-weight: 600;")
-        self.manual_radio = QRadioButton("Manual")
-        self.semi_auto_radio = QRadioButton("Semi-autonomous")
-        self.autonomous_radio = QRadioButton("Autonomous")
+        mode_label.setToolTip(
+            "Chooses what this window shows. The rover's mode is the pill "
+            "in the header - change it with Manual or Autonomous.")
+        self.manual_radio = QRadioButton("Camera")
+        self.semi_auto_radio = QRadioButton("Map + camera")
+        self.autonomous_radio = QRadioButton("Autonomy")
         self.simulation_radio = QRadioButton("Simulation")
         # One list, in display order, rather than four scattered checks: the
         # emitted name and the button are declared together, so adding a
@@ -49,9 +57,15 @@ class DashboardPage(QWidget):
             (self.autonomous_radio, "autonomous"),
             (self.simulation_radio, "simulation"),
         ]
+        self.manual_radio.setToolTip("The rover's camera, full width.")
+        self.semi_auto_radio.setToolTip(
+            "The Gazebo mirror placed by the rover's own localisation, plus "
+            "the map save/load row.")
         self.autonomous_radio.setToolTip(
             "Show the NAV row and the plan view. The rover's own mode "
             "changes only when you press Autonomous on that row.")
+        self.simulation_radio.setToolTip(
+            "The local simulation, dead-reckoned from the commanded twist.")
 
         self._mode_group = QButtonGroup(self)
         mode_row = QHBoxLayout()
@@ -73,7 +87,12 @@ class DashboardPage(QWidget):
         left.setSpacing(8)
         left.addLayout(mode_row)
         left.addWidget(self.video_panel, stretch=3)
-        left.addWidget(self.nav_row)
+        # The NAV row takes a share rather than its bare minimum: in the
+        # autonomy view the plan map is what the operator watches, and at
+        # no stretch it was squeezed to its 320 px floor under a camera
+        # that had three times the room. Hidden widgets contribute no
+        # stretch, so every other view still gives the camera everything.
+        left.addWidget(self.nav_row, stretch=4)
         left.addWidget(self.map_row)
         left.addWidget(self.drive_row)
         left.addWidget(self.drive_card, stretch=1)

@@ -7,7 +7,7 @@ from time import monotonic
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QHBoxLayout, QLabel, QMessageBox, QPushButton,
-                               QWidget)
+                               QVBoxLayout, QWidget)
 
 from ground_station import theme
 from ground_station.models import DriveState
@@ -23,7 +23,8 @@ def _plain(text) -> str:
 
 
 class DriveRow(QWidget):
-    stop_requested = Signal()
+    # No stop_requested: STOP is the window's own header button now, so
+    # there is exactly one of it and it is visible in every view.
     manual_requested = Signal()
     init_requested = Signal()
     reset_encoders_requested = Signal()
@@ -48,33 +49,27 @@ class DriveRow(QWidget):
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setStyleSheet(f"QWidget#driveRow {{ {theme.card_style()} }}")
 
-        self.stop_button = QPushButton("STOP")
-        self.manual_button = QPushButton("Manual")
+        self.manual_button = QPushButton("Take manual control")
         self.init_button = QPushButton("Init drive")
         self.reset_enc_button = QPushButton("Reset encoders")
         self.reset_odom_button = QPushButton("Reset odometry")
         self.mode_button = QPushButton("Drive mode")
         self.state_button = QPushButton("Drive state")
-
-        # STOP must be unmissable: filled BAD, bold white text, generously
-        # sized - this is the button that gets the rover to stop moving.
-        self.stop_button.setStyleSheet(
-            f"QPushButton {{ background-color: {theme.BAD}; color: white; "
-            f"font-weight: 700; border: none; border-radius: 6px; "
-            f"padding: 6px 14px; }} "
-            f"QPushButton:hover {{ background-color: #ff6259; }} "
-            f"QPushButton:pressed {{ background-color: #d9433a; }}"
-        )
-        self.stop_button.setMinimumHeight(34)
-        self.stop_button.setMinimumWidth(90)
+        # The five buttons above the fold are pressed about once per rover
+        # power-cycle; Manual is pressed constantly. Giving all six the same
+        # weight in one row made the frequent one hard to find and put two
+        # wheel-moving buttons a slip away from it. They collapse behind
+        # this toggle instead, closed on start-up.
+        self.setup_toggle = QPushButton("Setup ▸")
+        self.setup_toggle.setCheckable(True)
+        self.setup_toggle.setToolTip(
+            "Once-per-boot drive setup: init, encoder/odometry resets and "
+            "the drive-mode toggles.")
 
         # These move the rover's wheels - a danger hint, not a full danger
         # fill (the buttons stay usable at a glance, just bordered BAD).
-        danger_border = (
-            f"QPushButton {{ border: 1px solid {theme.BAD}; }}"
-        )
-        self.init_button.setStyleSheet(danger_border)
-        self.reset_enc_button.setStyleSheet(danger_border)
+        self.init_button.setStyleSheet(theme.danger_outline_style())
+        self.reset_enc_button.setStyleSheet(theme.danger_outline_style())
 
         # --- status chips -------------------------------------------------
         # Small rounded pills instead of a " | "-joined string. Every
@@ -84,11 +79,11 @@ class DriveRow(QWidget):
         self.no_status_label = QLabel("DRIVE: no status")
         self.no_status_label.setStyleSheet(f"color: {theme.TEXT_DIM}; border: none;")
 
-        # The supervisor's mode, not the bridge's status - a separate rover
-        # node, so a separate pill with its own setter. It goes first
-        # because it is the chip that explains why the sticks are or are
-        # not reaching the wheels.
-        self.mode_pill = QLabel()
+        # No mode chip here: the header owns the rover's mode (with the
+        # reason attached). This row carries the BRIDGE's story - lease,
+        # coordinator state, deadman, twist age - which is a different
+        # rover node's business. Three chips reading "MANUAL" in one view
+        # is noise, and the header's is the one with the answer in it.
 
         self.lease_pill = QLabel()
         self.state_pill = QLabel()
@@ -105,31 +100,46 @@ class DriveRow(QWidget):
         # state, twist age, last action, last_error) is pinned to plain
         # text - never auto-detected as rich text - so a stray '<' from the
         # rover is shown as itself instead of being parsed as markup.
-        for w in (self.mode_pill, self.lease_pill, self.state_pill,
+        for w in (self.lease_pill, self.state_pill,
                   self.twist_age_label, self.last_action_label, self.error_pill):
             w.setTextFormat(Qt.TextFormat.PlainText)
 
         self.status_layout = QHBoxLayout()
-        self.status_layout.addWidget(self.mode_pill)
         self.status_layout.addWidget(self.no_status_label)
         for w in (self.lease_pill, self.state_pill, self.deadman_pill,
                   self.twist_age_label, self.last_action_label, self.error_pill):
             self.status_layout.addWidget(w)
         self.status_layout.addStretch()
 
-        layout = QHBoxLayout(self)
+        # Two lines: what you press while driving on top (with the status
+        # chips beside it, which is what you read while driving), and the
+        # collapsed setup drawer beneath. STOP is deliberately absent - it
+        # lives in the header now, one place in every view, at a size that
+        # does not need aiming.
         title = QLabel("DRIVE")
         title.setStyleSheet(theme.section_title_style())
-        layout.addWidget(title)
-        for b in (self.stop_button, self.manual_button, self.init_button,
-                  self.reset_enc_button, self.reset_odom_button,
-                  self.mode_button, self.state_button):
-            layout.addWidget(b)
-        layout.addLayout(self.status_layout, stretch=2)
 
-        self.stop_button.setToolTip(
-            "Stop all movement immediately (emergency stop).\n"
-            "Latches: the rover stays stopped until you move a stick again.")
+        top_row = QHBoxLayout()
+        top_row.addWidget(title)
+        top_row.addWidget(self.manual_button)
+        top_row.addWidget(self.setup_toggle)
+        top_row.addLayout(self.status_layout, stretch=2)
+
+        self.setup_panel = QWidget()
+        setup_layout = QHBoxLayout(self.setup_panel)
+        setup_layout.setContentsMargins(0, 0, 0, 0)
+        for b in (self.init_button, self.reset_enc_button,
+                  self.reset_odom_button, self.mode_button, self.state_button):
+            setup_layout.addWidget(b)
+        setup_layout.addStretch()
+        self.setup_panel.setVisible(False)
+        self.setup_toggle.toggled.connect(self._on_setup_toggled)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+        layout.addLayout(top_row)
+        layout.addWidget(self.setup_panel)
+
         self.manual_button.setToolTip(
             "Ask the rover's coordinator for Manual mode.\n"
             "Driving arms ~5 s later (chip shows ARMING, then MANUAL).")
@@ -144,7 +154,6 @@ class DriveRow(QWidget):
             "Toggle the drive mode on the rover (kinematic / direct).")
         self.state_button.setToolTip(
             "Cycle the rover's drive state machine. Can move the wheels.")
-        self.stop_button.clicked.connect(self.stop_requested.emit)
         self.manual_button.clicked.connect(self.manual_requested.emit)
         self.init_button.clicked.connect(self._on_init)
         self.reset_enc_button.clicked.connect(self._on_reset_encoders)
@@ -171,38 +180,18 @@ class DriveRow(QWidget):
                   self.reset_odom_button, self.mode_button, self.state_button):
             b.setEnabled(movable)
         self.init_button.setEnabled(movable and not self._init_sent)
-        self.stop_button.setEnabled(True)          # always
         self._refresh_status()
 
-    def set_mode_state(self, state) -> None:
-        """/mode_status, which is a different rover node's business from
-        /drive_status - the supervisor's, not the bridge's. Hence its own
-        setter and its own pill: either source can go quiet without
-        blanking the other, and the mode is exactly what the operator needs
-        when the bridge is the thing that has gone quiet."""
-        self._mode_state = state
-        self._refresh_mode()
+    def _on_setup_toggled(self, open_: bool) -> None:
+        self.setup_panel.setVisible(open_)
+        self.setup_toggle.setText("Setup ▾" if open_ else "Setup ▸")
 
-    def _refresh_mode(self) -> None:
-        s = self._mode_state
-        if s is None:
-            self.mode_pill.setVisible(False)
-            return
-        if s.estop_latched or s.mode == "estop":
-            self.mode_pill.setText("E-STOP LATCHED")
-            self.mode_pill.setStyleSheet(theme.pill_style(theme.BAD, "white"))
-        elif s.mode == "autonomous":
-            self.mode_pill.setText("AUTONOMOUS")
-            self.mode_pill.setStyleSheet(theme.pill_style(theme.ACCENT, "#2a1600"))
-        elif s.mode in ("manual", "semi_auto"):
-            self.mode_pill.setText(s.mode.upper())
-            self.mode_pill.setStyleSheet(theme.pill_style(theme.OK, "#0c1a0e"))
-        else:
-            # A mode this build does not know. Shown verbatim rather than
-            # guessed at, and through _plain because it came off the wire.
-            self.mode_pill.setText(_plain(f"MODE {s.mode}"))
-            self.mode_pill.setStyleSheet(theme.pill_style(theme.OFF, theme.TEXT))
-        self.mode_pill.setVisible(True)
+    def set_mode_state(self, state) -> None:
+        """/mode_status is the supervisor's, not the bridge's. This row no
+        longer draws it (the header does, with the reason attached); the
+        value is kept because it is this row's business whether the sticks
+        can reach the wheels at all."""
+        self._mode_state = state
 
     def refresh(self, now=None) -> None:
         self._refresh_status(now)

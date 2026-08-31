@@ -151,9 +151,13 @@ def test_dashboard_page_offers_the_four_modes(qtbot):
     page = DashboardPage()
     qtbot.addWidget(page)
 
-    assert page.manual_radio.text() == "Manual"
-    assert page.semi_auto_radio.text() == "Semi-autonomous"
-    assert page.autonomous_radio.text() == "Autonomous"
+    # The radios choose a VIEW, and are named for what they show: labelling
+    # them for rover modes ("Manual", "Autonomous") next to buttons that
+    # really do change the rover's mode is what left an operator pressing
+    # the radio and wondering why no goal would start.
+    assert page.manual_radio.text() == "Camera"
+    assert page.semi_auto_radio.text() == "Map + camera"
+    assert page.autonomous_radio.text() == "Autonomy"
     assert page.simulation_radio.text() == "Simulation"
     assert page.manual_radio.isChecked() is True
 

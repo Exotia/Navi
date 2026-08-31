@@ -1,3 +1,4 @@
+from ground_station import theme
 from ground_station.models import ModeState, NavStatus, Waypoint
 from ground_station.ui.nav_row import NavRow
 
@@ -156,3 +157,40 @@ def test_clicking_the_canvas_adds_a_waypoint_to_the_row(qtbot):
     row = armed_row(qtbot)
     row.map_view.point_clicked.emit(4.0, 2.0)
     assert row.waypoints.items == [Waypoint(4.0, 2.0, None)]
+
+
+# -- the map tools ----------------------------------------------------------
+
+def test_the_map_can_be_zoomed_and_unfollowed_from_the_row(qtbot):
+    # The canvas had zoom and follow logic that nothing on screen could
+    # reach: placing waypoints on a map you cannot scale is working blind.
+    row = NavRow()
+    qtbot.addWidget(row)
+    row.map_view.resize(400, 300)
+    before = row.map_view.transform.metres_per_pixel
+    row.zoom_in_button.click()
+    assert row.map_view.transform.metres_per_pixel < before
+    row.zoom_out_button.click()
+    assert row.map_view.transform.metres_per_pixel == before
+
+    # Follow starts on, so the view tracks the rover; switching it off pins
+    # the view to the ground instead.
+    assert row.follow_button.isChecked()
+    row.set_pose({"x": 5.0, "y": 0.0, "yaw": 0.0})
+    assert row.map_view.transform.centre_x == 5.0
+    row.follow_button.click()
+    row.set_pose({"x": 9.0, "y": 0.0, "yaw": 0.0})
+    assert row.map_view.transform.centre_x == 5.0
+
+
+def test_resume_is_lit_only_while_the_rover_is_waiting_on_it(qtbot):
+    # Resume is pressed at every waypoint now (the coordinator holds in
+    # Waiting with movement disabled until it is), so it carries Go's fill -
+    # but only when pressing it is the next thing to do.
+    row = NavRow()
+    qtbot.addWidget(row)
+    row.set_state(nav(state="running"))
+    assert row.resume_button.styleSheet() == ""
+    row.set_state(nav(state="paused"))
+    assert row.resume_button.isEnabled()
+    assert theme.ACCENT in row.resume_button.styleSheet()

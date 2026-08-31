@@ -21,6 +21,14 @@ class NodeListWidget(QWidget):
         title.setStyleSheet(theme.section_title_style())
         self._layout.addWidget(title)
         self._row_labels: list[QLabel] = []
+        # Rows stack from the top under the title. Without this the layout
+        # spread its few children down the full column height and left the
+        # title floating in the middle of an empty card.
+        self._layout.addStretch()
+
+    def _insert_row(self, label: QLabel) -> None:
+        """Above the trailing stretch, so rows stay packed under the title."""
+        self._layout.insertWidget(self._layout.count() - 1, label)
 
     def row_count(self) -> int:
         return len(self._row_labels)
@@ -39,5 +47,5 @@ class NodeListWidget(QWidget):
             state_word = "up" if status.alive else "down"
             label = QLabel(f"{status.name}  ({state_word})")
             label.setStyleSheet(f"color: {color}; font-family: {theme.MONO_FONT_FAMILY}; border: none;")
-            self._layout.addWidget(label)
+            self._insert_row(label)
             self._row_labels.append(label)

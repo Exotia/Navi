@@ -3,7 +3,8 @@ import socket
 import sys
 from time import monotonic, time
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                 QStackedWidget, QLineEdit, QPushButton)
 
@@ -74,6 +75,9 @@ class MainWindow(QMainWindow):
         # show the current state immediately instead of a blank marker until
         # the next 2 Hz status message.
         self._localization_status: dict | None = None
+        # The last /localization/pose, kept so the header chip can show
+        # tracking state and pose together whichever of the two arrives.
+        self._localization_pose: dict | None = None
         # monotonic() when that status arrived, or None if none has.
         self._localization_status_at: float | None = None
         # monotonic() when the last /localization/map_status arrived, or
@@ -125,8 +129,45 @@ class MainWindow(QMainWindow):
         self.connection_label = QLabel("ROSBRIDGE: DISCONNECTED")
         self.connection_label.setStyleSheet(self._header_pill_style(False))
 
+        # The rover's OWN mode, in the header rather than buried in the DRIVE
+        # row's chips: it is the answer to "what is the rover doing right
+        # now", it is what gates Go, and it is emphatically not the VIEW
+        # radios below (which only choose a picture). An operator who
+        # confuses the two cannot start a run, so the authoritative one gets
+        # the authoritative position.
+        self.rover_mode_pill = QLabel("ROVER: NO STATUS")
+        self.rover_mode_pill.setStyleSheet(theme.pill_style(theme.OFF, theme.TEXT))
+        self.rover_mode_pill.setTextFormat(Qt.TextFormat.PlainText)
+        self.rover_mode_pill.setToolTip(
+            "The rover's actual mode, from /mode_status. Changed with the "
+            "Manual and Autonomous buttons - never by the VIEW selector.")
+
+        # Tracking health, not just coordinates: a SEARCHING ZED halts every
+        # run (supervisor rule 3), and before this the operator had to ask
+        # where that was visible. State first, coordinates after.
         self.localization_label = QLabel("LOC: NO POSE")
         self.localization_label.setStyleSheet(self._header_pill_style(False))
+        self.localization_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.localization_label.setToolTip(
+            "ZED tracking state and the rover's pose. SEARCHING for longer "
+            "than the supervisor's grace halts an autonomous run.")
+
+        # The one control that must be in the same place in every view, at a
+        # size nobody has to aim for. It was a same-sized button among seven
+        # on the DRIVE row; here nothing competes with it.
+        self.stop_button = QPushButton("STOP")
+        self.stop_button.setStyleSheet(theme.stop_button_style())
+        self.stop_button.setMinimumHeight(40)
+        self.stop_button.setMinimumWidth(120)
+        self.stop_button.setToolTip(
+            "Stop all movement immediately (emergency stop).  [Esc]\n"
+            "Latches: the rover stays stopped until you move a stick again.")
+        self.stop_button.clicked.connect(self._on_stop_requested)
+        # Esc stops the rover from anywhere in the window, without finding
+        # the button first. A stop pressed by accident costs a re-arm; a
+        # stop the operator could not reach costs the rover.
+        self._stop_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        self._stop_shortcut.activated.connect(self.stop_button.animateClick)
 
         self.host_input = QLineEdit(initial_host or "")
         self.host_input.setPlaceholderText("rosbridge host, e.g. 192.168.1.50")
@@ -143,16 +184,25 @@ class MainWindow(QMainWindow):
             f"color: {theme.TEXT}; font-weight: 600; font-size: {theme.FONT_SIZE_TITLE}px;"
         )
 
+        # Header reading order, left to right: who am I, what is the rover
+        # doing, can it see where it is | how do I reach it | STOP.
+        # Rover state sits left (read constantly), link plumbing right
+        # (touched once per session), STOP hard right on its own.
         header = QWidget()
         header.setStyleSheet(f"background-color: {theme.BG};")
         header_layout = QHBoxLayout(header)
+        header_layout.setSpacing(10)
         header_layout.addWidget(title_label)
+        header_layout.addSpacing(8)
+        header_layout.addWidget(self.rover_mode_pill)
+        header_layout.addWidget(self.localization_label)
         header_layout.addStretch()
+        header_layout.addWidget(self.connection_label)
         header_layout.addWidget(self.host_input)
         header_layout.addWidget(self.port_input)
         header_layout.addWidget(self.connect_button)
-        header_layout.addWidget(self.connection_label)
-        header_layout.addWidget(self.localization_label)
+        header_layout.addSpacing(16)
+        header_layout.addWidget(self.stop_button)
 
         self.dashboard_page = DashboardPage(video_receiver=video_receiver)
         self.drive_detail_page = DriveDetailPage()
@@ -182,7 +232,6 @@ class MainWindow(QMainWindow):
         row.clear_requested.connect(lambda: self._send_map_command("clear"))
 
         drive_row = self.dashboard_page.drive_row
-        drive_row.stop_requested.connect(self._on_stop_requested)
         drive_row.manual_requested.connect(self._on_manual_requested)
         drive_row.init_requested.connect(lambda: self._send_drive_command("init"))
         drive_row.reset_encoders_requested.connect(
@@ -421,6 +470,10 @@ class MainWindow(QMainWindow):
                 > LOCALIZATION_STATUS_STALE_AFTER_SECONDS):
             self._localization_status = None
             self._localization_status_at = None
+            # The pose goes with it: coordinates from a rover that has
+            # stopped reporting its tracking health are not a position.
+            self._localization_pose = None
+            self._refresh_localization_label()
             self.dashboard_page.video_panel.set_localization_status(None)
 
         # Same staleness rule, for the map row: a rover that has gone quiet
@@ -544,6 +597,7 @@ class MainWindow(QMainWindow):
         the next 2 Hz message."""
         self._localization_status = status
         self._localization_status_at = monotonic()
+        self._refresh_localization_label()
         self.dashboard_page.video_panel.set_localization_status(status)
 
     def _on_localization_pose(self, pose: dict) -> None:
@@ -551,11 +605,38 @@ class MainWindow(QMainWindow):
         the ground station does with the pose - the rover in the Gazebo view
         is placed over DDS by sim_ik_node, not from here, because this
         process has no ROS and is not in that path."""
-        self.localization_label.setText(
-            f"LOC: x {pose['x']:.2f}  y {pose['y']:.2f}  "
-            f"yaw {math.degrees(pose['yaw']):.1f}°")
-        self.localization_label.setStyleSheet(self._header_pill_style(True))
+        self._localization_pose = pose
+        self._refresh_localization_label()
         self.dashboard_page.nav_row.set_pose(pose)
+
+    def _refresh_localization_label(self) -> None:
+        """Tracking state first, pose second. A pose with no tracking behind
+        it is a number that stopped being true a moment ago, so the state is
+        what the chip is coloured by - green only for OK."""
+        status = self._localization_status
+        pose = self._localization_pose
+        state = None
+        if isinstance(status, dict):
+            value = status.get("state")
+            state = str(value) if value is not None else None
+
+        if pose is None:
+            text = f"LOC: {state}" if state else "LOC: NO POSE"
+        else:
+            coords = (f"x {pose['x']:.2f}  y {pose['y']:.2f}  "
+                      f"yaw {math.degrees(pose['yaw']):.1f}°")
+            text = f"LOC: {state}  {coords}" if state else f"LOC: {coords}"
+        self.localization_label.setText(text)
+
+        if state == "OK":
+            self.localization_label.setStyleSheet(theme.pill_style(theme.OK, "#0c1a0e"))
+        elif state in ("SEARCHING", "OFF"):
+            # The state that halts autonomous runs must not read as healthy
+            # just because coordinates are still arriving.
+            self.localization_label.setStyleSheet(theme.pill_style(theme.BAD, "white"))
+        else:
+            self.localization_label.setStyleSheet(
+                self._header_pill_style(pose is not None))
 
     def _send_map_command(self, action: str, name: str | None = None) -> None:
         if self.ros_client is None:
@@ -584,8 +665,33 @@ class MainWindow(QMainWindow):
         if state is None:
             return
         self._mode_state = state
+        self._refresh_rover_mode_pill(state)
         self.dashboard_page.drive_row.set_mode_state(state)
         self.dashboard_page.nav_row.set_mode_state(state)
+
+    def _refresh_rover_mode_pill(self, state) -> None:
+        """The header's rover-mode chip. The reason rides along with the
+        mode: "MANUAL (localisation SEARCHING)" is the difference between
+        an operator who knows why their run stopped and one who does not."""
+        if state is None:
+            self.rover_mode_pill.setText("ROVER: NO STATUS")
+            self.rover_mode_pill.setStyleSheet(theme.pill_style(theme.OFF, theme.TEXT))
+            return
+        if state.estop_latched or state.mode == "estop":
+            text, bg, fg = "E-STOP LATCHED", theme.BAD, "white"
+        elif state.mode == "autonomous":
+            text, bg, fg = "AUTONOMOUS", theme.ACCENT, "#2a1600"
+        elif state.mode in ("manual", "semi_auto"):
+            text, bg, fg = state.mode.upper(), theme.OK, "#0c1a0e"
+        else:
+            text, bg, fg = f"MODE {state.mode}", theme.OFF, theme.TEXT
+        reason = getattr(state, "reason", "") or ""
+        # Only reasons that explain a state the operator did not choose;
+        # "mode request" is just an echo of their own last press.
+        if reason and reason not in ("mode request", "startup"):
+            text = f"{text} - {reason}"
+        self.rover_mode_pill.setText(str(text))
+        self.rover_mode_pill.setStyleSheet(theme.pill_style(bg, fg))
 
     def _on_autonomous_requested(self) -> None:
         """The NAV row's Autonomous button. Only a /mode_request: the

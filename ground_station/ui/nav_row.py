@@ -42,7 +42,6 @@ class NavRow(QWidget):
         self.confirm_abort = self._confirm_abort_dialog
 
         self.map_view = NavMapView()
-        self.map_view.setMinimumHeight(220)
         self.map_view.point_clicked.connect(self.append_world_point)
 
         self.setObjectName("navRow")
@@ -70,25 +69,22 @@ class NavRow(QWidget):
         self.resume_button = QPushButton("Resume")
         self.abort_button = QPushButton("Abort")
 
-        # Go starts a mission - filled ACCENT, the same visual weight
-        # drive_row.py gives STOP (a full-fill button), just the milder
-        # colour: this button starts autonomy, it does not stop the rover.
-        self.go_button.setStyleSheet(
-            f"QPushButton {{ background-color: {theme.ACCENT}; color: #2a1600; "
-            f"font-weight: 700; border: none; border-radius: 6px; "
-            f"padding: 6px 14px; }} "
-            f"QPushButton:hover {{ background-color: #f0965c; }} "
-            f"QPushButton:pressed {{ background-color: #c86a2e; }} "
-            f"QPushButton:disabled {{ background-color: {theme.PANEL}; "
-            f"color: {theme.TEXT_DIM}; }}"
-        )
+        # Go starts a mission - filled ACCENT, the same visual weight the
+        # header gives STOP, just the milder colour: this button starts
+        # autonomy, it does not stop the rover.
+        self.go_button.setStyleSheet(theme.go_button_style())
+        self.go_button.setMinimumHeight(34)
+        # Resume is now pressed at EVERY waypoint (the coordinator holds in
+        # Waiting with movement disabled until it is), so it earns the same
+        # fill as Go - but only while it is actually the next thing to do:
+        # _refresh_controls swaps it back to a plain button otherwise, so a
+        # lit Resume always means "the rover is waiting for you".
+        self.resume_button.setMinimumHeight(34)
         # Abort moves the rover to a stop and tears down the coordinator's
-        # run - a danger hint, the same border-only weight drive_row.py
+        # run - a danger hint, the same border-only weight the DRIVE row
         # gives Init/Reset encoders, not a full fill: the button stays
         # readable at a glance, just bordered BAD.
-        self.abort_button.setStyleSheet(
-            f"QPushButton {{ border: 1px solid {theme.BAD}; }}"
-        )
+        self.abort_button.setStyleSheet(theme.danger_outline_style())
 
         # --- status pills ----------------------------------------------
         self.no_status_label = QLabel("NAV: no status")
@@ -112,35 +108,115 @@ class NavRow(QWidget):
             w.setTextFormat(Qt.TextFormat.PlainText)
 
         # --- layout ---------------------------------------------------
-        layout = QVBoxLayout(self)
+        # Three zones, in the order the operator uses them: the map (the
+        # instrument you actually watch, so it gets the space), the waypoint
+        # editor beside it (a list you touch before a run, not during), and
+        # the mission bar underneath spanning both - the buttons you press,
+        # on their own line where nothing else competes.
         title = QLabel("NAV")
         title.setStyleSheet(theme.section_title_style())
 
-        entry_layout = QHBoxLayout()
-        entry_layout.addWidget(title)
-        for w in (self.x_input, self.y_input, self.yaw_input, self.add_button,
-                  self.remove_button, self.clear_button, self.up_button,
+        self.map_view.setMinimumHeight(320)
+
+        # The canvas has zoom and follow-the-rover logic that nothing on
+        # screen could reach: an operator placing waypoints on a map they
+        # cannot scale is working blind at whatever scale it booted with.
+        self.zoom_in_button = QPushButton("+")
+        self.zoom_out_button = QPushButton("−")
+        self.follow_button = QPushButton("Follow rover")
+        self.follow_button.setCheckable(True)
+        self.follow_button.setChecked(True)
+        self.zoom_in_button.setToolTip("Zoom in on the plan view.")
+        self.zoom_out_button.setToolTip("Zoom out.")
+        self.follow_button.setToolTip(
+            "Keep the view centred on the rover. Switch off to hold a fixed "
+            "patch of ground while the rover drives across it.")
+        for b in (self.zoom_in_button, self.zoom_out_button):
+            b.setFixedWidth(34)
+        self.zoom_in_button.clicked.connect(self.map_view.zoom_in)
+        self.zoom_out_button.clicked.connect(self.map_view.zoom_out)
+        self.follow_button.toggled.connect(self.map_view.set_follow)
+
+        map_tools = QHBoxLayout()
+        map_tools.setSpacing(4)
+        map_tools.addWidget(self.zoom_in_button)
+        map_tools.addWidget(self.zoom_out_button)
+        map_tools.addWidget(self.follow_button)
+        map_tools.addStretch()
+
+        editor = QVBoxLayout()
+        editor.setSpacing(6)
+        editor_title = QLabel("WAYPOINTS")
+        editor_title.setStyleSheet(theme.section_title_style())
+        editor.addWidget(editor_title)
+        self.click_hint = QLabel("click the map to add")
+        self.click_hint.setStyleSheet(
+            f"color: {theme.TEXT_DIM}; font-size: {theme.FONT_SIZE_SMALL}px; "
+            f"border: none;")
+        editor.addWidget(self.click_hint)
+        editor.addWidget(self.waypoint_list, stretch=1)
+
+        # Coordinates on one line, the list verbs on the next: eight widgets
+        # in a single row made every one of them too narrow to read.
+        coords = QHBoxLayout()
+        coords.setSpacing(4)
+        for w in (self.x_input, self.y_input, self.yaw_input):
+            w.setMinimumWidth(0)
+            coords.addWidget(w)
+        coords.addWidget(self.add_button)
+        editor.addLayout(coords)
+
+        verbs = QHBoxLayout()
+        verbs.setSpacing(4)
+        for w in (self.remove_button, self.clear_button, self.up_button,
                   self.down_button):
-            entry_layout.addWidget(w)
+            verbs.addWidget(w)
+        editor.addLayout(verbs)
+
+        editor_panel = QWidget()
+        editor_panel.setLayout(editor)
+        editor_panel.setFixedWidth(300)
+
+        map_column = QVBoxLayout()
+        map_column.setSpacing(6)
+        map_column.addWidget(self.map_view, stretch=1)
+        map_column.addLayout(map_tools)
+
+        upper = QHBoxLayout()
+        upper.setSpacing(8)
+        upper.addLayout(map_column, stretch=1)
+        upper.addWidget(editor_panel)
 
         mission_layout = QHBoxLayout()
-        for b in (self.autonomous_button, self.go_button, self.pause_button,
-                  self.resume_button, self.abort_button):
-            mission_layout.addWidget(b)
+        mission_layout.setSpacing(8)
+        mission_layout.addWidget(title)
+        mission_layout.addWidget(self.autonomous_button)
+        mission_layout.addWidget(self.go_button)
+        mission_layout.addWidget(self.pause_button)
+        mission_layout.addWidget(self.resume_button)
+        mission_layout.addWidget(self.abort_button)
+        mission_layout.addSpacing(12)
+        # The status chips share the mission line: what the run is doing and
+        # what you can do about it belong in one glance, not two rows apart.
+        mission_layout.addWidget(self.no_status_label)
+        for w in (self.state_pill, self.waypoint_pill, self.progress_label):
+            mission_layout.addWidget(w)
         mission_layout.addStretch()
 
-        status_layout = QHBoxLayout()
-        status_layout.addWidget(self.no_status_label)
-        for w in (self.state_pill, self.waypoint_pill, self.progress_label,
-                  self.error_pill, self.hint_label):
-            status_layout.addWidget(w)
-        status_layout.addStretch()
+        # The reason line gets its own full-width row: run-ending reasons
+        # ("Nav2 goal ended with status 6", "waypoint 2/7 reached - resume to
+        # continue") are sentences, and squeezing them into the button row
+        # truncated exactly the text that explains the failure.
+        reason_layout = QHBoxLayout()
+        reason_layout.addWidget(self.error_pill)
+        reason_layout.addWidget(self.hint_label)
+        reason_layout.addStretch()
 
-        layout.addLayout(entry_layout)
-        layout.addWidget(self.waypoint_list)
-        layout.addWidget(self.map_view)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+        layout.addLayout(upper, stretch=1)
         layout.addLayout(mission_layout)
-        layout.addLayout(status_layout)
+        layout.addLayout(reason_layout)
 
         self.autonomous_button.setToolTip(
             "Hand the rover to autonomy. Nav2 will drive it. STOP stays live.")
@@ -274,7 +350,12 @@ class NavRow(QWidget):
         self.go_button.setEnabled(
             is_autonomous and has_waypoints and self._state is not None and not active)
         self.pause_button.setEnabled(run_state == "running")
-        self.resume_button.setEnabled(run_state == "paused")
+        waiting_for_resume = run_state == "paused"
+        self.resume_button.setEnabled(waiting_for_resume)
+        # Lit only while the rover is genuinely waiting on it - see the
+        # comment where Resume is created.
+        self.resume_button.setStyleSheet(
+            theme.go_button_style() if waiting_for_resume else "")
         self.abort_button.setEnabled(active)
         self.autonomous_button.setEnabled(
             self._mode_state is not None and not is_autonomous)
