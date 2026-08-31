@@ -47,18 +47,22 @@
       </PipelineSequence>
       <ReactiveFallback name="RecoveryFallback">
         <GoalUpdated/>
-        <!-- No Spin, no BackUp: both are blind motions (their own collision
-             check aborted them anyway near walls in the night sessions -
-             "Collision Ahead - Exiting Spin/DriveOnHeading"), and to an
-             operator they read as the rover going haywire. Clearing plus a
-             short wait gives perception time to fill the map; if that does
-             not unstick the run, an honest abort with a reason beats
-             gyrating in place. -->
+        <!-- Clear, then LOOK AROUND, then wait. The Spin is back by operator
+             request, and with a better justification than it left with: a
+             "poisoned" map around the rover (night z-drift phantoms) heals
+             only when the camera re-observes it, and a point turn on the
+             wheel-proven trail is the one motion guaranteed to stand on
+             traversable ground while sweeping the camera across the cage.
+             Its own collision check may still cut a turn short against
+             phantom walls - a partial look is still new observations, and
+             the RoundRobin comes back to it next round. BackUp stays out:
+             reversing is blind on this rover. -->
         <RoundRobin name="RecoveryActions">
           <Sequence name="ClearingActions">
             <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
             <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
           </Sequence>
+          <Spin spin_dist="1.57"/>
           <Wait wait_duration="5"/>
         </RoundRobin>
       </ReactiveFallback>

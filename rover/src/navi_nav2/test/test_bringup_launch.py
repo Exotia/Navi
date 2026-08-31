@@ -135,3 +135,17 @@ def test_an_obstructed_goal_falls_back_to_smac_with_its_tolerance():
     fallbacks = [f for f in root.iter('Fallback')
                  if [c.get('planner_id') for c in f] == ['GridBased', 'SmacBased']]
     assert len(fallbacks) == 1, "Theta* first, Smac as the goal-tolerant retry"
+
+
+def test_the_recovery_ladder_is_clear_look_around_wait_and_never_reverse():
+    """The Spin is the look-around that heals a poisoned map: the camera
+    must re-observe night-drift phantoms for the fusion to erase them, and
+    a point turn on the wheel-proven trail is the one motion that stands on
+    guaranteed ground while doing it. BackUp must never return - reversing
+    is blind on this rover."""
+    root = ET.parse(os.path.join(TREES, 'navigate_to_pose_no_reverse.xml')).getroot()
+    robins = list(root.iter('RoundRobin'))
+    assert len(robins) == 1
+    children = [c.tag for c in robins[0]]
+    assert children == ['Sequence', 'Spin', 'Wait']
+    assert not list(root.iter('BackUp'))
