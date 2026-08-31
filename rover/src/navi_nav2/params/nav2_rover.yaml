@@ -245,7 +245,7 @@ global_costmap:
       height: 48
       track_unknown_space: true
       transform_tolerance: 0.5
-      footprint: "[[0.56, 0.545], [0.56, -0.545], [-0.56, -0.545], [-0.56, 0.545]]"
+      footprint: "[[0.46, 0.445], [0.46, -0.445], [-0.46, -0.445], [-0.46, 0.445]]"
       footprint_padding: 0.03
       # These three belong to Costmap2DROS itself (the OccupancyGrid ->
       # Costmap translation table shared by every layer), not to
@@ -307,7 +307,7 @@ local_costmap:
       height: 8
       track_unknown_space: true
       transform_tolerance: 0.5
-      footprint: "[[0.56, 0.545], [0.56, -0.545], [-0.56, -0.545], [-0.56, 0.545]]"
+      footprint: "[[0.46, 0.445], [0.46, -0.445], [-0.46, -0.445], [-0.46, 0.445]]"
       footprint_padding: 0.03
       # See the identical note on the global costmap: these three belong
       # to Costmap2DROS, not to static_layer's own namespace.

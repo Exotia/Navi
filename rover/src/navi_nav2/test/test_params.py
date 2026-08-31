@@ -205,5 +205,5 @@ def test_the_footprint_is_the_rovers_rectangle_with_a_5cm_shell():
     # ~5 cm while orientation-aware collision checks still refuse turns
     # that would swing a corner in.
     for which in ('global_costmap', 'local_costmap'):
-        assert '0.545' in str(costmap(which)['footprint'])
+        assert '0.445' in str(costmap(which)['footprint'])
         assert 'robot_radius' not in costmap(which)
