@@ -1218,6 +1218,27 @@ def test_nav_status_reaches_the_row(qtbot):
     assert window.dashboard_page.nav_row._state.state == "running"
 
 
+def test_a_run_ending_prints_one_terminal_line_with_the_reason(qtbot, capsys):
+    # The operator asked for this after a live session where runs ended and
+    # the UI row alone did not say why: every end of an autonomy run puts
+    # exactly one line with the reason on the terminal - once, not at the
+    # 2 Hz status republish rate.
+    window = connected_window(qtbot)
+    _nav_status(window, state="running", run_id="gs-7")
+    _nav_status(window, state="aborted", run_id="gs-7",
+                error="Nav2 goal ended with status 6")
+    _nav_status(window, state="aborted", run_id="gs-7",
+                error="Nav2 goal ended with status 6")
+    err = capsys.readouterr().err
+    assert err.count("ground_station: autonomy run") == 1
+    assert "aborted - Nav2 goal ended with status 6" in err
+
+    _nav_status(window, state="running", run_id="gs-8")
+    _nav_status(window, state="succeeded", run_id="gs-8")
+    err = capsys.readouterr().err
+    assert "succeeded - destination reached" in err
+
+
 def test_the_path_summary_reaches_the_canvas(qtbot):
     window = connected_window(qtbot)
     window.ros_client.signals.nav_path_summary_received.emit(

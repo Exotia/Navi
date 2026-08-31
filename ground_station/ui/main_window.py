@@ -9,8 +9,9 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, Q
 
 from ground_station import theme
 from ground_station.gamepad_input import GamepadReader
-from ground_station.models import (DriveCommandTracker, NodeRegistry,
-                                   is_stick_deflected, may_publish_manual_twist,
+from ground_station.models import (NAV_ACTIVE_STATES, DriveCommandTracker,
+                                   NodeRegistry, is_stick_deflected,
+                                   may_publish_manual_twist,
                                    may_publish_takeover_twist, new_run_id)
 from ground_station.ros_client import RosBridgeClient
 from ground_station.ui.dashboard_page import DashboardPage
@@ -97,6 +98,10 @@ class MainWindow(QMainWindow):
         # unilaterally, so a reconnect mid-run still targets the run that is
         # actually happening.
         self._nav_run_id: str | None = None
+        # The last /nav_status state seen, so a run's END is printed to the
+        # terminal exactly once with its reason - the status republishes at
+        # 2 Hz, so printing on every message would scroll the reason away.
+        self._last_nav_state: str | None = None
 
         # Global button style, applied at the MainWindow level so every
         # QPushButton in the app (including ones on child widgets) gets the
@@ -611,6 +616,13 @@ class MainWindow(QMainWindow):
         self._nav_status_at = monotonic()
         if state.run_id:
             self._nav_run_id = state.run_id
+        if (state.state != self._last_nav_state
+                and self._last_nav_state in NAV_ACTIVE_STATES
+                and state.state not in NAV_ACTIVE_STATES):
+            reason = state.error or "destination reached"
+            print(f"ground_station: autonomy run {state.run_id or '?'} "
+                  f"ended: {state.state} - {reason}", file=sys.stderr)
+        self._last_nav_state = state.state
         self.dashboard_page.nav_row.set_state(state)
 
     def _on_nav_path_summary(self, summary) -> None:
