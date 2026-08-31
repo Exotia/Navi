@@ -19,16 +19,21 @@ elevation_mapper → tile_aggregator → traversability (holes lethal) →
 /autonomy/costmap_seed → Nav2 costmaps
 ```
 
-## Blocked on a human at the Orin (5 minutes, in order)
+## Orin state (verified 2026-08-31, after the human sudo steps)
 
-1. `sudo dpkg -i ~/orin-debs/*.deb` — fixes the nav2-msgs 1.1.18/1.1.20 skew
-   that leaves bt_navigator with an undefined symbol. Staged already.
-2. `sudo ip addr add 192.168.178.18/24 dev enP8p1s0` — the NaVi alias the
-   coordinator calls. Better: add it to netplan so it survives reboots.
-   (`start_navi.sh` adds it automatically when passwordless sudo exists.)
-3. Then re-run on the Orin: the smoke launch + CPU measurement from
-   `.superpowers/sdd/2026-08-31-sp9-nav2-bringup/task-7-brief.md`, and the
-   offline planning test.
+DONE: nav2-msgs 1.1.20 installed; the `.18` alias is live (still worth a
+netplan entry so it survives reboots); the branch is deployed at e6f6200;
+all six Nav2 lifecycle nodes reach `active`; CPU at the 960 m^2 costmap load
+is ~34% of one core (4 named nodes) / ~46% all six, RSS ~134 MB; the
+offline planning test passes 16/16 ON THE ORIN.
+
+Orin-specific operational notes:
+- The offline-planning script's 60 s timeout is too tight for this hardware
+  (a real run takes ~2 min): raise it to ~180-200 s before wiring it into
+  any Orin-side gate. A timeout-killed run orphans ~14 Nav2 processes -
+  clean up by PID, and prefer letting the test finish.
+- `pkill -x` does not reliably kill all six Nav2 nodes (comm truncation);
+  teardown by PID list, as `orin-verification-report.md` shows.
 
 ## Needs the camera (next daylight session)
 
