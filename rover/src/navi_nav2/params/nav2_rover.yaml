@@ -56,7 +56,13 @@ planner_server:
       how_many_corners: 8
       w_euc_cost: 1.0
       w_traversal_cost: 2.0
-      allow_unknown: false
+      # true since the night-ground sessions: the ZED barely fills the map
+      # in the dark, so any goal past the ~0.9 m startup platform sat in
+      # unknown cells and the planner refused every plan ("Either of the
+      # start or goal pose are an obstacle!", recoveries, abort 6). Holes
+      # and steps the camera HAS seen stay lethal - this only permits
+      # ground no sensor has charted yet, under operator supervision.
+      allow_unknown: true
       use_final_approach_orientation: false
     SmacBased:
       # The A/B second opinion (spec section 5).  Same costmap, same goal.
@@ -64,7 +70,7 @@ planner_server:
       tolerance: 0.25
       downsample_costmap: false
       downsampling_factor: 1
-      allow_unknown: false
+      allow_unknown: true      # same night-ground reason as GridBased above
       max_iterations: 1000000
       max_on_approach_iterations: 1000
       max_planning_time: 5.0

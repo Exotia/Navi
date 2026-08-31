@@ -134,7 +134,9 @@ def test_the_planner_runs_theta_star_with_smac_beside_it(stack):
     assert planner['planner_plugins'] == ['GridBased', 'SmacBased']
     assert planner['GridBased']['plugin'] == 'nav2_theta_star_planner/ThetaStarPlanner'
     assert planner['SmacBased']['plugin'] == 'nav2_smac_planner/SmacPlanner2D'
-    assert planner['GridBased']['allow_unknown'] is False
+    # allow_unknown flipped true in the night-ground sessions (see
+    # test_params.py::test_unseen_ground_is_plannable_but_still_tracked_as_unknown)
+    assert planner['GridBased']['allow_unknown'] is True
     assert planner['GridBased']['w_traversal_cost'] == 2.0
 
 
@@ -287,11 +289,11 @@ def test_the_path_went_round_the_pit_which_means_the_seed_arrived(client):
     (0,0) to (12,0), which never leaves y = 0, and it passes C and D
     against that empty costmap.  This is the assertion that catches it.
 
-    A stack that received *nothing at all* does not get this far: both
-    costmaps set track_unknown_space: true and both planners set
-    allow_unknown: false, so an unseeded costmap is entirely
-    NO_INFORMATION and Theta*'s isUnsafeToPlan() rejects the start pose -
-    the run fails at C.
+    Since allow_unknown flipped true (night-ground sessions), a stack that
+    received *nothing at all* also reaches this assertion rather than
+    failing at C: an unseeded costmap is entirely NO_INFORMATION, which is
+    now plannable, and the straight-line path it produces is exactly the
+    zero-excursion shape this assertion rejects.
     """
     path = compute_path(client, 'GridBased')
     excursion = max(abs(p.pose.position.y) for p in path.poses)

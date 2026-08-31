@@ -105,11 +105,17 @@ def test_the_scaled_cost_band_survives_the_static_layer():
         assert top['unknown_cost_value'] == -1
 
 
-def test_unseen_ground_is_not_driveable_ground():
+def test_unseen_ground_is_plannable_but_still_tracked_as_unknown():
+    # Flipped in the night-ground sessions: the ZED cannot chart ground it
+    # cannot see, so with allow_unknown false any goal past the ~0.9 m
+    # startup platform was "an obstacle" and no run could start. Unknown
+    # stays TRACKED (not silently free) so seen holes and steps remain
+    # lethal - the planner may merely route through ground no sensor has
+    # reported on yet.
     for which in ('global_costmap', 'local_costmap'):
         assert costmap(which)['track_unknown_space'] is True
-    assert node('planner_server')['GridBased']['allow_unknown'] is False
-    assert node('planner_server')['SmacBased']['allow_unknown'] is False
+    assert node('planner_server')['GridBased']['allow_unknown'] is True
+    assert node('planner_server')['SmacBased']['allow_unknown'] is True
 
 
 def test_the_global_costmap_is_the_48_m_window():

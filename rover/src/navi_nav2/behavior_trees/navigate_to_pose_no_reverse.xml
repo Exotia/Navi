@@ -37,14 +37,19 @@
       </PipelineSequence>
       <ReactiveFallback name="RecoveryFallback">
         <GoalUpdated/>
+        <!-- No Spin, no BackUp: both are blind motions (their own collision
+             check aborted them anyway near walls in the night sessions -
+             "Collision Ahead - Exiting Spin/DriveOnHeading"), and to an
+             operator they read as the rover going haywire. Clearing plus a
+             short wait gives perception time to fill the map; if that does
+             not unstick the run, an honest abort with a reason beats
+             gyrating in place. -->
         <RoundRobin name="RecoveryActions">
           <Sequence name="ClearingActions">
             <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
             <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
           </Sequence>
-          <Spin spin_dist="1.57"/>
           <Wait wait_duration="5"/>
-          <BackUp backup_dist="0.30" backup_speed="0.05"/>
         </RoundRobin>
       </ReactiveFallback>
     </RecoveryNode>
