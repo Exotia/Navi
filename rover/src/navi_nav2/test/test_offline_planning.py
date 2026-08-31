@@ -160,7 +160,7 @@ def test_the_costmaps_read_the_seed_at_five_centimetres(stack):
     for node_name in ('global_costmap/global_costmap', 'local_costmap/local_costmap'):
         costmap = running_params(node_name)
         assert costmap['resolution'] == 0.05
-        assert costmap['robot_radius'] == 0.80
+        assert costmap['robot_radius'] == 0.70
         assert costmap['track_unknown_space'] is True
         assert costmap['static_layer']['map_topic'] == '/autonomy/costmap_seed'
         # trinary_costmap, lethal_cost_threshold and unknown_cost_value are

@@ -136,7 +136,7 @@ controller_server:
       cost_scaling_dist: 0.60
       cost_scaling_gain: 1.0
       # Must equal inflation_layer.cost_scaling_factor on both costmaps.
-      inflation_cost_scaling_factor: 3.0
+      inflation_cost_scaling_factor: 5.0
 
 behavior_server:
   ros__parameters:
@@ -245,7 +245,7 @@ global_costmap:
       height: 48
       track_unknown_space: true
       transform_tolerance: 0.5
-      robot_radius: 0.80
+      robot_radius: 0.70
       footprint_padding: 0.03
       # These three belong to Costmap2DROS itself (the OccupancyGrid ->
       # Costmap translation table shared by every layer), not to
@@ -288,8 +288,8 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         enabled: true
-        inflation_radius: 1.20
-        cost_scaling_factor: 3.0
+        inflation_radius: 0.90
+        cost_scaling_factor: 5.0
         inflate_unknown: false
         inflate_around_unknown: false
 
@@ -307,7 +307,7 @@ local_costmap:
       height: 8
       track_unknown_space: true
       transform_tolerance: 0.5
-      robot_radius: 0.80
+      robot_radius: 0.70
       footprint_padding: 0.03
       # See the identical note on the global costmap: these three belong
       # to Costmap2DROS, not to static_layer's own namespace.
@@ -351,8 +351,8 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         enabled: true
-        inflation_radius: 1.20
-        cost_scaling_factor: 3.0
+        inflation_radius: 0.90
+        cost_scaling_factor: 5.0
         inflate_unknown: false
         inflate_around_unknown: false
 
