@@ -7,9 +7,13 @@
 #      whichever address the ground station asks for
 #   4. mode_supervisor - the only publisher of /rover_twist: mode
 #      arbitration, the deadman, and the latched e-stop
-#   5. bema_bridge - the BEMA drive bridge, fed from /rover_twist, idle
+#   5. navi_rpc_server - the endpoint the primary's coordinator calls "NaVi",
+#      msgpack-RPC on :21021. It is what makes startNaViTask succeed instead
+#      of logging "NaVi not reachable"; the 192.168.178.18 alias this script
+#      adds is the address the coordinator has hard-coded.
+#   6. bema_bridge - the BEMA drive bridge, fed from /rover_twist, idle
 #      until the ground station drives
-#   6. localization.launch.py - the ZED 2i wrapper with positional tracking,
+#   7. localization.launch.py - the ZED 2i wrapper with positional tracking,
 #      plus localization_status publishing /localization/pose and
 #      /localization/status
 #
@@ -17,6 +21,7 @@
 #   ./start_navi.sh --no-bridge  no rosbridge (one is already running)
 #   ./start_navi.sh --no-drive-bridge  no bema_bridge (rover drive is idle, or one is already running)
 #   ./start_navi.sh --no-supervisor  no mode_supervisor (nothing publishes /rover_twist, so the rover cannot be driven)
+#   ./start_navi.sh --no-navi-rpc  no navi_rpc_server (the coordinator cannot arm an autonomous run)
 #   ./start_navi.sh --no-video   no video_sender
 #   ./start_navi.sh --no-localization  no ZED tracking; video from the camera as a UVC device
 #   ./start_navi.sh --port 9091  serve rosbridge on a different port
@@ -40,6 +45,7 @@ PORT=9090
 START_BRIDGE=1
 START_DRIVE_BRIDGE=1
 START_SUPERVISOR=1
+START_NAVI_RPC=1
 START_VIDEO=1
 START_LOCALIZATION=1
 CLEAN_STALE=1
@@ -49,6 +55,7 @@ while [ $# -gt 0 ]; do
         --no-bridge) START_BRIDGE=0; shift ;;
         --no-drive-bridge) START_DRIVE_BRIDGE=0; shift ;;
         --no-supervisor) START_SUPERVISOR=0; shift ;;
+        --no-navi-rpc) START_NAVI_RPC=0; shift ;;
         --no-video) START_VIDEO=0; shift ;;
         --no-localization) START_LOCALIZATION=0; shift ;;
         --keep-stale) CLEAN_STALE=0; shift ;;
@@ -237,6 +244,53 @@ wait_for_localization() {
     return 0
 }
 
+# ---------------------------------------------------------------------------
+# The second address the primary's coordinator calls.
+#
+# navi::NaViEP::address is a compile-time 192.168.178.18 in the primary's
+# binary, so serving the NaVi interface means answering on that address as
+# well as on the Orin's own .33. Adding it needs root, which a bring-up over
+# ssh may not have - and losing the rover because of that would be far worse
+# than losing the autonomous arming path. So this warns and continues:
+# navi_rpc_server binds 0.0.0.0 either way, and the moment someone adds the
+# alias by hand it starts answering, with no restart.
+#
+# Rebuilding the primary's rpc_coord with .33 in it is the rejected
+# alternative (spec 3): it modifies the flight computer of a competition
+# rover for a cosmetic reason.
+# ---------------------------------------------------------------------------
+NAVI_ALIAS="${NAVI_ALIAS:-192.168.178.18}"
+NAVI_ALIAS_CIDR="${NAVI_ALIAS_CIDR:-$NAVI_ALIAS/24}"
+
+ensure_navi_alias() {
+    local iface
+    if ip -o -4 addr show 2>/dev/null \
+        | awk -v want="$NAVI_ALIAS/" 'index($4, want) == 1 { found = 1 }
+                                      END { exit !found }'; then
+        echo "the NaVi alias $NAVI_ALIAS is already on this machine"
+        return 0
+    fi
+    iface=$(ip -o -4 addr show 2>/dev/null \
+        | awk '$4 ~ /^192\.168\.178\./ { print $2; exit }')
+    if [ -z "$iface" ]; then
+        echo "warning: no interface holds a 192.168.178.x address, so the NaVi" >&2
+        echo "         alias $NAVI_ALIAS cannot be added. navi_rpc_server still" >&2
+        echo "         binds 0.0.0.0, but the coordinator calls .18 and will" >&2
+        echo "         report 'NaVi not reachable' until the rover is on the" >&2
+        echo "         rover LAN." >&2
+        return 0
+    fi
+    if sudo -n ip addr add "$NAVI_ALIAS_CIDR" dev "$iface" 2>/dev/null; then
+        echo "added the NaVi alias $NAVI_ALIAS_CIDR to $iface"
+        return 0
+    fi
+    echo "warning: could not add the NaVi alias $NAVI_ALIAS_CIDR to $iface -" >&2
+    echo "         sudo -n refused. Autonomy cannot be armed until someone runs:" >&2
+    echo "           sudo ip addr add $NAVI_ALIAS_CIDR dev $iface" >&2
+    echo "         Everything else in this bring-up is unaffected." >&2
+    return 0
+}
+
 # rover/test/test_start_navi_gate.sh sources this script to exercise
 # wait_for_localization against a fake `ros2`; everything below brings a
 # rover up, which a test must not do.
@@ -246,7 +300,7 @@ fi
 
 if [ "$CLEAN_STALE" -eq 1 ]; then
     kill_stale "navi_teleop nodes" "navi_teleop/(manual_twist_listener|video_sender|bema_bridge)"
-    kill_stale "navi_supervisor nodes" "navi_supervisor/mode_supervisor"
+    kill_stale "navi_supervisor nodes" "navi_supervisor/(mode_supervisor|navi_rpc_server)"
     kill_stale "ros2 run wrappers" "ros2 run navi_(teleop|supervisor)"
     # The pipeline video_sender spawns. Matched on the elements it always
     # contains, so an unrelated gst-launch on this machine is left alone.
@@ -371,6 +425,13 @@ if [ "$START_SUPERVISOR" -eq 1 ]; then
     # time it subscribes, and this is the node that owns the e-stop.
     echo "starting mode_supervisor (sole publisher of /rover_twist)"
     ros2 run navi_supervisor mode_supervisor &
+    BACKGROUND_PIDS+=("$!")
+fi
+
+if [ "$START_NAVI_RPC" -eq 1 ]; then
+    ensure_navi_alias
+    echo "starting navi_rpc_server (the coordinator's NaVi endpoint on :21021)"
+    ros2 run navi_supervisor navi_rpc_server &
     BACKGROUND_PIDS+=("$!")
 fi
 

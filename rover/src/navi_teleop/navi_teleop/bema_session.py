@@ -186,7 +186,7 @@ class BemaSession:
             self._mark_down(exc)
 
     def start_manual(self):
-        self._coord_guarded("F6", label="start_manual")
+        self._coord_guarded("F6", label="startManual")
 
     def abort(self):
         # F7 on the COORDINATOR is abort - not BEMA's F7, which is
