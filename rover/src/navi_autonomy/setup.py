@@ -25,6 +25,7 @@ setup(
         'console_scripts': [
             'tile_aggregator = navi_autonomy.tile_aggregator:main',
             'traversability_layer = navi_autonomy.traversability_layer:main',
+            'goal_relay = navi_autonomy.goal_relay:main',
         ],
     },
 )

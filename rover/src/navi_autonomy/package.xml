@@ -16,6 +16,13 @@
   <depend>std_msgs</depend>
   <depend>grid_map_msgs</depend>
   <depend>navi_localization</depend>
+  <!-- goal_relay's NavigateToPose client (nav2_goals.py): geometry_msgs
+       and action_msgs are nav2_msgs' own message and result-status types,
+       imported directly here too - the same three navi_supervisor
+       declares for its own Nav2-adjacent code. -->
+  <depend>nav2_msgs</depend>
+  <depend>action_msgs</depend>
+  <depend>geometry_msgs</depend>
   <exec_depend>python3-numpy</exec_depend>
 
   <test_depend>python3-pytest</test_depend>
