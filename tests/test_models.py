@@ -305,3 +305,135 @@ def test_mode_and_estop_request_json():
     assert json.loads(mode_request_json("manual")) == {"mode": "manual"}
     assert json.loads(estop_request_json("ground station STOP")) == {
         "reason": "ground station STOP"}
+
+
+from ground_station.models import (NavStatus, PathSummary, ViewTransform, Waypoint,
+                                   WaypointList, nav_request_json, new_run_id,
+                                   parse_nav_status, parse_path_summary,
+                                   parse_waypoint_text)
+
+
+def test_nav_request_go_carries_every_waypoint_and_the_run_id():
+    payload = json.loads(nav_request_json(
+        "go", [Waypoint(3.0, -1.5), Waypoint(8.0, -1.5, yaw=0.0)], run_id="gs-1"))
+    assert payload == {"action": "go", "run_id": "gs-1", "frame_id": "map",
+                       "waypoints": [{"x": 3.0, "y": -1.5, "yaw": None},
+                                     {"x": 8.0, "y": -1.5, "yaw": 0.0}]}
+
+
+def test_nav_request_pause_carries_the_run_id_and_no_waypoints():
+    payload = json.loads(nav_request_json("pause", run_id="gs-1"))
+    assert payload == {"action": "pause", "run_id": "gs-1", "frame_id": "map",
+                       "waypoints": []}
+
+
+def test_run_id_is_derived_from_the_clock_so_it_is_reproducible_in_a_test():
+    assert new_run_id(1756633200.123) == "gs-1756633200123"
+
+
+def test_parse_nav_status_reads_every_field():
+    status = parse_nav_status(json.dumps({
+        "state": "running", "run_id": "gs-1", "waypoint_index": 1,
+        "waypoint_count": 3, "distance_remaining_m": 12.4, "eta_s": 248.0,
+        "error": "", "mode": "autonomous", "coordinator_state": "Autonomous",
+        "stamp_s": 1830.5}))
+    assert status == NavStatus(state="running", run_id="gs-1", waypoint_index=1,
+                               waypoint_count=3, distance_remaining_m=12.4,
+                               eta_s=248.0, error="", mode="autonomous",
+                               coordinator_state="Autonomous")
+
+
+def test_parse_nav_status_defaults_every_missing_field_rather_than_raising():
+    status = parse_nav_status(json.dumps({"state": "idle"}))
+    assert status.waypoint_index is None and status.waypoint_count == 0
+    assert status.distance_remaining_m is None and status.eta_s is None
+    assert status.error == "" and status.mode is None
+
+
+def test_parse_nav_status_rejects_a_state_this_build_does_not_know():
+    # An unknown state is shown verbatim, not guessed at - the rover is the
+    # authority on its own states, exactly as the mode chip treats modes.
+    assert parse_nav_status(json.dumps({"state": "reticulating"})).state == "reticulating"
+
+
+def test_parse_nav_status_survives_rubbish():
+    assert parse_nav_status("not json") is None
+    assert parse_nav_status(json.dumps([1, 2, 3])) is None
+
+
+def test_parse_path_summary_reads_points_and_waypoints():
+    summary = parse_path_summary(json.dumps({
+        "run_id": "gs-1", "frame_id": "map", "points": [[0.0, 0.0], [1.0, 2.0]],
+        "waypoints": [[1.0, 2.0]], "length_m": 2.236, "source_points": 941}))
+    assert summary == PathSummary(run_id="gs-1", frame_id="map",
+                                  points=[(0.0, 0.0), (1.0, 2.0)],
+                                  waypoints=[(1.0, 2.0)], length_m=2.236,
+                                  source_points=941)
+
+
+def test_parse_path_summary_drops_malformed_points_instead_of_raising():
+    summary = parse_path_summary(json.dumps(
+        {"points": [[0.0, 0.0], [1.0], "x", [2.0, 3.0]]}))
+    assert summary.points == [(0.0, 0.0), (2.0, 3.0)]
+
+
+def test_an_empty_point_list_is_a_summary_that_clears_the_drawing():
+    assert parse_path_summary(json.dumps({"points": []})).points == []
+
+
+def test_parse_waypoint_text_accepts_plain_numbers():
+    waypoint, error = parse_waypoint_text("3.0", "-1.5")
+    assert waypoint == Waypoint(3.0, -1.5, None) and error == ""
+
+
+def test_parse_waypoint_text_refuses_non_numbers_with_a_reason():
+    waypoint, error = parse_waypoint_text("three", "-1.5")
+    assert waypoint is None and "x" in error
+
+
+def test_parse_waypoint_text_refuses_a_point_further_than_the_map_can_reach():
+    waypoint, error = parse_waypoint_text("500", "0")
+    assert waypoint is None and "60" in error
+
+
+def test_waypoint_list_adds_removes_reorders_and_clears():
+    waypoints = WaypointList()
+    waypoints.add(Waypoint(1.0, 1.0))
+    waypoints.add(Waypoint(2.0, 2.0))
+    waypoints.add(Waypoint(3.0, 3.0))
+    waypoints.move_up(2)
+    assert [w.x for w in waypoints.items] == [1.0, 3.0, 2.0]
+    waypoints.remove(0)
+    assert [w.x for w in waypoints.items] == [3.0, 2.0]
+    waypoints.clear()
+    assert len(waypoints) == 0
+
+
+def test_waypoint_list_ignores_a_reorder_off_either_end():
+    waypoints = WaypointList()
+    waypoints.add(Waypoint(1.0, 1.0))
+    waypoints.move_up(0)
+    waypoints.move_down(0)
+    assert [w.x for w in waypoints.items] == [1.0]
+
+
+def test_view_transform_round_trips_a_click_back_to_the_world():
+    view = ViewTransform(centre_x=0.0, centre_y=0.0, metres_per_pixel=0.05,
+                         width_px=400, height_px=300)
+    assert view.to_pixel(0.0, 0.0) == (200.0, 150.0)
+    x, y = view.to_world(*view.to_pixel(3.0, -1.5))
+    assert abs(x - 3.0) < 1e-9 and abs(y + 1.5) < 1e-9
+
+
+def test_view_transform_puts_world_x_up_the_screen_and_world_y_to_the_left():
+    view = ViewTransform(0.0, 0.0, 0.05, 400, 300)
+    ahead_px = view.to_pixel(1.0, 0.0)
+    left_px = view.to_pixel(0.0, 1.0)
+    assert ahead_px[1] < 150.0        # +x is up: smaller pixel y
+    assert left_px[0] < 200.0         # +y is left: smaller pixel x
+
+
+def test_view_transform_zoom_keeps_the_centre_still():
+    view = ViewTransform(4.0, -2.0, 0.05, 400, 300).zoomed(2.0)
+    assert view.metres_per_pixel == 0.1
+    assert view.to_pixel(4.0, -2.0) == (200.0, 150.0)

@@ -403,3 +403,44 @@ def test_requests_are_dropped_when_not_connected():
     client.send_estop_request("STOP")
     assert [t for t in FakeTopic.instances
             if t.name in ("/mode_request", "/estop_request")] == []
+
+
+from ground_station.models import Waypoint
+
+
+def test_subscribe_nav_status_parses_into_the_signal(qtbot):
+    client = make_client(qtbot)
+    received = []
+    client.signals.nav_status_received.connect(received.append)
+    client.subscribe_nav_status()
+    topic = FakeTopic.instances[-1]
+    assert topic.name == "/nav_status" and topic.msg_type == "std_msgs/String"
+    topic.callback({"data": json.dumps({"state": "running", "waypoint_index": 2})})
+    assert received[-1].state == "running" and received[-1].waypoint_index == 2
+
+
+def test_subscribe_nav_path_summary_parses_into_the_signal(qtbot):
+    client = make_client(qtbot)
+    received = []
+    client.signals.nav_path_summary_received.connect(received.append)
+    client.subscribe_nav_path_summary()
+    topic = FakeTopic.instances[-1]
+    assert topic.name == "/nav_path_summary" and topic.msg_type == "std_msgs/String"
+    topic.callback({"data": json.dumps({"points": [[1.0, 2.0]]})})
+    assert received[-1].points == [(1.0, 2.0)]
+
+
+def test_send_nav_request_publishes_the_json_on_nav_request(qtbot):
+    client = make_client(qtbot)
+    client.connect()
+    client.send_nav_request("go", [Waypoint(3.0, -1.5)], run_id="gs-1")
+    topic = FakeTopic.instances[-1]
+    assert topic.name == "/nav_request"
+    assert json.loads(topic.published_messages[-1]["data"])["action"] == "go"
+
+
+def test_send_nav_request_is_dropped_when_not_connected(qtbot):
+    client = make_client(qtbot)
+    client.send_nav_request("abort", run_id="gs-1")
+    assert not any(t.name == "/nav_request" and t.published_messages
+                   for t in FakeTopic.instances)

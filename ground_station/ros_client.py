@@ -8,10 +8,12 @@ import sys
 import roslibpy
 from PySide6.QtCore import QObject, Signal
 
-from ground_station.models import (drive_command_json, estop_request_json,
+from ground_station.models import (Waypoint, drive_command_json, estop_request_json,
                                     map_command_json, mode_request_json,
-                                    parse_drive_status, parse_map_status,
-                                    parse_mode_status, pose_readout_from_odometry)
+                                    nav_request_json, parse_drive_status,
+                                    parse_map_status, parse_mode_status,
+                                    parse_nav_status, parse_path_summary,
+                                    pose_readout_from_odometry)
 
 # /localization/pose is published at the ZED wrapper's ~30 Hz and is wanted
 # here for one header readout. rosbridge's own throttle_rate (milliseconds)
@@ -29,6 +31,8 @@ class RosSignals(QObject):
     map_status_received = Signal(object)
     drive_status_received = Signal(object)
     mode_status_received = Signal(object)
+    nav_status_received = Signal(object)
+    nav_path_summary_received = Signal(object)
 
 
 def _localization_status_failure(detail: str) -> dict:
@@ -59,6 +63,9 @@ class RosBridgeClient:
         self._mode_status_topic = None
         self._mode_request_topic = None
         self._estop_request_topic = None
+        self._nav_status_topic = None
+        self._nav_path_summary_topic = None
+        self._nav_request_topic = None
 
     def connect(self) -> None:
         self._ros.on_ready(lambda: self.signals.connection_changed.emit(True))
@@ -275,3 +282,41 @@ class RosBridgeClient:
                 self._ros, topic_name, "std_msgs/String")
         self._estop_request_topic.publish(self._message_factory(
             {"data": estop_request_json(reason)}))
+
+    def subscribe_nav_status(self, topic_name: str = "/nav_status") -> None:
+        """goal_relay's account of the run: state, which waypoint, how far
+        is left, the ETA, and why it refused. JSON in a std_msgs/String at
+        2 Hz and on every state change - the same convention as
+        /mode_status, for the same reason: a refusal the operator has to
+        wait half a second to see reads as a dead button."""
+        topic = self._topic_factory(self._ros, topic_name, "std_msgs/String")
+        topic.subscribe(lambda msg: self.signals.nav_status_received.emit(
+            parse_nav_status(msg.get("data", ""))))
+        self._nav_status_topic = topic
+
+    def subscribe_nav_path_summary(self,
+                                   topic_name: str = "/nav_path_summary") -> None:
+        """The decimated plan. Not /plan: a 941-pose nav_msgs/Path is ~60 KB
+        a message, which the field link does not have to spare (spec 7).
+        An empty point list means 'clear the drawing'."""
+        topic = self._topic_factory(self._ros, topic_name, "std_msgs/String")
+        topic.subscribe(lambda msg: self.signals.nav_path_summary_received.emit(
+            parse_path_summary(msg.get("data", ""))))
+        self._nav_path_summary_topic = topic
+
+    def send_nav_request(self, action: str, waypoints=None,
+                         run_id: str | None = None,
+                         topic_name: str = "/nav_request") -> None:
+        """go / pause / resume / abort, as goal_relay reads them.
+
+        Never a mode change: the supervisor is the sole authority on mode,
+        and a Go into a rover that is not in autonomous is refused by
+        goal_relay with the reason on /nav_status."""
+        if not self.is_connected:
+            print("ground_station: not connected, nav request dropped", file=sys.stderr)
+            return
+        if self._nav_request_topic is None:
+            self._nav_request_topic = self._topic_factory(
+                self._ros, topic_name, "std_msgs/String")
+        self._nav_request_topic.publish(self._message_factory(
+            {"data": nav_request_json(action, waypoints, run_id)}))
