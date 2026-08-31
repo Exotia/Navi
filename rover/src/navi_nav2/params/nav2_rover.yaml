@@ -1,0 +1,351 @@
+# Nav2 for the Asterope rover.  Spec: docs/superpowers/specs/autonomy-plan.md
+# sections 5, 6, 9 and 10.
+#
+# Speeds are the section 10 cap: 0.05 m/s and 0.1 rad/s, the same tenth
+# manual drive is capped to.  They live here and in exactly one other place
+# (gamepad_input.py, for manual); raising them needs one clean sim run and
+# one clean yard run per stage, and an explicit instruction.
+#
+# Nothing here reverses.  allow_reversing is false, the reverse floor at the
+# smoother is -0.15 m/s, the collision monitor's polygons start at x = +0.10
+# and the BackUp behaviour in both behaviour trees is 0.30 m - the spec caps
+# it at 0.6 m.  Nothing on this rover looks backwards.
+#
+# The cloud layers (global obstacle_layer, local voxel_layer, and the
+# collision monitor's points_filtered source) are written out in full and
+# shipped disabled: cloud_filter does not exist yet and no camera has been
+# on the rover since these were written.  Enabling them is three booleans.
+#
+# CPU fallback, if two 0.05 m costmaps prove too heavy on the Orin (spec
+# section 11 risk 6): local 24 m at 0.05 m, global 48 m at 0.10 m.  Measure
+# before changing anything - the numbers from Task 7 are in the launch file.
+
+bt_navigator:
+  ros__parameters:
+    use_sim_time: false
+    global_frame: map
+    robot_base_frame: base_footprint
+    odom_topic: /localization/odom_local
+    bt_loop_duration: 10
+    default_server_timeout: 20
+    wait_for_service_timeout: 1000
+    transform_tolerance: 0.5
+    # Both are rewritten to this package's share directory by the launch
+    # file (nav2_common.launch.RewrittenYaml); the value here is a marker
+    # so the rewrite has a key to land on.
+    default_nav_to_pose_bt_xml: REWRITTEN_AT_LAUNCH
+    default_nav_through_poses_bt_xml: REWRITTEN_AT_LAUNCH
+
+planner_server:
+  ros__parameters:
+    use_sim_time: false
+    expected_planner_frequency: 1.0
+    planner_plugins: ["GridBased", "SmacBased"]
+    GridBased:
+      plugin: "nav2_theta_star_planner/ThetaStarPlanner"
+      # Any-angle: few ICR changes, which is what this steering chassis is
+      # bad at.  Hybrid-A* and lattice are rejected in the spec - they
+      # impose a turning radius the rover does not have and forbid the
+      # point turn it does.
+      how_many_corners: 8
+      w_euc_cost: 1.0
+      w_traversal_cost: 2.0
+      allow_unknown: false
+      use_final_approach_orientation: false
+    SmacBased:
+      # The A/B second opinion (spec section 5).  Same costmap, same goal.
+      plugin: "nav2_smac_planner/SmacPlanner2D"
+      tolerance: 0.25
+      downsample_costmap: false
+      downsampling_factor: 1
+      allow_unknown: false
+      max_iterations: 1000000
+      max_on_approach_iterations: 1000
+      max_planning_time: 5.0
+      cost_travel_multiplier: 2.0
+
+controller_server:
+  ros__parameters:
+    use_sim_time: false
+    controller_frequency: 10.0
+    odom_topic: /localization/odom_local
+    min_x_velocity_threshold: 0.002
+    # vy is pinned to zero at the smoother, so a y reading is noise and must
+    # never be read as movement.
+    min_y_velocity_threshold: 0.5
+    min_theta_velocity_threshold: 0.005
+    failure_tolerance: 0.5
+    progress_checker_plugin: "progress_checker"
+    goal_checker_plugins: ["general_goal_checker"]
+    controller_plugins: ["FollowPath"]
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      # 0.25 m in 30 s is 0.008 m/s - a twelfth of the cap, so a slow but
+      # real crawl over rough ground is not read as being stuck.
+      required_movement_radius: 0.25
+      movement_time_allowance: 30.0
+    general_goal_checker:
+      stateful: true
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.25
+      yaw_goal_tolerance: 0.35
+    FollowPath:
+      plugin: "nav2_rotation_shim_controller::RotationShimController"
+      primary_controller: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      # -- the shim: turn to face the path before pursuing it, because this
+      # chassis point-turns far better than it arcs.
+      angular_dist_threshold: 0.5
+      forward_sampling_distance: 0.30
+      rotate_to_goal_heading: false
+      simulate_ahead_time: 1.0
+      # -- shared by shim and RPP (one key, both read it)
+      rotate_to_heading_angular_vel: 0.1
+      max_angular_accel: 0.5
+      # -- regulated pure pursuit
+      desired_linear_vel: 0.05
+      lookahead_dist: 0.45
+      min_lookahead_dist: 0.25
+      max_lookahead_dist: 0.70
+      lookahead_time: 6.0
+      use_velocity_scaled_lookahead_dist: true
+      transform_tolerance: 0.3
+      min_approach_linear_velocity: 0.02
+      approach_velocity_scaling_dist: 0.60
+      use_collision_detection: true
+      max_allowed_time_to_collision_up_to_carrot: 2.0
+      use_regulated_linear_velocity_scaling: true
+      use_cost_regulated_linear_velocity_scaling: true
+      regulated_linear_scaling_min_radius: 0.90
+      regulated_linear_scaling_min_speed: 0.02
+      use_rotate_to_heading: true
+      rotate_to_heading_min_angle: 0.5
+      allow_reversing: false
+      use_interpolation: true
+      max_robot_pose_search_dist: 10.0
+      cost_scaling_dist: 0.60
+      cost_scaling_gain: 1.0
+      # Must equal inflation_layer.cost_scaling_factor on both costmaps.
+      inflation_cost_scaling_factor: 3.0
+
+behavior_server:
+  ros__parameters:
+    use_sim_time: false
+    costmap_topic: local_costmap/costmap_raw
+    footprint_topic: local_costmap/published_footprint
+    cycle_frequency: 10.0
+    # No assisted_teleop (a second cmd_vel source), no drive_on_heading
+    # (a negative distance is a reversal).  The behaviour trees call
+    # exactly these three.
+    behavior_plugins: ["spin", "backup", "wait"]
+    spin:
+      plugin: "nav2_behaviors/Spin"
+    backup:
+      plugin: "nav2_behaviors/BackUp"
+    wait:
+      plugin: "nav2_behaviors/Wait"
+    global_frame: odom
+    robot_base_frame: base_footprint
+    transform_tolerance: 0.5
+    simulate_ahead_time: 2.0
+    max_rotational_vel: 0.1
+    min_rotational_vel: 0.05
+    rotational_acc_lim: 0.5
+    # NOTE: this node has no odom_topic parameter - its OdomSmoother
+    # hard-codes the name "odom".  The launch file remaps it to
+    # /localization/odom_local.
+
+velocity_smoother:
+  ros__parameters:
+    use_sim_time: false
+    smoothing_frequency: 20.0
+    scale_velocities: false
+    feedback: "OPEN_LOOP"
+    # Spec section 10.  The y band is zero in both directions: this is
+    # where vy is pinned for the whole stack.
+    max_velocity: [0.05, 0.0, 0.1]
+    min_velocity: [-0.15, 0.0, -0.1]
+    max_accel: [0.5, 0.0, 0.5]
+    max_decel: [-0.5, 0.0, -0.5]
+    odom_topic: "/localization/odom_local"
+    odom_duration: 0.1
+    deadband_velocity: [0.0, 0.0, 0.0]
+    velocity_timeout: 1.0
+
+collision_monitor:
+  ros__parameters:
+    use_sim_time: false
+    base_frame_id: "base_footprint"
+    odom_frame_id: "odom"
+    cmd_vel_in_topic: "cmd_vel_smoothed"
+    # The single point at which Nav2's velocity reaches the rest of the
+    # rover.  mode_supervisor reads this and is the only publisher of
+    # /rover_twist.
+    cmd_vel_out_topic: "/autonomy_twist"
+    transform_tolerance: 0.5
+    source_timeout: 5.0
+    base_shift_correction: true
+    stop_pub_timeout: 2.0
+    # Forward only (spec section 5, risk 4).  Every point has x >= 0.10:
+    # nothing looks behind or beside, so nothing may claim to.
+    polygons: ["ForwardStop", "ForwardSlow"]
+    ForwardStop:
+      type: "polygon"
+      points: [0.90, 0.45, 0.90, -0.45, 0.10, -0.45, 0.10, 0.45]
+      action_type: "stop"
+      max_points: 2
+      visualize: true
+      polygon_pub_topic: "collision_stop_polygon"
+      enabled: true
+    ForwardSlow:
+      type: "polygon"
+      points: [1.60, 0.60, 1.60, -0.60, 0.10, -0.60, 0.10, 0.60]
+      action_type: "slowdown"
+      slowdown_ratio: 0.3
+      max_points: 2
+      visualize: true
+      polygon_pub_topic: "collision_slowdown_polygon"
+      enabled: true
+    observation_sources: ["points_filtered"]
+    points_filtered:
+      type: "pointcloud"
+      topic: "/autonomy/points_filtered"
+      min_height: 0.10
+      max_height: 1.20
+      # OFF until cloud_filter exists and a camera is on the rover.  The
+      # source is declared rather than omitted so the wiring is written
+      # down and turning it on is one boolean.
+      enabled: false
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      use_sim_time: false
+      global_frame: map
+      robot_base_frame: base_footprint
+      update_frequency: 1.0
+      publish_frequency: 0.5
+      # 0.05 m to match the elevation map exactly.  Resampling smears the
+      # step edges that matter most (spec section 5).
+      resolution: 0.05
+      # Rolling, 48 m: the same window tile_aggregator keeps, so the seed
+      # never has to resize the master grid when the window recentres.
+      rolling_window: true
+      width: 48
+      height: 48
+      track_unknown_space: true
+      transform_tolerance: 0.5
+      robot_radius: 0.80
+      footprint_padding: 0.03
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        enabled: true
+        map_topic: /autonomy/costmap_seed
+        map_subscribe_transient_local: true
+        subscribe_to_updates: false
+        # trinary false, or SP7's 0..99 band collapses to free/lethal and
+        # every gradient below the thresholds is thrown away.
+        trinary_costmap: false
+        lethal_cost_threshold: 100
+        unknown_cost_value: -1
+        transform_tolerance: 0.5
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: false
+        footprint_clearing_enabled: true
+        observation_sources: points_filtered
+        points_filtered:
+          topic: /autonomy/points_filtered
+          data_type: "PointCloud2"
+          marking: true
+          clearing: true
+          min_obstacle_height: 0.10
+          max_obstacle_height: 1.20
+          obstacle_max_range: 8.0
+          obstacle_min_range: 0.30
+          raytrace_max_range: 8.0
+          raytrace_min_range: 0.30
+          expected_update_rate: 0.0
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        enabled: true
+        inflation_radius: 1.20
+        cost_scaling_factor: 3.0
+        inflate_unknown: false
+        inflate_around_unknown: false
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: false
+      global_frame: odom
+      robot_base_frame: base_footprint
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      resolution: 0.05
+      rolling_window: true
+      width: 8
+      height: 8
+      track_unknown_space: true
+      transform_tolerance: 0.5
+      robot_radius: 0.80
+      footprint_padding: 0.03
+      # The seed is in the local costmap too, deliberately: it is the only
+      # thing that knows about holes, and a controller that could not see
+      # the rim would happily follow a stale plan into one.
+      plugins: ["static_layer", "voxel_layer", "inflation_layer"]
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        enabled: true
+        map_topic: /autonomy/costmap_seed
+        map_subscribe_transient_local: true
+        subscribe_to_updates: false
+        trinary_costmap: false
+        lethal_cost_threshold: 100
+        unknown_cost_value: -1
+        transform_tolerance: 0.5
+      voxel_layer:
+        plugin: "nav2_costmap_2d::VoxelLayer"
+        enabled: false
+        footprint_clearing_enabled: true
+        publish_voxel_map: false
+        origin_z: 0.0
+        z_resolution: 0.05
+        z_voxels: 24
+        max_obstacle_height: 1.20
+        mark_threshold: 0
+        observation_sources: points_filtered
+        points_filtered:
+          topic: /autonomy/points_filtered
+          data_type: "PointCloud2"
+          marking: true
+          clearing: true
+          min_obstacle_height: 0.10
+          max_obstacle_height: 1.20
+          obstacle_max_range: 8.0
+          obstacle_min_range: 0.30
+          raytrace_max_range: 8.0
+          raytrace_min_range: 0.30
+          expected_update_rate: 0.0
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        enabled: true
+        inflation_radius: 1.20
+        cost_scaling_factor: 3.0
+        inflate_unknown: false
+        inflate_around_unknown: false
+
+lifecycle_manager_navigation:
+  ros__parameters:
+    use_sim_time: false
+    autostart: true
+    bond_timeout: 4.0
+    attempt_respawn_reconnection: true
+    bond_respawn_max_duration: 10.0
+    node_names:
+      - controller_server
+      - planner_server
+      - behavior_server
+      - bt_navigator
+      - velocity_smoother
+      - collision_monitor
