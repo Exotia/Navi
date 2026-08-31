@@ -196,7 +196,7 @@ def test_the_inflation_factors_agree_between_layer_and_controller():
     follow = node('controller_server')['FollowPath']
     for which in ('global_costmap', 'local_costmap'):
         assert (costmap(which)['inflation_layer']['cost_scaling_factor']
-                == follow['inflation_cost_scaling_factor'] == 5.0)
+                == follow['inflation_cost_scaling_factor'] == 10.0)
 
 
 def test_the_footprint_is_the_circle_a_point_turning_rover_sweeps():
