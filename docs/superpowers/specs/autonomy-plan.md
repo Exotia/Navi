@@ -191,6 +191,29 @@ Publishes `/autonomy/traversability` (GridMap, for the view — it can also
 (OccupancyGrid, latched).
 drive the pit colouring in the sim) and `/autonomy/costmap_seed`  
 
+**SP7 as built** (2026-08-30): `rover/src/navi_autonomy`, two nodes.
+`tile_aggregator` publishes the stitched 960 x 960 window on `/autonomy/map`
+(GridMap, one `elevation` layer, transient_local); `traversability_layer`
+reads it and publishes `/autonomy/traversability` (GridMap: `slope`, `step`,
+`roughness`, `valid`; only while something subscribes, since it is 14.7 MB a
+message) and `/autonomy/costmap_seed` (OccupancyGrid, transient_local,
+0.92 MB). The seed's exact curve:
+
+    s = clip(slope / radians(25), 0, 1);  t = clip(step / 0.14, 0, 1)
+    r = clip(roughness / 0.05, 0, 1)      # roughness = |z - mean of the seen
+                                          # 4-neighbours|: zero on any plane
+    cost = round(99 * max(s, t, r))       # 0..99, 100 reserved for lethal
+    cost = -1  where valid == 0           # never-seen ground is unknown, not free
+    cost = 100 where step >= 0.14 or slope >= radians(25)   # applied last, so a
+                                          # measured lethal step beats an
+                                          # incomplete neighbourhood
+
+The window recentres only when the rover is more than 8 m from its centre;
+cells that leave it are dropped and return via the mapper's keepalive. Tiles
+are subscribed at depth 64, the mapper's own `TILE_QUEUE_DEPTH`, because the
+mapper bursts up to 25 tiles a tick and a dropped tile is indistinguishable
+from unseen ground.
+
 **Costmap resolution 0.05 m** [CHANGED] to match the elevation map exactly.
 Resampling smears the step edges that matter most. Cost: 4× the cells of the
 old 0.10 m plan; a 48 m window at 0.05 m is 960², which Nav2 handles but
@@ -319,3 +342,13 @@ stubbed.
 ros-humble-grid-map-costmap-2d` on the Orin. No `twist-mux` [CHANGED] — the
 supervisor replaces it. The Orin has no internet: wheels or debs must be
 carried over, as `msgpack` was.
+
+SP7 itself needs no new package on the Orin: `navi_autonomy` depends only on
+`rclpy`, `nav_msgs`, `std_msgs` and `grid_map_msgs`, and `grid_map_msgs` is
+already there because `navi_localization` runs there. What must be carried
+over is `ros-humble-grid-map-costmap-2d` (2.0.1-1jammy) **and its
+dependencies** `ros-humble-grid-map-core`, `ros-humble-grid-map-cv`,
+`ros-humble-grid-map-ros`, for SP9's Nav2 costmap plugin - all five are
+installed on the laptop and can be fetched with
+`apt-get download` / `apt-get install --reinstall -d` and copied with the
+`msgpack` wheels.

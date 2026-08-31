@@ -6,6 +6,18 @@ planner is dead weight, and a planner with no seed plans through holes.
 
 Nothing in this file publishes a twist. Both nodes are read-only with respect
 to the chassis.
+
+Pure-pipeline cost at the full 960 x 960 window, measured 2026-08-31 on this
+laptop (Intel Core i7-9750H, 6c/12t), synthetic elevation with 20% NaN holes
+(the brief's timing script, third of three warmed-up runs): seed_from_elevation
+(traversability_layer's derive, slope/step/roughness/valid plus the cost seed)
+210.4 ms; build_grid_map (tile_aggregator's own /autonomy/map publish, and
+traversability_layer's /autonomy/traversability publish while subscribed)
+26.7 ms; build_occupancy_grid (the costmap_seed publish) 0.3 ms. That easily
+holds the 1 Hz publish_period_s above on this CPU; it is laptop cost, not the
+Orin's - the Orin figure is SP9/SP10's to measure (spec section 5, section 11
+risk 6), which SP12 re-measures in the yard, with the documented 24 m window
+(window_cells=480) as the fallback if 1 Hz is not held there.
 """
 
 from launch import LaunchDescription

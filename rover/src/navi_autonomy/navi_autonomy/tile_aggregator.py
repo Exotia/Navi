@@ -16,6 +16,12 @@ to match the publisher; a durability mismatch means no data at all.
 
 /autonomy/map is transient_local so traversability_layer may start after this
 node and still get a map immediately, rather than waiting a tick.
+
+The per-tick cost here is build_grid_map on the full 960 x 960 window:
+measured 2026-08-31 on the laptop (Intel i7-9750H, 6c/12t) at 26.7 ms,
+comfortably inside the 1.0 s publish_period_s default (see
+autonomy_perception.launch.py's docstring for the full three-number figure
+and the Orin caveat).
 """
 
 import rclpy
