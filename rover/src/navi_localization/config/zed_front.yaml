@@ -13,6 +13,18 @@
             pub_downscale_factor: 2.0     # 640 x 360 images: the video sender is their only consumer
             # Gates pose and odom publishing too, not just the images: at 15.0 the camera still grabs at 30 but /localization/pose ran at 14 Hz.
             pub_frame_rate: 15.0
+        region_of_interest:
+            # The SDK processes only this polygon - tracking, mapping and
+            # (apply_to_depth) depth alike. Bottom half of the frame: the
+            # top half holds sky and sun glare (phantom inputs), and it is
+            # where the planned sun shade will sit above the lens - the
+            # shade MUST be masked out or VIO would track a "stationary"
+            # object that moves with the camera. Coordinates are normalized,
+            # y = 0 is the top of the image. Delete this block (or set
+            # manual_polygon: '[]') to see the full frame again.
+            automatic_roi: false
+            manual_polygon: '[[0.0,0.5],[1.0,0.5],[1.0,1.0],[0.0,1.0]]'
+            apply_to_depth: true
         depth:
             depth_mode: 'NEURAL'           # calibrated 2026-08-29, see the spec's table; NEURAL at 30 fps drops frames on this Orin
             min_depth: 0.3
