@@ -1,0 +1,152 @@
+from ground_station.models import ModeState, NavStatus, Waypoint
+from ground_station.ui.nav_row import NavRow
+
+
+def nav(**over):
+    base = dict(state="idle", run_id=None, waypoint_index=None, waypoint_count=0,
+                distance_remaining_m=None, eta_s=None, error="", mode="autonomous",
+                coordinator_state=None)
+    base.update(over)
+    return NavStatus(**base)
+
+
+def mode(**over):
+    base = dict(mode="autonomous", reason="", source=None, deadman_active=False,
+                estop_latched=False, localization_state="OK", source_age_s=0.1)
+    base.update(over)
+    return ModeState(**base)
+
+
+def armed_row(qtbot, **over):
+    row = NavRow()
+    qtbot.addWidget(row)
+    row.set_mode_state(mode(**over))
+    row.set_state(nav())
+    return row
+
+
+def test_go_is_disabled_with_no_waypoints(qtbot):
+    row = armed_row(qtbot)
+    assert not row.go_button.isEnabled()
+
+
+def test_go_is_disabled_when_the_rover_is_not_in_autonomous(qtbot):
+    row = armed_row(qtbot, mode="manual")
+    row.waypoints.add(Waypoint(1.0, 1.0))
+    row.refresh_waypoints()
+    assert not row.go_button.isEnabled()
+    assert "autonomous" in row.hint_label.text().lower()
+
+
+def test_go_is_enabled_with_waypoints_in_autonomous_and_emits_them(qtbot):
+    row = armed_row(qtbot)
+    row.waypoints.add(Waypoint(3.0, -1.5))
+    row.refresh_waypoints()
+    assert row.go_button.isEnabled()
+    sent = []
+    row.go_requested.connect(sent.append)
+    row.go_button.click()
+    assert sent == [[Waypoint(3.0, -1.5, None)]]
+
+
+def test_the_autonomous_button_asks_for_the_mode_and_is_confirmed(qtbot):
+    row = armed_row(qtbot, mode="manual")
+    emitted = []
+    row.autonomous_requested.connect(lambda: emitted.append(True))
+    row.confirm_autonomous = lambda: False
+    row.autonomous_button.click()
+    assert emitted == []
+    row.confirm_autonomous = lambda: True
+    row.autonomous_button.click()
+    assert emitted == [True]
+
+
+def test_the_autonomous_button_is_disabled_once_the_rover_is_autonomous(qtbot):
+    assert not armed_row(qtbot).autonomous_button.isEnabled()
+
+
+def test_add_takes_typed_coordinates(qtbot):
+    row = armed_row(qtbot)
+    row.x_input.setText("3.0")
+    row.y_input.setText("-1.5")
+    row.add_button.click()
+    assert row.waypoints.items == [Waypoint(3.0, -1.5, None)]
+    assert row.waypoint_list.count() == 1
+
+
+def test_add_refuses_a_bad_coordinate_and_says_why(qtbot):
+    row = armed_row(qtbot)
+    row.x_input.setText("three")
+    row.y_input.setText("0")
+    row.add_button.click()
+    assert len(row.waypoints) == 0
+    assert "not a number" in row.hint_label.text()
+
+
+def test_a_clicked_map_point_appends_a_waypoint(qtbot):
+    row = armed_row(qtbot)
+    row.append_world_point(4.0, 2.0)
+    assert row.waypoints.items == [Waypoint(4.0, 2.0, None)]
+
+
+def test_pause_resume_and_abort_follow_the_run_state(qtbot):
+    row = armed_row(qtbot)
+    row.set_state(nav(state="running", run_id="gs-1", waypoint_index=0,
+                      waypoint_count=2))
+    assert row.pause_button.isEnabled()
+    assert not row.resume_button.isEnabled()
+    assert row.abort_button.isEnabled()
+    row.set_state(nav(state="paused", run_id="gs-1", waypoint_index=0,
+                      waypoint_count=2))
+    assert not row.pause_button.isEnabled()
+    assert row.resume_button.isEnabled()
+
+
+def test_go_is_disabled_while_a_run_is_active(qtbot):
+    row = armed_row(qtbot)
+    row.waypoints.add(Waypoint(1.0, 1.0))
+    row.refresh_waypoints()
+    row.set_state(nav(state="running", run_id="gs-1", waypoint_count=1))
+    assert not row.go_button.isEnabled()
+
+
+def test_abort_is_confirmed_before_it_emits(qtbot):
+    row = armed_row(qtbot)
+    row.set_state(nav(state="running", run_id="gs-1", waypoint_count=1))
+    emitted = []
+    row.abort_requested.connect(lambda: emitted.append(True))
+    row.confirm_abort = lambda: False
+    row.abort_button.click()
+    assert emitted == []
+    row.confirm_abort = lambda: True
+    row.abort_button.click()
+    assert emitted == [True]
+
+
+def test_the_status_line_shows_waypoint_distance_and_eta(qtbot):
+    row = armed_row(qtbot)
+    row.set_state(nav(state="running", run_id="gs-1", waypoint_index=1,
+                      waypoint_count=3, distance_remaining_m=12.4, eta_s=248.0))
+    assert "2/3" in row.waypoint_pill.text()
+    assert "12.4" in row.progress_label.text()
+    assert "4:08" in row.progress_label.text()
+
+
+def test_an_error_is_shown_verbatim_and_never_as_markup(qtbot):
+    row = armed_row(qtbot)
+    row.set_state(nav(state="refused", error="mode is <manual>, not autonomous"))
+    assert row.error_pill.text() == "mode is <manual>, not autonomous"
+    # isVisibleTo, not isVisible: a widget added with qtbot.addWidget is
+    # never shown, so isVisible() is False however the pill was set. This
+    # is the form tests/test_main_window.py:822 already uses.
+    assert row.error_pill.isVisibleTo(row)
+
+
+def test_no_status_leaves_only_the_waypoint_editing_alive(qtbot):
+    row = NavRow()
+    qtbot.addWidget(row)
+    row.set_state(None)
+    assert not row.go_button.isEnabled()
+    assert not row.pause_button.isEnabled()
+    assert not row.abort_button.isEnabled()
+    assert row.add_button.isEnabled()          # editing a list needs no rover
