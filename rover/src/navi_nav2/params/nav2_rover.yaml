@@ -67,7 +67,7 @@ planner_server:
     SmacBased:
       # The A/B second opinion (spec section 5).  Same costmap, same goal.
       plugin: "nav2_smac_planner/SmacPlanner2D"
-      tolerance: 0.25
+      tolerance: 0.5    # how far Smac may shift an obstructed goal to the nearest valid pose (the BT fallback relies on this)
       downsample_costmap: false
       downsampling_factor: 1
       allow_unknown: true      # same night-ground reason as GridBased above

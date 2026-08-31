@@ -123,3 +123,15 @@ def test_the_bringup_can_run_without_perception_for_the_offline_test():
     assert 'bench_fixture' in bringup.LAUNCH_ARGUMENTS
     assert bringup.LAUNCH_ARGUMENTS['bench_fixture'] == 'false', \
         "the bench fixture fakes the frames the ZED owns; never on by default"
+
+
+def test_an_obstructed_goal_falls_back_to_smac_with_its_tolerance():
+    """Theta* has no goal tolerance: a waypoint inside a lethal splash (a
+    phantom night-time step, or a click centimetres into a wall's inflation)
+    ends the whole run with "start or goal pose are an obstacle".  The tree
+    retries the same goal with SmacBased, whose tolerance plans to the
+    nearest valid pose instead - holes stay lethal to drive over."""
+    root = ET.parse(os.path.join(TREES, 'navigate_to_pose_no_reverse.xml')).getroot()
+    fallbacks = [f for f in root.iter('Fallback')
+                 if [c.get('planner_id') for c in f] == ['GridBased', 'SmacBased']]
+    assert len(fallbacks) == 1, "Theta* first, Smac as the goal-tolerant retry"
