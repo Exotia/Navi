@@ -38,6 +38,7 @@ from std_msgs.msg import String
 from navi_autonomy import nav_run as rules
 from navi_autonomy import path_summary
 from navi_autonomy.nav_run import NavRun
+from navi_autonomy.run_log import RunLog
 from navi_autonomy.nav2_goals import ActionClientNav2Goals
 from navi_autonomy.task_control import NaviRpcTaskControl
 
@@ -66,6 +67,9 @@ class GoalRelay(Node):
         # the declared parameter now reaches the timeout actually applied,
         # rather than being informational only.
         self.declare_parameter("arm_timeout_s", rules.ARM_TIMEOUT_S)
+        # The ride diary: one file, truncated at every accepted Go, holding
+        # every decision of the LAST ride (operator request, night session).
+        self.declare_parameter("run_log_path", "/tmp/navi_last_ride.log")
 
         # NOT self._clock: rclpy.node.Node already owns that name (see
         # mode_supervisor.py's identical note).
@@ -83,6 +87,13 @@ class GoalRelay(Node):
         # a value merely cached from before this node subscribed is not
         # evidence the coordinator just stopped something.
         self._last_stop_seq = None
+
+        self._runlog = RunLog(str(self.get_parameter("run_log_path").value))
+        # What was last written to the diary, so only CHANGES land there:
+        # (state, error), (mode, reason), coordinator state.
+        self._logged_run = (None, None)
+        self._logged_mode = (None, None)
+        self._logged_coord = None
 
         self._nav_status_pub = self.create_publisher(
             String, str(self.get_parameter("nav_status_topic").value), 1)
@@ -128,6 +139,16 @@ class GoalRelay(Node):
                     for w in waypoints if isinstance(w, dict)]
                 self._plan_points = []
             self._run.on_request(self._now(), request)
+            if (isinstance(request, dict) and request.get("action") == "go"
+                    and self._run.state == rules.STARTING):
+                # An accepted Go is a new ride: the diary is truncated here,
+                # so the file always holds the last ride from its first line.
+                self._runlog.start(request.get("run_id"), self._mission_waypoints)
+                self._runlog.event(
+                    "go", f"accepted with {len(self._mission_waypoints)} waypoint(s)")
+            elif isinstance(request, dict):
+                error = self._run.status(self._now()).get("error") or ""
+                self._runlog.event(f"request_{request.get('action')}", error)
             self._after_run_mutation()
         except Exception as exc:                      # never kill the node
             self.get_logger().error(f"nav request failed: {exc!r}")
@@ -141,6 +162,9 @@ class GoalRelay(Node):
         try:
             mode = payload.get("mode") if isinstance(payload, dict) else None
             reason = payload.get("reason", "") if isinstance(payload, dict) else ""
+            if (mode, reason) != self._logged_mode:
+                self._logged_mode = (mode, reason)
+                self._runlog.event("mode", f"{mode} ({reason})")
             self._run.on_mode_status(self._now(), mode, reason)
             self._after_run_mutation()
         except Exception as exc:
@@ -169,6 +193,9 @@ class GoalRelay(Node):
             if isinstance(stop_seq, bool) or not isinstance(stop_seq, int):
                 return
             if self._last_stop_seq is not None and stop_seq != self._last_stop_seq:
+                self._runlog.event(
+                    "coordinator_stop", "the primary stopped navigation "
+                    f"(stop_seq {stop_seq}); cancelling the Nav2 goal")
                 self._run.on_coordinator_stop(self._now())
                 self._after_run_mutation()
             self._last_stop_seq = stop_seq
@@ -178,6 +205,7 @@ class GoalRelay(Node):
     # -- Nav2 goal callbacks, wired when a SEND_GOAL action is dispatched ----
     def _on_goal_succeeded(self):
         try:
+            self._runlog.event("nav2_goal", "SUCCEEDED")
             self._run.on_goal_succeeded(self._now())
             self._after_run_mutation()
         except Exception as exc:
@@ -185,6 +213,7 @@ class GoalRelay(Node):
 
     def _on_goal_failed(self, reason):
         try:
+            self._runlog.event("nav2_goal", f"FAILED - {reason}")
             self._run.on_goal_failed(self._now(), reason)
             self._after_run_mutation()
         except Exception as exc:
@@ -192,6 +221,9 @@ class GoalRelay(Node):
 
     def _on_feedback(self, distance_remaining, eta_s):
         try:
+            self._runlog.event(
+                "feedback", f"{distance_remaining:.2f} m to the waypoint, "
+                            f"eta {eta_s:.0f} s", throttle_s=2.0)
             self._run.on_feedback(self._now(), distance_remaining, eta_s)
             self._after_run_mutation()
         except Exception as exc:
@@ -201,6 +233,9 @@ class GoalRelay(Node):
     def _tick(self):
         try:
             state = self._task.coordinator_state()
+            if state != self._logged_coord:
+                self._logged_coord = state
+                self._runlog.event("coordinator", str(state))
             # Always fed to NavRun, even when unchanged from the last poll:
             # arming (NavRun._arm()) resets its cached coordinator_state to
             # None specifically so a value merely cached from before the
@@ -212,6 +247,7 @@ class GoalRelay(Node):
             self._run.on_coordinator_state(state)
             self._run.tick(self._now())
             self._run_actions()
+            self._log_run_state()
         except Exception as exc:
             self.get_logger().error(f"tick failed: {exc!r}")
 
@@ -261,6 +297,9 @@ class GoalRelay(Node):
             # The supervisor paused Nav2 when the last run ended (rule 1);
             # wake it back up now, so it is active again by the time the
             # observed-Autonomous transition releases the goal (>= 5 s).
+            self._runlog.event("coordinator_task",
+                               f"startNaViTask, {len(payload)} waypoint(s); "
+                               "Nav2 lifecycle asked to resume")
             resume = getattr(self._nav2, "resume", None)
             if resume is not None:
                 resume()
@@ -268,19 +307,29 @@ class GoalRelay(Node):
         elif action == rules.SEND_GOAL:
             index, x, y, yaw = payload
             yaw = self._resolve_yaw(index, x, y, yaw)
+            yaw_txt = "free (+x)" if yaw is None else f"{yaw:.2f}"
+            self._runlog.event(
+                "goal_sent", f"waypoint {index + 1}/{len(self._mission_waypoints)}"
+                             f" -> ({x:.2f}, {y:.2f}) yaw {yaw_txt}")
             self._nav2.send_goal(x, y, yaw, self._on_goal_succeeded,
                                  self._on_goal_failed, self._on_feedback)
         elif action == rules.CANCEL_GOAL:
+            self._runlog.event("goal_cancelled", str(payload))
             self._nav2.cancel(payload)
         elif action == rules.PAUSE_TASK:
+            self._runlog.event("coordinator_pause")
             self._task.pause()
         elif action == rules.RESUME_TASK:
+            self._runlog.event("coordinator_resume")
             self._task.resume()
         elif action == rules.ABORT_TASK:
+            self._runlog.event("coordinator_abort")
             self._task.abort()
         elif action == rules.NOTIFY_WAYPOINT:
+            self._runlog.event("waypoint_reached", f"index {payload}")
             self._task.notify_waypoint_reached(payload)
         elif action == rules.NOTIFY_DESTINATION:
+            self._runlog.event("destination_reached")
             self._task.notify_destination_reached()
         else:
             self.get_logger().warn(f"unknown goal_relay action: {action!r}")
@@ -295,8 +344,21 @@ class GoalRelay(Node):
 
     def _after_run_mutation(self):
         self._run_actions()
+        self._log_run_state()
         if self._run.take_changed():
             self._publish_status()
+
+    def _log_run_state(self):
+        # The run machine's own transitions, with the reason it carries -
+        # "aborted - Nav2 goal ended with status 6" is the line that answers
+        # "why did it break" without any other file.
+        status = self._run.status(self._now())
+        pair = (status["state"], status["error"])
+        if pair == self._logged_run:
+            return
+        self._logged_run = pair
+        state, error = pair
+        self._runlog.event("run_state", state + (f" - {error}" if error else ""))
 
     def _publish_status(self):
         msg = String()
