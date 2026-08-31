@@ -150,3 +150,9 @@ def test_no_status_leaves_only_the_waypoint_editing_alive(qtbot):
     assert not row.pause_button.isEnabled()
     assert not row.abort_button.isEnabled()
     assert row.add_button.isEnabled()          # editing a list needs no rover
+
+
+def test_clicking_the_canvas_adds_a_waypoint_to_the_row(qtbot):
+    row = armed_row(qtbot)
+    row.map_view.point_clicked.emit(4.0, 2.0)
+    assert row.waypoints.items == [Waypoint(4.0, 2.0, None)]

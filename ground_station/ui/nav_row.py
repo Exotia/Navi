@@ -14,6 +14,7 @@ from ground_station import theme
 from ground_station.models import (AUTONOMOUS_MODE, NAV_ACTIVE_STATES,
                                    Waypoint, WaypointList,
                                    parse_waypoint_text)
+from ground_station.ui.nav_map_view import NavMapView
 
 
 def _plain(text) -> str:
@@ -39,6 +40,10 @@ class NavRow(QWidget):
         self.waypoints = WaypointList()
         self.confirm_autonomous = self._confirm_autonomous_dialog
         self.confirm_abort = self._confirm_abort_dialog
+
+        self.map_view = NavMapView()
+        self.map_view.setMinimumHeight(220)
+        self.map_view.point_clicked.connect(self.append_world_point)
 
         self.setObjectName("navRow")
         self.setAttribute(Qt.WA_StyledBackground, True)
@@ -133,6 +138,7 @@ class NavRow(QWidget):
 
         layout.addLayout(entry_layout)
         layout.addWidget(self.waypoint_list)
+        layout.addWidget(self.map_view)
         layout.addLayout(mission_layout)
         layout.addLayout(status_layout)
 
@@ -178,6 +184,7 @@ class NavRow(QWidget):
             self.waypoint_list.addItem(text)
         if 0 <= selected < self.waypoint_list.count():
             self.waypoint_list.setCurrentRow(selected)
+        self.map_view.set_waypoints(self.waypoints.items)
         self.waypoints_changed.emit(self.waypoints.items)
         self._refresh_controls()
 
@@ -244,6 +251,14 @@ class NavRow(QWidget):
         self._state = state
         self._refresh_controls()
         self._refresh_status()
+
+    def set_pose(self, pose) -> None:
+        """Pass-through to the canvas: the window owns the wire layer, this
+        row owns the widget that draws it."""
+        self.map_view.set_pose(pose)
+
+    def set_path_summary(self, summary) -> None:
+        self.map_view.set_path_summary(summary)
 
     def refresh(self, now=None) -> None:
         self._refresh_controls()
