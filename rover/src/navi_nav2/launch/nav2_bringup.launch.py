@@ -48,8 +48,54 @@ MUST DO at the next camera session (none of it is testable without a ZED):
   5. Confirm the collision polygons against the real footprint with the
      rover on blocks before they are trusted in the yard.
 
+Needed for real on 2026-08-31 (Task 7): the package *count* matched
+(31 == 31) but one member did not - ros-humble-nav2-msgs was stuck at
+1.1.18-1jammy.20250326.040645 on the Orin while every other nav2-*
+package there had already moved to 1.1.20 from a 2026-03-26 rebuild
+(the laptop's are all 1.1.20 from a 2026-08-04 rebuild). bt_navigator
+links against the newer nav2_msgs symbols (ComputeAndTrackRoute) that
+1.1.18 does not export, so it failed to configure with a pluginlib
+"undefined symbol" error exactly as this section warned it would - the
+package-count gate does not catch a stale version of a package that is
+still present. The fix, via this runbook: fetched
+ros-humble-nav2-msgs_1.1.20-1jammy.20260725.154919_arm64.deb through
+the laptop and rsynced it to the Orin, but `dpkg -i` could not run - the
+ssh session has no interactive TTY and passwordless sudo is not
+configured on the Orin (`sudo -n` fails: "a password is required"), the
+same constraint start_navi.sh's ensure_navi_alias already documents.
+The .deb is staged at ~/orin-debs on the Orin; someone with a terminal
+there needs to run `sudo dpkg -i ~/orin-debs/packages.ros.org/ros2/ubuntu/pool/main/r/ros-humble-nav2-msgs/ros-humble-nav2-msgs_1.1.20-1jammy.20260725.154919_arm64.deb`
+before the smoke launch, the CPU/RAM measurement and
+test_offline_planning.py can be re-attempted on the Orin. Not done here
+because of the missing sudo access, not because the fix is unclear.
+
+# Carrying a package to the Orin (no internet there, arm64, jammy):
+#
+#   # 1. the Orin computes its own URIs - right architecture, right
+#   #    versions, only what it is actually missing:
+#   ssh star@a_navi 'apt-get install --print-uris -y --no-install-recommends \
+#       ros-humble-<pkg> | grep -oP "(?<=^.)http[^\x27]+" > /tmp/uris.txt; wc -l < /tmp/uris.txt'
+#   scp star@a_navi:/tmp/uris.txt /tmp/uris.txt
+#   # 2. the laptop, which has internet, does the downloading:
+#   wget -x -P ~/orin-debs -i /tmp/uris.txt
+#   # 3. carry and install:
+#   rsync -a ~/orin-debs/ star@a_navi:~/orin-debs/
+#   ssh star@a_navi 'sudo dpkg -i $(find ~/orin-debs -name "*.deb")'
+#
+# Do NOT apt-get download on the laptop: it is amd64 and the Orin is arm64,
+# and the deb would install and then fail to load.
+
 Orin measurements (camera-less, fixture seed, Task 7):
-    RECORD HERE: nav2 total CPU %, RSS, time to all-active.
+    NOT TAKEN 2026-08-31: the stale nav2-msgs package above (bt_navigator
+    pluginlib failure) meant the stack never reached six-node active on
+    the Orin during this task - lifecycle_manager aborted bringup with
+    bt_navigator stuck at unconfigured. controller_server, planner_server
+    and behavior_server did reach inactive (configured) before the
+    abort; bt_navigator, velocity_smoother and collision_monitor never
+    got past unconfigured. Re-run the smoke launch and this measurement
+    once the nav2-msgs deb above is installed with sudo on the Orin
+    itself. Laptop-side CPU/RAM was out of scope for Task 6 (offline
+    planning only); no numbers exist yet from either machine.
 """
 
 import os

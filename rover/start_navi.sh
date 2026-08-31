@@ -16,6 +16,10 @@
 #   7. localization.launch.py - the ZED 2i wrapper with positional tracking,
 #      plus localization_status publishing /localization/pose and
 #      /localization/status
+#   8. nav2_bringup.launch.py - Nav2: Theta*/RPP planning to /autonomy_twist,
+#      which only mode_supervisor reads. Nav2 needs the frames and the
+#      odometry localisation publishes, so it is skipped when --no-localization
+#      is given.
 #
 #   ./start_navi.sh              all of them, listener in the foreground
 #   ./start_navi.sh --no-bridge  no rosbridge (one is already running)
@@ -24,6 +28,7 @@
 #   ./start_navi.sh --no-navi-rpc  no navi_rpc_server (the coordinator cannot arm an autonomous run)
 #   ./start_navi.sh --no-video   no video_sender
 #   ./start_navi.sh --no-localization  no ZED tracking; video from the camera as a UVC device
+#   ./start_navi.sh --no-nav2    no Nav2 (nothing plans; manual drive is unaffected)
 #   ./start_navi.sh --port 9091  serve rosbridge on a different port
 #   ./start_navi.sh --keep-stale don't clean up a previous run first
 #
@@ -48,6 +53,7 @@ START_SUPERVISOR=1
 START_NAVI_RPC=1
 START_VIDEO=1
 START_LOCALIZATION=1
+START_NAV2=1
 CLEAN_STALE=1
 
 while [ $# -gt 0 ]; do
@@ -58,6 +64,7 @@ while [ $# -gt 0 ]; do
         --no-navi-rpc) START_NAVI_RPC=0; shift ;;
         --no-video) START_VIDEO=0; shift ;;
         --no-localization) START_LOCALIZATION=0; shift ;;
+        --no-nav2) START_NAV2=0; shift ;;
         --keep-stale) CLEAN_STALE=0; shift ;;
         --port) PORT="$2"; shift 2 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -310,6 +317,7 @@ if [ "$CLEAN_STALE" -eq 1 ]; then
     kill_stale "ZED wrapper containers" "component_container_isolated.*zed"
     kill_stale "localisation launches" "ros2 launch navi_localization"
     kill_stale "localization_status nodes" "navi_localization/localization_status"
+    kill_stale "nav2 launches" "ros2 launch navi_nav2"
     # The stdin-fed encode pipeline video_sender's zed_topic source spawns.
     kill_stale "video pipe pipelines" "gst-launch-1\.0.*fdsrc.*udpsink"
     # Deliberately no pattern for start_navi.sh itself. It would match this
@@ -403,6 +411,20 @@ if [ "$START_LOCALIZATION" -eq 1 ]; then
     # reports a state other than OFF - see wait_for_localization above.
     if ! wait_for_localization "$LOC_PID"; then
         exit 1
+    fi
+fi
+
+if [ "$START_NAV2" -eq 1 ]; then
+    if [ "$START_LOCALIZATION" -eq 0 ]; then
+        # Nav2's costmaps need map->odom->base_footprint, and the ZED
+        # wrapper is the only thing that publishes it. Starting Nav2
+        # without it produces a node that logs a TF timeout twice a second
+        # forever and plans nothing.
+        echo "skipping nav2: it needs localisation for TF (--no-localization was given)"
+    else
+        echo "starting nav2 (plans to /autonomy_twist; only mode_supervisor drives)"
+        ros2 launch navi_nav2 nav2_bringup.launch.py &
+        BACKGROUND_PIDS+=("$!")
     fi
 fi
 
