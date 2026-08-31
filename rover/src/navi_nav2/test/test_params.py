@@ -199,7 +199,11 @@ def test_the_inflation_factors_agree_between_layer_and_controller():
                 == follow['inflation_cost_scaling_factor'] == 10.0)
 
 
-def test_the_footprint_is_the_circle_a_point_turning_rover_sweeps():
+def test_the_footprint_is_the_rovers_rectangle_with_a_5cm_shell():
+    # Operator decision 2026-08-31: the circle (corner radius 0.65) kept the
+    # rover ~20 cm off walls; the true rectangle lets it pass straight at
+    # ~5 cm while orientation-aware collision checks still refuse turns
+    # that would swing a corner in.
     for which in ('global_costmap', 'local_costmap'):
-        assert costmap(which)['robot_radius'] == 0.65
-        assert 'footprint' not in costmap(which)
+        assert '0.545' in str(costmap(which)['footprint'])
+        assert 'robot_radius' not in costmap(which)
