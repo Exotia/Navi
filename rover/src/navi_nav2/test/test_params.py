@@ -90,12 +90,19 @@ def test_both_costmaps_read_the_seed_at_the_elevation_resolution():
 
 def test_the_scaled_cost_band_survives_the_static_layer():
     """trinary_costmap true would collapse SP7's 0..99 band to free/lethal
-    and throw away every gradient the traversability layer computed."""
+    and throw away every gradient the traversability layer computed.
+
+    These three are Costmap2DROS's own parameters (the OccupancyGrid ->
+    Costmap translation table shared by every layer), not static_layer's -
+    confirmed against a live stack in Task 6: nesting them under
+    static_layer is an undeclared parameter name Nav2 silently ignores,
+    which is exactly the failure mode test_offline_planning.py's
+    parameter-fidelity test exists to catch."""
     for which in ('global_costmap', 'local_costmap'):
-        layer = costmap(which)['static_layer']
-        assert layer['trinary_costmap'] is False
-        assert layer['lethal_cost_threshold'] == 100
-        assert layer['unknown_cost_value'] == -1
+        top = costmap(which)
+        assert top['trinary_costmap'] is False
+        assert top['lethal_cost_threshold'] == 100
+        assert top['unknown_cost_value'] == -1
 
 
 def test_unseen_ground_is_not_driveable_ground():

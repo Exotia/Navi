@@ -107,7 +107,18 @@ controller_server:
       min_lookahead_dist: 0.25
       max_lookahead_dist: 0.70
       lookahead_time: 6.0
-      use_velocity_scaled_lookahead_dist: true
+      # false: lookahead is the static lookahead_dist above, scaled by
+      # desired_linear_vel.  true measures it against /localization/odom_local's
+      # *reported* velocity instead - and every NavigateToPose goal on this
+      # rover starts from a dead stop, so the first control tick sees 0
+      # there.  Confirmed live against the bench fixture (whose fake
+      # odometry never reports nonzero twist, same shape as a real rover
+      # before its first tick): with this true, RegulatedPurePursuit is
+      # self-consistently zero forever - the reported speed is 0, so the
+      # scaled lookahead collapses, so the computed command stays 0, so
+      # the next reported speed is 0 again.  Nothing here is fixture-only:
+      # a real rover's odometry reads the same 0 before it has moved.
+      use_velocity_scaled_lookahead_dist: false
       transform_tolerance: 0.3
       min_approach_linear_velocity: 0.02
       approach_velocity_scaling_dist: 0.60
@@ -236,6 +247,19 @@ global_costmap:
       transform_tolerance: 0.5
       robot_radius: 0.80
       footprint_padding: 0.03
+      # These three belong to Costmap2DROS itself (the OccupancyGrid ->
+      # Costmap translation table shared by every layer), not to
+      # static_layer: nesting them under a plugin key is silently ignored
+      # by Nav2 (an undeclared parameter name), which is exactly the
+      # "typo the parameter-fidelity test catches" failure this ran into
+      # verifying Task 6 - trinary_costmap read back as its true default
+      # instead of the false written here, because the nested key was
+      # never the real parameter.  trinary false, or SP7's 0..99 band
+      # collapses to free/lethal and every gradient below the thresholds
+      # is thrown away.
+      trinary_costmap: false
+      lethal_cost_threshold: 100
+      unknown_cost_value: -1
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
@@ -243,11 +267,6 @@ global_costmap:
         map_topic: /autonomy/costmap_seed
         map_subscribe_transient_local: true
         subscribe_to_updates: false
-        # trinary false, or SP7's 0..99 band collapses to free/lethal and
-        # every gradient below the thresholds is thrown away.
-        trinary_costmap: false
-        lethal_cost_threshold: 100
-        unknown_cost_value: -1
         transform_tolerance: 0.5
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
@@ -290,6 +309,11 @@ local_costmap:
       transform_tolerance: 0.5
       robot_radius: 0.80
       footprint_padding: 0.03
+      # See the identical note on the global costmap: these three belong
+      # to Costmap2DROS, not to static_layer's own namespace.
+      trinary_costmap: false
+      lethal_cost_threshold: 100
+      unknown_cost_value: -1
       # The seed is in the local costmap too, deliberately: it is the only
       # thing that knows about holes, and a controller that could not see
       # the rim would happily follow a stale plan into one.
@@ -300,9 +324,6 @@ local_costmap:
         map_topic: /autonomy/costmap_seed
         map_subscribe_transient_local: true
         subscribe_to_updates: false
-        trinary_costmap: false
-        lethal_cost_threshold: 100
-        unknown_cost_value: -1
         transform_tolerance: 0.5
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
