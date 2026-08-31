@@ -21,6 +21,12 @@ def test_a_click_emits_the_world_coordinate_under_the_cursor(qtbot):
     view.set_metres_per_pixel(0.05)
     points = []
     view.point_clicked.connect(lambda x, y: points.append((x, y)))
+    # A poseless view takes no waypoints: before the first pose the view is
+    # centred on world (0,0) and a click would land at the map origin -
+    # the misplaced-goal bug from the first live autonomy session.
+    click(view, 200, 150)
+    assert points == []
+    view.set_pose({"x": 0.0, "y": 0.0, "yaw": 0.0})
     click(view, 200, 150)
     assert points[-1] == (0.0, 0.0)
     click(view, 200, 100)             # 50 px up the screen = +2.5 m in x

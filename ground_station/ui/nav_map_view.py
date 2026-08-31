@@ -111,6 +111,13 @@ class NavMapView(QWidget):
         # delivering the event synchronously) - the click must still land
         # on the geometry the widget actually has right now.
         self.transform = self.transform.resized(self.width(), self.height())
+        if self.pose is None:
+            # Before the first pose the view is centred on world (0, 0), so
+            # a click would silently place a waypoint at the map origin -
+            # wherever the rover booted. That exact misplacement cost a live
+            # session; a canvas that does not know where the rover is takes
+            # no waypoints.
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.position()
             wx, wy = self.transform.to_world(pos.x(), pos.y())
