@@ -153,9 +153,12 @@ def test_a_measured_cell_inside_the_startup_patch_is_never_overwritten(node):
     # A locally-mapped, mostly flat patch around the pose, with a small pit
     # in it (measured LETHAL rim, spec section 5's usual fixture) surrounded
     # by genuinely unseen (NaN) ground everywhere else in the 50x50 window.
+    # The pit sits 10+ cells from the pose: inside the 18-cell startup
+    # patch, where measurements always win - but OUTSIDE the 8-cell wheel
+    # trail, which is the one place wheels now outrank the camera.
     grid = np.full((50, 50), np.nan, dtype=np.float32)
     grid[10:35, 10:35] = 0.0
-    grid[21:27, 21:27] = -0.2              # a 0.2 m pit, well inside the flat patch
+    grid[11:15, 23:27] = -0.2              # a 0.2 m pit, 10 cells above the pose
     message = build_grid_map({'elevation': grid}, -25, -25, 0.05, 'map', Time())
 
     node._on_pose(pose_at(0.0, 0.0))       # (x, y) = (0, 0) is cell (25, 25)
@@ -163,10 +166,34 @@ def test_a_measured_cell_inside_the_startup_patch_is_never_overwritten(node):
 
     seed = node._seed_publisher.messages[0]
     cost = np.asarray(seed.data, dtype=np.int8).reshape(seed.info.height, seed.info.width)
-    assert cost[20, 20] == LETHAL          # the pit's measured rim survives the patch
+    assert cost[11, 24] == LETHAL          # the pit's measured rim survives the patch
     assert cost[25, 8] == 0                # unseen ground inside the disc, outside the
                                             # flat patch, is cleared (col 8 is 17 cells
                                             # from the centre, radius is 18)
+
+
+def test_the_wheel_trail_frees_the_ground_the_rover_drove_over(node):
+    # The stranded-rover night: phantom lethal painted onto the rover's own
+    # driven path refused every plan's start pose. Wheels outrank the
+    # camera on the trail itself - a measured LETHAL under a visited pose
+    # goes free, while the same measurement off-trail stays lethal.
+    grid = np.full((50, 50), np.nan, dtype=np.float32)
+    grid[10:40, 10:40] = 0.0
+    grid[24:27, 12:38] = 0.3               # a phantom "wall" along the driven line
+    message = build_grid_map({'elevation': grid}, -25, -25, 0.05, 'map', Time())
+
+    node._on_pose(pose_at(0.0, 0.0))
+    node._on_pose(pose_at(0.25, 0.0))      # drove +x along the phantom
+    node._on_pose(pose_at(0.50, 0.0))
+    node._on_map(message)
+
+    seed = node._seed_publisher.messages[0]
+    cost = np.asarray(seed.data, dtype=np.int8).reshape(seed.info.height, seed.info.width)
+    assert cost[25, 25] == 0 and cost[25, 30] == 0     # trail: wheels won
+    assert cost[25, 8] == 0                            # startup patch still fills unknown
+    # cols 12-16 of the wall sit outside every trail disc (nearest trail
+    # centre is col 25, radius 8): the measured phantom stays lethal there.
+    assert LETHAL in cost[23:28, 12:16]
 
 
 def test_a_second_pose_does_not_move_or_add_a_patch(node):

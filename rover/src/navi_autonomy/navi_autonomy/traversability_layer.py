@@ -49,7 +49,7 @@ from navi_autonomy.grid_map_io import (
     ELEVATION_LAYER, build_grid_map, build_occupancy_grid, layer_from_message)
 from navi_autonomy.tile_aggregator import MAP_TOPIC, POSE_TOPIC, latched_qos
 from navi_autonomy.traversability import (STEP_LETHAL_M, clear_startup_patch,
-                                          seed_from_elevation)
+                                          seed_from_elevation, stamp_wheel_trail)
 from navi_localization.elevation_grid import RESOLUTION
 
 TRAVERSABILITY_TOPIC = '/autonomy/traversability'
@@ -80,11 +80,22 @@ class TraversabilityLayer(Node):
         # The spec's 0.14 m by default; raise for night sessions where ZED
         # depth noise fabricates phantom steps (see costmap_seed).
         self.declare_parameter('step_lethal_m', STEP_LETHAL_M)
+        # Radius of the free disc stamped along the rover's pose history.
+        # MUST stay inside the footprint's inscribed circle (0.445 m half-
+        # width) so it can only touch ground the chassis provably covered;
+        # 0 disables the trail. See traversability.stamp_wheel_trail.
+        self.declare_parameter('wheel_trail_radius_m', 0.40)
 
         self._frame_id = str(self.get_parameter('frame_id').value)
         self._startup_clear_radius_m = float(
             self.get_parameter('startup_clear_radius_m').value)
         self._step_lethal_m = float(self.get_parameter('step_lethal_m').value)
+        self._wheel_trail_radius_m = float(
+            self.get_parameter('wheel_trail_radius_m').value)
+        # The trail: world-lattice cells (metres / RESOLUTION) the rover's
+        # centre has visited, deduplicated - a set, so hours of driving in
+        # the same yard stay bounded by the yard's area, not by time.
+        self._trail = set()
         self.maps_processed = 0
         self.rejected_maps = 0
         self._rejected_logged = False
@@ -109,10 +120,14 @@ class TraversabilityLayer(Node):
         return self.count_subscribers(self._traversability_topic)
 
     def _on_pose(self, message: Odometry) -> None:
+        x = float(message.pose.pose.position.x)
+        y = float(message.pose.pose.position.y)
+        # Every pose feeds the wheel trail (world-lattice cells, deduped);
+        # the startup patch below stays fixed at the first pose only.
+        self._trail.add((int(round(y / RESOLUTION)), int(round(x / RESOLUTION))))
         if self._startup_pose is not None:
             return          # the patch is fixed at the first pose, permanently
-        self._startup_pose = (float(message.pose.pose.position.x),
-                              float(message.pose.pose.position.y))
+        self._startup_pose = (x, y)
 
     def _on_map(self, message: GridMap) -> None:
         resolution = float(message.info.resolution)
@@ -147,6 +162,15 @@ class TraversabilityLayer(Node):
                           int(round(x / resolution)) - origin_ix)
             radius_cells = int(round(self._startup_clear_radius_m / resolution))
             clear_startup_patch(cost, centre_cell, radius_cells)
+        if self._trail and self._wheel_trail_radius_m > 0.0:
+            # World-lattice -> this tick's grid indices, same origin shift
+            # as the startup patch above. AFTER the patch and the derive:
+            # wheels outrank every camera opinion, phantom or real.
+            trail_cells = [(iy - origin_iy, ix - origin_ix)
+                           for iy, ix in self._trail]
+            stamp_wheel_trail(
+                cost, trail_cells,
+                int(round(self._wheel_trail_radius_m / resolution)))
         stamp = message.header.stamp
         self._seed_publisher.publish(build_occupancy_grid(
             cost, origin_ix, origin_iy, resolution, self._frame_id, stamp))

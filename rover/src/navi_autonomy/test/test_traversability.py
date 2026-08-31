@@ -13,7 +13,7 @@ import pytest
 from navi_autonomy.traversability import (
     LETHAL, MAX_SCALED_COST, ROUGHNESS_REF_M, SLOPE_LETHAL_DEG, SLOPE_LETHAL_RAD,
     STEP_LETHAL_M, UNKNOWN, clear_startup_patch, costmap_seed, derive, roughness_layer,
-    seed_from_elevation, slope_layer, step_layer, valid_layer)
+    seed_from_elevation, slope_layer, stamp_wheel_trail, step_layer, valid_layer)
 
 
 def pit(depth=0.2, size=6, extent=24):
@@ -277,3 +277,33 @@ def test_a_centre_off_the_grid_clears_nothing_in_bounds():
     cost = np.full((5, 5), UNKNOWN, dtype=np.int8)
     clear_startup_patch(cost, (100, 100), radius_cells=2)
     assert (cost == UNKNOWN).all()
+
+
+# -- the wheel trail --------------------------------------------------------
+
+def test_the_wheel_trail_overrides_even_a_measured_lethal():
+    # The night finding this exists for: z-drift phantoms painted the
+    # rover's own driven path lethal and stranded it. Wheels outrank the
+    # camera - unknown, scaled cost and LETHAL alike go free on the trail.
+    cost = np.full((20, 20), -1, dtype=np.int8)
+    cost[10, 10] = 100
+    cost[10, 12] = 99
+    stamp_wheel_trail(cost, [(10, 10), (10, 12)], radius_cells=1)
+    assert cost[10, 10] == 0
+    assert cost[10, 12] == 0
+    assert cost[9, 10] == 0 and cost[11, 12] == 0     # the disc, not a point
+    assert cost[10, 15] == -1                          # off-trail untouched
+
+
+def test_the_trail_disc_is_a_disc_and_stays_in_bounds():
+    cost = np.full((6, 6), 100, dtype=np.int8)
+    stamp_wheel_trail(cost, [(0, 0)], radius_cells=2)   # corner: clips safely
+    assert cost[0, 0] == 0 and cost[2, 0] == 0
+    assert cost[2, 2] == 100        # corner of the square, outside the disc
+    assert cost[5, 5] == 100
+
+
+def test_a_zero_radius_disables_the_trail():
+    cost = np.full((4, 4), 100, dtype=np.int8)
+    stamp_wheel_trail(cost, [(2, 2)], radius_cells=0)
+    assert (cost == 100).all()

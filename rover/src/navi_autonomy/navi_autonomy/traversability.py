@@ -215,6 +215,41 @@ def _disc_offsets(radius_cells: int) -> np.ndarray:
     return np.stack((ys[disc], xs[disc]), axis=1)
 
 
+def stamp_wheel_trail(cost: np.ndarray, trail_cells, radius_cells: int) -> np.ndarray:
+    """Ground the wheels have actually rolled over is proof-of-traversable,
+    and that proof outranks every camera opinion - including a measured
+    LETHAL. Live night finding (2026-09-01): the ZED's z drifted 0.8 m in
+    the dark, old and new elevation data met in metre-high phantom "steps",
+    and the rover ended stranded on cost-99 ground it had just driven over,
+    with every planner refusing the start pose.
+
+    `trail_cells` is an iterable of (row, col) centres - the rover's pose
+    history in THIS seed's cell frame. Each gets a free (0) disc of
+    `radius_cells`. The radius MUST stay inside the footprint's inscribed
+    circle: this is what separates the trail from the rejected moving
+    clearing disc (see clear_startup_patch below) - it never touches ground
+    beside the chassis, only ground the chassis provably covered.
+
+    The known trade, accepted: an obstacle that ARRIVES on the old trail
+    later (a rolled rock) is erased until the camera maps it again on top -
+    the yard is static during a run, and a stranded rover was the real
+    failure. Mutates `cost` in place and returns it.
+    """
+    cost = np.asarray(cost)
+    if cost.ndim != 2:
+        raise ValueError(f"a cost grid is 2-D, got shape {cost.shape}")
+    if radius_cells <= 0:
+        return cost
+    rows, cols = cost.shape
+    offsets = _disc_offsets(radius_cells)
+    for row, col in trail_cells:
+        ry = offsets[:, 0] + int(row)
+        rx = offsets[:, 1] + int(col)
+        in_bounds = (ry >= 0) & (ry < rows) & (rx >= 0) & (rx < cols)
+        cost[ry[in_bounds], rx[in_bounds]] = 0
+    return cost
+
+
 def clear_startup_patch(cost: np.ndarray, centre_cell, radius_cells: int) -> np.ndarray:
     """"The wheels have been here" - the ground the rover is already sitting
     on at start-up is proof-of-traversable, so it overrides the "unknown =
