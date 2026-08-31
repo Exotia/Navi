@@ -271,7 +271,7 @@ ensure_navi_alias() {
         return 0
     fi
     iface=$(ip -o -4 addr show 2>/dev/null \
-        | awk '$4 ~ /^192\.168\.178\./ { print $2; exit }')
+        | awk '$4 ~ /^192\.168\.178\./ { print $2; exit }' || true)
     if [ -z "$iface" ]; then
         echo "warning: no interface holds a 192.168.178.x address, so the NaVi" >&2
         echo "         alias $NAVI_ALIAS cannot be added. navi_rpc_server still" >&2
