@@ -20,6 +20,7 @@ setup(
     entry_points={
         'console_scripts': [
             'mode_supervisor = navi_supervisor.mode_supervisor:main',
+            'navi_rpc_server = navi_supervisor.navi_rpc_server:main',
         ],
     },
 )

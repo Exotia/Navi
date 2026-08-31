@@ -11,6 +11,10 @@
 
   <depend>rclpy</depend>
   <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <!-- navi_rpc_server needs the `msgpack` Python package (pip install
+       msgpack); it is not an ament package, so it is documented here rather
+       than declared - the same note navi_teleop carries for bema_bridge. -->
   <depend>std_msgs</depend>
 
   <test_depend>ament_copyright</test_depend>
