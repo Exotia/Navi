@@ -115,13 +115,7 @@ controller_server:
       simulate_ahead_time: 1.0
       # -- shared by shim and RPP (one key, both read it)
       rotate_to_heading_angular_vel: 0.2
-      # 2.0, not 0.5: the shim clamps each cycle to MEASURED odom speed
-      # +- accel*dt. At 0.5 that is a 0.05 rad/s step gated on a chassis
-      # that cannot execute 0.05 (below its deadband) and a bursty odom -
-      # live runs sat pinned at 0.05 forever, wheels still. 2.0 lets the
-      # first step be full speed; the twist shaper and smoother downstream
-      # do the actual ramping the chassis executes.
-      max_angular_accel: 2.0
+      max_angular_accel: 0.5
       # -- regulated pure pursuit
       desired_linear_vel: 0.2   # raised from the careful 0.05 - operator request, night session
       lookahead_dist: 0.45
