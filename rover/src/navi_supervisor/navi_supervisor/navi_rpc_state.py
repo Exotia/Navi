@@ -29,6 +29,8 @@ import math
 import threading
 from time import monotonic
 
+from navi_supervisor.navi_rpc_protocol import RpcRefusal
+
 # navi::TAG_WaypointReached / TAG_DestinationReached, from NaVi.idl.
 TAG_WAYPOINT_REACHED = 0x31
 TAG_DESTINATION_REACHED = 0x32
@@ -263,3 +265,97 @@ class NaviRpcState:
             if action in _DEDUPED and action in self._actions:
                 continue
             self._actions.append(action)
+
+
+# --- the method table -----------------------------------------------------
+#
+# Names, arities and guard flags come from coordinator/deps/naviInterface:
+# NaViProxy binds F0-F12, and NaVi.idl marks F2, F8 and F9 @noguard. The
+# camera methods F10-F12 are deliberately not bound - spec 3 lists F0-F9 as
+# the interface, and the pan/tilt/zoom head is not ours; an unknown-method
+# error beats a hang.
+
+GUARDED_METHODS = frozenset({"F0", "F1", "F3", "F4", "F5", "F6", "F7"})
+
+STUBS = {
+    "F1": "setPosition",
+    "F2": "getPosition",
+    "F8": "getTofData",
+    "F9": "takeSnapshot",
+}
+
+# What F2 answers. NaViEP::getPosition() unpacks the reply as a
+# std::array<std::array<float,4>,4>, so a 4x4 identity is the correctly
+# shaped way to say "no pose information from here".
+IDENTITY_POSE = [[1.0, 0.0, 0.0, 0.0],
+                 [0.0, 1.0, 0.0, 0.0],
+                 [0.0, 0.0, 1.0, 0.0],
+                 [0.0, 0.0, 0.0, 1.0]]
+
+
+def _refusal(method):
+    return RpcRefusal(f"{method} ({STUBS[method]}) is not served by "
+                      f"navi_rpc_server")
+
+
+def navi_method_table(state, logger=None):
+    """The F-methods, bound to a NaviRpcState. Arities match the IDL, so a
+    call with the wrong number of arguments is answered as bad arguments
+    rather than silently accepted.
+
+    F1 is guarded, and NaViEP::setPosition() catches rpc::rpc_error, so it
+    refuses by name. F2, F8 and F9 are @noguard, and their client half -
+    WeakNaViEP::getPosition/getTofData/takeSnapshot - does NOT catch: an
+    error reply there propagates as rpc::rpc_error into whatever thread
+    made the call, and std::terminate if it escapes a thread function.
+    Since the .18 alias makes us the NaVi endpoint for the whole rover LAN,
+    anything that used to poll the real NaVi for a pose, a ToF frame or a
+    snapshot now reaches us - so those three answer benign, correctly-shaped
+    values (an identity pose, an empty frame, nil) and log the call. That is
+    deliberate: "no data" is readable, an exception is not.
+    """
+
+    def _note(method):
+        if logger is None:
+            return
+        try:
+            logger.info(f"{method} ({STUBS[method]}) is not served by "
+                        f"navi_rpc_server; answering with an empty value")
+        except Exception:                       # a logger must not kill us
+            pass
+
+    def f0():
+        state.init()
+
+    def f1(x, y):
+        raise _refusal("F1")
+
+    def f2():
+        _note("F2")
+        return IDENTITY_POSE
+
+    def f3(targets):
+        state.set_targets(targets)
+
+    def f4():
+        state.start_navigation()
+
+    def f5():
+        return state.is_target_reached()
+
+    def f6():
+        state.stop_navigation()
+
+    def f7(enable):
+        state.set_movement_enabled(enable)
+
+    def f8():
+        _note("F8")
+        return []                               # an empty std::vector<float>
+
+    def f9(index):
+        _note("F9")
+        return None
+
+    return {"F0": f0, "F1": f1, "F2": f2, "F3": f3, "F4": f4,
+            "F5": f5, "F6": f6, "F7": f7, "F8": f8, "F9": f9}

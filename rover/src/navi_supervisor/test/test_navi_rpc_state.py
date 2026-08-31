@@ -268,3 +268,108 @@ def test_the_snapshot_is_json_serialisable():
     state.start_navigation()
     state.on_progress(WAYPOINT_REACHED, index=0)
     json.dumps(state.snapshot())
+
+
+# --- the method table, behind the real wire ------------------------------
+from fake_coordinator import FakeCoordinator, RpcError            # noqa: E402
+from navi_supervisor.navi_rpc_protocol import (ACCESS_DENIED_ERROR,  # noqa: E402
+                                               RpcServer)
+from navi_supervisor.navi_rpc_state import (GUARDED_METHODS,       # noqa: E402
+                                            IDENTITY_POSE,
+                                            navi_method_table)
+
+
+@pytest.fixture
+def served():
+    clock = Clock()
+    state = NaviRpcState(clock=clock)
+    server = RpcServer(navi_method_table(state), guarded=GUARDED_METHODS,
+                       host="127.0.0.1", port=0, clock=clock)
+    server.start()
+    client = FakeCoordinator("127.0.0.1", server.port)
+    yield state, clock, client
+    client.close()
+    server.stop()
+
+
+def test_the_guarded_set_matches_the_idl():
+    assert GUARDED_METHODS == frozenset({"F0", "F1", "F3", "F4", "F5",
+                                         "F6", "F7"})
+
+
+def test_the_start_navi_task_sequence_the_coordinator_performs(served):
+    state, clock, client = served
+    # AutoConnection::getCapability() -> Client::accessServer()
+    assert client.access() is True
+    # the naviIniter thread's init()
+    assert client.call("F0") is None
+    # startNaViTask -> setTargets(waypoints)
+    assert client.call("F3", [[1.0, 2.0, 0.0], [3.0, 4.0, 1.5]]) is None
+    # 5 s later, onAutonomousEntered -> startNavigation_async()
+    assert client.call("F4") is None
+    assert client.call("F5") is False
+    snapshot = state.snapshot()
+    assert snapshot["inited"] is True
+    assert snapshot["navigation_requested"] is True
+    assert snapshot["targets"] == [[1.0, 2.0, 0.0], [3.0, 4.0, 1.5]]
+
+
+def test_every_guarded_method_is_refused_with_error_one_without_the_lease(served):
+    state, clock, client = served
+    for method, args in (("F0", ()), ("F1", (1.0, 2.0)),
+                         ("F3", ([[1.0, 2.0, 0.0]],)), ("F4", ()),
+                         ("F5", ()), ("F6", ()), ("F7", (True,))):
+        with pytest.raises(RpcError) as excinfo:
+            client.call(method, *args)
+        assert excinfo.value.error == ACCESS_DENIED_ERROR, method
+
+
+def test_the_unguarded_stubs_answer_safely_and_need_no_lease(served):
+    state, clock, client = served
+    # WeakNaViEP::getPosition/getTofData/takeSnapshot are the three methods
+    # whose mStub->call() is NOT wrapped in try/catch (WeakNaViEP.h:28-58),
+    # so an error reply becomes an rpc::rpc_error in the caller's own thread
+    # - std::terminate if it escapes a thread function. We hold the .18 alias
+    # for the whole rover LAN, so anything that used to poll the real NaVi
+    # for a pose, a ToF frame or a snapshot now reaches us. Shaped emptiness
+    # is readable as "no data"; an exception is not.
+    pose = client.call("F2")
+    assert [list(row) for row in pose] == IDENTITY_POSE
+    assert client.call("F8") == []
+    assert client.call("F9", 0) is None
+
+
+def test_set_position_refuses_even_with_the_lease(served):
+    state, clock, client = served
+    client.access()
+    with pytest.raises(RpcError) as excinfo:
+        client.call("F1", 1.0, 2.0)
+    assert "not served" in str(excinfo.value.error)
+
+
+def test_bad_targets_on_the_wire_are_an_error_not_a_dead_server(served):
+    state, clock, client = served
+    client.access()
+    with pytest.raises(RpcError):
+        client.call("F3", [[1.0, 2.0]])
+    with pytest.raises(RpcError):
+        client.call("F3", [])
+    assert client.call("F3", [[1.0, 2.0, 0.0]]) is None
+
+
+def test_is_target_reached_answers_a_bool_over_the_wire(served):
+    state, clock, client = served
+    client.access()
+    client.call("F3", [[1.0, 2.0, 0.0]])
+    client.call("F4")
+    assert client.call("F5") is False
+    state.on_progress(DESTINATION_REACHED, index=0)
+    assert client.call("F5") is True
+
+
+def test_set_movement_enabled_takes_a_bool_and_nothing_else(served):
+    state, clock, client = served
+    client.access()
+    assert client.call("F7", False) is None
+    with pytest.raises(RpcError):
+        client.call("F7", 1)
