@@ -165,3 +165,11 @@ def test_an_overriding_backstop_reports_its_true_geometry_error(graph):
     # the error the output really has, so an out-of-tolerance backstop is
     # visible on /ik_feasibility rather than only in the rover's tracks.
     assert s["fidelity_err_rad"] > 0.10
+
+
+def test_a_non_finite_twist_is_dropped_not_shaped(graph):
+    node, probe, send, settle, received, status = graph
+    before = len(received)
+    send(float("nan"), 0.0, 0.0)
+    send(0.0, 0.0, float("inf"))
+    assert len(received) == before              # nothing reached /chassis_twist

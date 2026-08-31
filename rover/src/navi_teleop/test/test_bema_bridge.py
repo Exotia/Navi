@@ -173,13 +173,15 @@ def test_status_tick_survives_an_odd_f9_value(bridge):
     assert isinstance(status["coordinator_state"], str)
 
 
-def test_the_bridge_defaults_to_rover_twist_not_manual_twist(bridge):
+def test_the_bridge_defaults_to_chassis_twist_the_fully_guarded_wiring(bridge):
     # The default is what matters: a bridge started by hand must not be
-    # drivable around the supervisor's arbitration and e-stop.
+    # drivable around the supervisor's arbitration and e-stop, and since
+    # SP10 not around the twist_shaper's feasibility clamp either.
     node, server, clock = bridge
-    assert node.get_parameter("twist_topic").value == "/rover_twist"
+    assert node.get_parameter("twist_topic").value == "/chassis_twist"
     subscribed = {s.topic_name for s in node.subscriptions}
-    assert "/rover_twist" in subscribed
+    assert "/chassis_twist" in subscribed
+    assert "/rover_twist" not in subscribed
     assert "/manual_twist" not in subscribed
 
 
@@ -236,3 +238,14 @@ def test_a_navi_task_command_with_malformed_waypoints_is_refused(bridge):
                 {"action": "navi_task", "waypoints": [[0.0, 0.0, 0.0]] * 65}):
         node._on_command(_string(bad))
     assert not any(m == "F0" for tag, m, a in server.calls)
+
+
+def test_a_non_finite_twist_is_dropped_before_the_hardware(bridge):
+    node, server, clock = bridge
+    node._on_twist(_twist(0.2, 0.0, 0.0))
+    node._on_twist(_twist(float("nan"), 0.0, 0.0))
+    node._on_twist(_twist(0.0, 0.0, float("inf")))
+    assert node._twist == (0.2, 0.0, 0.0)      # the bad ones never landed
+    node._drive_tick()
+    f1 = [a for tag, m, a in server.calls if m == "F1"][-1]
+    assert all(v == v and abs(v) != float("inf") for v in f1)

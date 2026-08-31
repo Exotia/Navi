@@ -17,6 +17,7 @@ deadman stops the rover. That is the intended failure mode and it is why
 start_navi.sh starts this before the bridge.
 """
 import json
+import math
 from time import monotonic
 
 import rclpy
@@ -75,6 +76,26 @@ class TwistShaperNode(Node):
         )
 
     def _on_twist(self, msg: Twist):
+        # The shaper sits in series on EVERY drive path, manual included: an
+        # exception escaping this callback kills the node and with it all
+        # driving, so it must never raise (same rule as mode_supervisor's
+        # callbacks). A dropped message is caught by the bridge's deadman.
+        try:
+            self._shape_and_publish(msg)
+        except Exception as exc:  # noqa: BLE001 - deliberate last-resort guard
+            self.get_logger().error(f"twist shaping failed: {exc!r}")
+
+    def _shape_and_publish(self, msg: Twist):
+        # A non-finite twist must not reach the gain maths (NaN propagates
+        # through every product) or the chassis. Dropping the message is the
+        # safe direction: the retained command stays, and if the stream stays
+        # broken the bridge's 1 s deadman stops the rover.
+        if not all(math.isfinite(v) for v in
+                   (msg.linear.x, msg.linear.y, msg.angular.z)):
+            self.get_logger().warn(
+                f"dropping non-finite twist ({msg.linear.x}, {msg.linear.y}, "
+                f"{msg.angular.z})")
+            return
         # Parameters are read per message so a live `ros2 param set` takes
         # effect at once; the shaper's hold state is carried across, because
         # the chassis does not reset when a parameter does.
@@ -98,6 +119,14 @@ class TwistShaperNode(Node):
         self._twist_pub.publish(out)
 
     def _publish_status(self):
+        # Same never-raise rule as _on_twist: diagnostics must not be able
+        # to kill the node that carries the drive path.
+        try:
+            self._publish_status_inner()
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().error(f"shaper status publish failed: {exc!r}")
+
+    def _publish_status_inner(self):
         r = self._last_result
         payload = {
             "gain": 1.0 if r is None else round(r.gain, 6),

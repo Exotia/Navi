@@ -10,12 +10,12 @@ progress, because F8 is unguarded and needs no lease; navi_task/pause_task/
 resume_task go the other way, to the coordinator's guarded F0/F4/F5, and
 are how an autonomous run is armed at all.
 
-The source is /rover_twist, which mode_supervisor is the only publisher
-of - never /manual_twist directly, or the operator's stream would reach
-the wheels around the arbitration and the e-stop. `twist_topic` can point
-this elsewhere for a bench test; the default is the safe wiring, and
-start_navi.sh passes it explicitly anyway so the wiring can be read at the
-launch site.
+The source is /chassis_twist, the twist_shaper's clamped output - never
+/rover_twist directly (that would bypass the SP10 feasibility clamp), and
+never /manual_twist (that would bypass the arbitration and the e-stop as
+well). `twist_topic` can point this elsewhere for a bench test; the
+default is the fully-guarded wiring, and start_navi.sh passes it
+explicitly anyway so the wiring can be read at the launch site.
 
 This node's own 1 s deadman is kept even though the supervisor has one:
 two in series is deliberate - the supervisor's protects against Nav2
@@ -86,7 +86,7 @@ class BemaBridge(Node):
         self.declare_parameter("bema_port", 21022)
         self.declare_parameter("coordinator_port", 21031)
         self.declare_parameter("deadman_s", 1.0)
-        self.declare_parameter("twist_topic", "/rover_twist")
+        self.declare_parameter("twist_topic", "/chassis_twist")
 
         self._deadman_s = float(self.get_parameter("deadman_s").value)
         self._twist = (0.0, 0.0, 0.0)
@@ -111,6 +111,16 @@ class BemaBridge(Node):
 
     def _on_twist(self, msg: Twist):
         try:
+            # Last gate before the hardware: a non-finite component must not
+            # reach the primary's IK. Dropping the message (not zeroing) is
+            # the safe direction - the deadman stops the rover if the stream
+            # stays broken.
+            if not (isfinite(msg.linear.x) and isfinite(msg.linear.y)
+                    and isfinite(msg.angular.z)):
+                self.get_logger().warn(
+                    f"dropping non-finite twist ({msg.linear.x}, "
+                    f"{msg.linear.y}, {msg.angular.z})")
+                return
             # w to the IK is degrees/second; the server negates again so a
             # positive angular.z (CCW) reaches the model as positive u.
             self._twist = (msg.linear.x, msg.linear.y, -degrees(msg.angular.z))
