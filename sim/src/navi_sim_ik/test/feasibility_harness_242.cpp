@@ -1,6 +1,15 @@
 // Generates rover/src/navi_shaper/test/ik_feasibility_golden.json, the fixture
 // SP10's shaper is checked against.
 //
+// See also sim/test/sp10_path_following.sh, the end-to-end counterpart: it
+// drives the real twist_shaper -> sim_ik_node graph on ROS_DOMAIN_ID=91
+// instead of this harness binary, replaying a scripted twist sequence
+// through the same vendored 2.42 model and asserting on the resulting
+// /sim_odom trajectory (cross-track vs. a commanded reference path) and on
+// /ik_feasibility. This harness is the source of the golden fixture the
+// shaper's unit tests are pinned to; that script is where the shaper and
+// the model are checked together, against the real node graph.
+//
 // Deliberately NOT a CMake target, for the reasons golden_harness_242.cpp
 // gives: it is a code generator, not a test, so keeping it out of the package
 // build means it can never break the build, never install, and never
