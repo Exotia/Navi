@@ -1333,3 +1333,23 @@ def test_escape_stops_the_rover_from_anywhere_in_the_window(qtbot):
     qtbot.wait(150)          # animateClick is a timed press
     assert [name for name, _ in FakeTopic.call_log] == [
         "/estop_request", "/drive_command"]
+
+
+def test_the_node_list_is_a_drawer_not_a_permanent_column(qtbot):
+    # A diagnostic read a few times a session should not hold a fixed
+    # column of width away from the map and the camera in every view.
+    window, _ = make_window(qtbot)
+    nodes = window.dashboard_page.node_list
+    assert not nodes.isVisibleTo(window)
+    window.nodes_button.click()
+    assert nodes.isVisibleTo(window)
+    assert "▾" in window.nodes_button.text()
+    window.nodes_button.click()
+    assert not nodes.isVisibleTo(window)
+
+
+def test_the_header_carries_the_team_mark_and_a_mission_clock(qtbot):
+    window, _ = make_window(qtbot)
+    assert window.logo.toolTip() == "STAR Dresden e.V."
+    assert window.mission_timer.time_label.text() == "00:00"
+    assert not window.mission_timer.running

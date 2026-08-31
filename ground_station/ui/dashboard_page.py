@@ -24,6 +24,10 @@ class DashboardPage(QWidget):
         self.setStyleSheet(f"background-color: {theme.BG}; color: {theme.TEXT};")
         self.drive_card = DriveCard()
         self.node_list = NodeListWidget()
+        # Hidden until the header's Nodes button asks for it: a diagnostic
+        # read a few times a session should not hold a fixed column of
+        # width away from the map and the camera in every view.
+        self.node_list.setVisible(False)
         self.video_panel = VideoPanel(receiver=video_receiver)
         self.map_row = MapRow()
         self.map_row.setVisible(False)
@@ -45,7 +49,7 @@ class DashboardPage(QWidget):
             "Chooses what this window shows. The rover's mode is the pill "
             "in the header - change it with Manual or Autonomous.")
         self.manual_radio = QRadioButton("Camera")
-        self.semi_auto_radio = QRadioButton("Map + camera")
+        self.semi_auto_radio = QRadioButton("Semi-autonomous")
         self.autonomous_radio = QRadioButton("Autonomy")
         self.simulation_radio = QRadioButton("Simulation")
         # One list, in display order, rather than four scattered checks: the

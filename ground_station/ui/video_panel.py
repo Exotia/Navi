@@ -56,6 +56,37 @@ def localization_marker(status: dict | None) -> tuple[str, str]:
     return f"LOCALISATION {state.upper()}", theme.ACCENT
 
 
+class AspectLabel(QLabel):
+    """A label whose height follows its width at the stream's aspect ratio.
+
+    Without this the picture was letterboxed inside whatever rectangle the
+    layout handed out - a 16:9 camera in a 3:1 slot is mostly black bars,
+    and the bars are the operator's screen space. The panel now takes the
+    shape of what the camera actually sends.
+    """
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent)
+        self._aspect = 16.0 / 9.0
+
+    def set_aspect(self, width: int, height: int) -> None:
+        if width > 0 and height > 0:
+            aspect = float(width) / float(height)
+            if abs(aspect - self._aspect) > 1e-6:
+                self._aspect = aspect
+                self.updateGeometry()
+
+    @property
+    def aspect(self) -> float:
+        return self._aspect
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return int(round(max(1, width) / self._aspect))
+
+
 class VideoPanel(QWidget):
     stream_requested = Signal(bool)
 
@@ -107,14 +138,19 @@ class VideoPanel(QWidget):
         self.title_label = QLabel()
         self.title_label.setStyleSheet(theme.section_title_style())
 
-        self.image_label = QLabel("NO SIGNAL")
+        self.image_label = AspectLabel("NO SIGNAL")
         self.image_label.setAlignment(Qt.AlignCenter)
         # A small fixed minimum, not the stream's own size. Pinning the
         # label to 672x376 made that the floor for the whole window, and
         # the operator could not shrink the ground station below it. The
         # picture is scaled to whatever room the label ends up with.
         self.image_label.setMinimumSize(160, 90)
-        self.image_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        # Preferred (not Ignored) with heightForWidth honoured: the label
+        # asks the layout for the stream's own shape instead of accepting
+        # any rectangle and letterboxing inside it.
+        policy = QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        policy.setHeightForWidth(True)
+        self.image_label.setSizePolicy(policy)
         # The empty state (no pixmap set yet) shows dimmed, centred text
         # rather than a flat, unexplained rectangle; setPixmap later draws
         # over this the moment a frame arrives.
@@ -366,6 +402,10 @@ class VideoPanel(QWidget):
         would be never."""
         if self._last_frame is None:
             return
+        # The stream's real dimensions drive the panel's shape, so a
+        # source that is not 16:9 (or a resolution change) reshapes the
+        # card rather than growing bars inside it.
+        self.image_label.set_aspect(self.receiver.width, self.receiver.height)
         image = QImage(self._last_frame, self.receiver.width, self.receiver.height,
                        self.receiver.width * 3, QImage.Format_RGB888)
         pixmap = QPixmap.fromImage(image)

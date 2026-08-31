@@ -156,7 +156,7 @@ def test_dashboard_page_offers_the_four_modes(qtbot):
     # really do change the rover's mode is what left an operator pressing
     # the radio and wondering why no goal would start.
     assert page.manual_radio.text() == "Camera"
-    assert page.semi_auto_radio.text() == "Map + camera"
+    assert page.semi_auto_radio.text() == "Semi-autonomous"
     assert page.autonomous_radio.text() == "Autonomy"
     assert page.simulation_radio.text() == "Simulation"
     assert page.manual_radio.isChecked() is True

@@ -3,6 +3,7 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel
 
 from ground_station import theme
 from ground_station.models import DriveCommandTracker
+from ground_station.ui.wheel_view import WheelView
 
 
 class DriveCard(QWidget):
@@ -28,14 +29,26 @@ class DriveCard(QWidget):
         self.details_link.setStyleSheet(f"color: {theme.ACCENT}; border: none;")
         self.details_link.mousePressEvent = self._on_details_clicked
 
-        layout = QVBoxLayout(self)
-        layout.addWidget(title)
+        # The numbers say what was commanded; the picture beside them says
+        # what the chassis is about to look like, which is the thing an
+        # operator can check against the rover in front of them.
+        self.wheel_view = WheelView()
+
+        numbers = QVBoxLayout()
+        numbers.setSpacing(2)
+        numbers.addWidget(title)
         for label in (self.vx_label, self.vy_label, self.wz_label, self.rate_label):
-            layout.addWidget(label)
+            numbers.addWidget(label)
+        numbers.addStretch()
         footer = QHBoxLayout()
         footer.addStretch()
         footer.addWidget(self.details_link)
-        layout.addLayout(footer)
+        numbers.addLayout(footer)
+
+        layout = QHBoxLayout(self)
+        layout.setSpacing(10)
+        layout.addLayout(numbers, stretch=1)
+        layout.addWidget(self.wheel_view)
 
     def _on_details_clicked(self, event):
         self.details_requested.emit()
@@ -47,6 +60,8 @@ class DriveCard(QWidget):
         self.vy_label.setText(f"vy (cmd)  {state.latest.linear_y:.2f} m/s")
         self.wz_label.setText(f"wz (cmd)  {state.latest.angular_z:.2f} rad/s")
         self.rate_label.setText(f"/cmd_vel  {state.rate_hz:.0f} Hz")
+        self.wheel_view.set_twist(state.latest.linear_x, state.latest.linear_y,
+                                  state.latest.angular_z)
         self.rate_label.setStyleSheet(
             f"color: {theme.TEXT}; font-family: {theme.MONO_FONT_FAMILY}; border: none;"
         )

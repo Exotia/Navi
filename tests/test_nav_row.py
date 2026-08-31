@@ -111,17 +111,15 @@ def test_go_is_disabled_while_a_run_is_active(qtbot):
     assert not row.go_button.isEnabled()
 
 
-def test_abort_is_confirmed_before_it_emits(qtbot):
+def test_abort_is_a_panic_button_with_no_dialog_in_the_way(qtbot):
+    # Handing the rover TO autonomy is the decision worth a confirmation;
+    # taking it back is not, and a modal between the operator and stopping
+    # a run is a hazard rather than a safeguard.
     row = armed_row(qtbot)
-    row.set_state(nav(state="running", run_id="gs-1", waypoint_count=1))
-    emitted = []
-    row.abort_requested.connect(lambda: emitted.append(True))
-    row.confirm_abort = lambda: False
-    row.abort_button.click()
-    assert emitted == []
-    row.confirm_abort = lambda: True
-    row.abort_button.click()
-    assert emitted == [True]
+    row.set_state(nav(state="running"))
+    assert not hasattr(row, "confirm_abort")
+    with qtbot.waitSignal(row.abort_requested):
+        row.abort_button.click()
 
 
 def test_the_status_line_shows_waypoint_distance_and_eta(qtbot):

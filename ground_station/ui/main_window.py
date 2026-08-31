@@ -17,6 +17,8 @@ from ground_station.models import (NAV_ACTIVE_STATES, DriveCommandTracker,
 from ground_station.ros_client import RosBridgeClient
 from ground_station.ui.dashboard_page import DashboardPage
 from ground_station.ui.drive_detail_page import DriveDetailPage
+from ground_station.ui.mission_timer import MissionTimer
+from ground_station.ui.star_logo import StarLogo
 
 # The simulation streams to a different UDP port than the rover, on
 # purpose: two senders can never contend and decode each other's late
@@ -170,19 +172,47 @@ class MainWindow(QMainWindow):
         self._stop_shortcut.activated.connect(self.stop_button.animateClick)
 
         self.host_input = QLineEdit(initial_host or "")
-        self.host_input.setPlaceholderText("rosbridge host, e.g. 192.168.1.50")
+        self.host_input.setPlaceholderText("rosbridge host")
         self.host_input.setStyleSheet(input_style)
+        # Fixed, not elastic: the header carries rover state now, and an
+        # elastic host field was the first thing to eat the room - it
+        # collapsed to "host" while the rest of the row stayed comfortable.
+        self.host_input.setFixedWidth(150)
+        self.host_input.setToolTip("rosbridge host, e.g. 192.168.178.33")
         self.port_input = QLineEdit(str(initial_port))
-        self.port_input.setFixedWidth(60)
+        self.port_input.setFixedWidth(56)
         self.port_input.setStyleSheet(input_style)
         self.connect_button = QPushButton("Connect")
         self.connect_button.setStyleSheet(connect_button_style)
         self.connect_button.clicked.connect(self._on_connect_clicked)
 
+        # The team mark, then the product name over the owning org - a
+        # two-line wordmark reads as a masthead instead of one long shouty
+        # string, and leaves the horizontal room for rover state.
+        self.logo = StarLogo(size=32)
         title_label = QLabel("ASTEROPE GROUND STATION")
         title_label.setStyleSheet(
-            f"color: {theme.TEXT}; font-weight: 600; font-size: {theme.FONT_SIZE_TITLE}px;"
-        )
+            f"color: {theme.TEXT}; font-weight: 700; "
+            f"font-size: {theme.FONT_SIZE_TITLE}px; letter-spacing: 0.5px;")
+        org_label = QLabel("STAR Dresden e.V.")
+        org_label.setStyleSheet(
+            f"color: {theme.TEXT_DIM}; font-size: {theme.FONT_SIZE_SMALL}px; "
+            f"letter-spacing: 1px;")
+        wordmark = QVBoxLayout()
+        wordmark.setSpacing(0)
+        wordmark.setContentsMargins(0, 0, 0, 0)
+        wordmark.addWidget(title_label)
+        wordmark.addWidget(org_label)
+
+        self.mission_timer = MissionTimer()
+
+        # The node list is a drawer, not a permanent column: it is a
+        # diagnostic read a few times a session, and as a fixed 240 px
+        # column it took width from the map and the camera in every view.
+        self.nodes_button = QPushButton("Nodes ▸")
+        self.nodes_button.setCheckable(True)
+        self.nodes_button.setToolTip("Show or hide the system-node list.")
+        self.nodes_button.toggled.connect(self._on_nodes_toggled)
 
         # Header reading order, left to right: who am I, what is the rover
         # doing, can it see where it is | how do I reach it | STOP.
@@ -192,15 +222,19 @@ class MainWindow(QMainWindow):
         header.setStyleSheet(f"background-color: {theme.BG};")
         header_layout = QHBoxLayout(header)
         header_layout.setSpacing(10)
-        header_layout.addWidget(title_label)
-        header_layout.addSpacing(8)
+        header_layout.addWidget(self.logo)
+        header_layout.addLayout(wordmark)
+        header_layout.addSpacing(14)
         header_layout.addWidget(self.rover_mode_pill)
         header_layout.addWidget(self.localization_label)
         header_layout.addStretch()
+        header_layout.addWidget(self.mission_timer)
+        header_layout.addSpacing(14)
         header_layout.addWidget(self.connection_label)
         header_layout.addWidget(self.host_input)
         header_layout.addWidget(self.port_input)
         header_layout.addWidget(self.connect_button)
+        header_layout.addWidget(self.nodes_button)
         header_layout.addSpacing(16)
         header_layout.addWidget(self.stop_button)
 
@@ -668,6 +702,10 @@ class MainWindow(QMainWindow):
         self._refresh_rover_mode_pill(state)
         self.dashboard_page.drive_row.set_mode_state(state)
         self.dashboard_page.nav_row.set_mode_state(state)
+
+    def _on_nodes_toggled(self, shown: bool) -> None:
+        self.dashboard_page.node_list.setVisible(shown)
+        self.nodes_button.setText("Nodes ▾" if shown else "Nodes ▸")
 
     def _refresh_rover_mode_pill(self, state) -> None:
         """The header's rover-mode chip. The reason rides along with the

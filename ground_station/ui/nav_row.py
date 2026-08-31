@@ -39,7 +39,10 @@ class NavRow(QWidget):
         self._clock = clock
         self.waypoints = WaypointList()
         self.confirm_autonomous = self._confirm_autonomous_dialog
-        self.confirm_abort = self._confirm_abort_dialog
+        # No confirm_abort: Abort is a panic button. Handing the rover TO
+        # autonomy is the decision worth a dialog; taking it back is not,
+        # and a modal in the way of stopping a run is a hazard, not a
+        # safeguard. (Operator request, night session.)
 
         self.map_view = NavMapView()
         self.map_view.point_clicked.connect(self.append_world_point)
@@ -80,11 +83,11 @@ class NavRow(QWidget):
         # _refresh_controls swaps it back to a plain button otherwise, so a
         # lit Resume always means "the rover is waiting for you".
         self.resume_button.setMinimumHeight(34)
-        # Abort moves the rover to a stop and tears down the coordinator's
-        # run - a danger hint, the same border-only weight the DRIVE row
-        # gives Init/Reset encoders, not a full fill: the button stays
-        # readable at a glance, just bordered BAD.
-        self.abort_button.setStyleSheet(theme.danger_outline_style())
+        # Abort stops the rover and tears down the coordinator's run, with
+        # no dialog in the way - so it is filled BAD like STOP, at the same
+        # height. A panic button has to look like one.
+        self.abort_button.setStyleSheet(theme.stop_button_style())
+        self.abort_button.setMinimumHeight(34)
 
         # --- status pills ----------------------------------------------
         self.no_status_label = QLabel("NAV: no status")
@@ -224,7 +227,8 @@ class NavRow(QWidget):
         self.pause_button.setToolTip("Pause the active run.")
         self.resume_button.setToolTip("Resume a paused run.")
         self.abort_button.setToolTip(
-            "Abort the run. The rover stops and the coordinator is aborted.")
+            "Abort the run immediately - no confirmation. The rover stops "
+            "and the coordinator's task is torn down.")
 
         self.add_button.clicked.connect(self._on_add)
         self.remove_button.clicked.connect(self._on_remove)
@@ -313,8 +317,7 @@ class NavRow(QWidget):
         self.go_requested.emit(self.waypoints.items)
 
     def _on_abort(self):
-        if self.confirm_abort():
-            self.abort_requested.emit()
+        self.abort_requested.emit()
 
     # --- state -----------------------------------------------------------
 
@@ -442,10 +445,3 @@ class NavRow(QWidget):
             "Hand the rover to autonomy? Nav2 will drive it. STOP stays live.")
         return answer == QMessageBox.StandardButton.Yes
 
-    def _confirm_abort_dialog(self) -> bool:
-        answer = QMessageBox.question(
-            self, "Abort",
-            "Abort the run? The rover stops and the coordinator is aborted. "
-            "The mode stays autonomous — use Manual on the DRIVE row to "
-            "take back the sticks.")
-        return answer == QMessageBox.StandardButton.Yes
