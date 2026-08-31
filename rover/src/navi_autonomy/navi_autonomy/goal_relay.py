@@ -17,6 +17,13 @@ handed is new), so checking take_changed() there would turn the 5 Hz timer
 into the status rate. Its side effects still reach Nav2/the coordinator
 immediately through _run_actions(); the status catches up at the next 2 Hz
 tick, at most one tick later than mode_supervisor's own baseline.
+
+`_on_navi_rpc_status` is the SP8 C1 contract SP8's own plan left for this
+node to complete: navi_rpc_server bumps `stop_seq` on `/navi_rpc/status`
+for F6 stopNavigation, F7(false) and a failed run alike, and asks for no
+mode change in any of the three - this is the one place that watches the
+counter and cancels the Nav2 goal, which is what actually stops
+`/autonomy_twist`.
 """
 
 import json
@@ -32,7 +39,7 @@ from navi_autonomy import nav_run as rules
 from navi_autonomy import path_summary
 from navi_autonomy.nav_run import NavRun
 from navi_autonomy.nav2_goals import ActionClientNav2Goals
-from navi_autonomy.task_control import TopicTaskControl
+from navi_autonomy.task_control import NaviRpcTaskControl
 
 TICK_HZ = 5.0
 STATUS_HZ = 2.0
@@ -54,24 +61,28 @@ class GoalRelay(Node):
         self.declare_parameter("nav_path_summary_topic", "/nav_path_summary")
         self.declare_parameter("plan_topic", "/plan")
         self.declare_parameter("mode_status_topic", "/mode_status")
-        # Declared for parity with mode_supervisor's parameter surface, and
-        # for the day NavRun grows a constructor hook for it. NavRun.tick()
-        # enforces its own hardcoded rules.ARM_TIMEOUT_S today - this build
-        # does not change nav_run.py to take it, so this value is currently
-        # informational only, not the timeout actually applied.
+        self.declare_parameter("navi_rpc_status_topic", "/navi_rpc/status")
+        # NavRun.tick() takes this as a constructor arg (SP11 task 8), so
+        # the declared parameter now reaches the timeout actually applied,
+        # rather than being informational only.
         self.declare_parameter("arm_timeout_s", rules.ARM_TIMEOUT_S)
 
         # NOT self._clock: rclpy.node.Node already owns that name (see
         # mode_supervisor.py's identical note).
         self._now = clock
-        self._run = NavRun(clock)
+        self._run = NavRun(clock, arm_timeout_s=float(
+            self.get_parameter("arm_timeout_s").value))
 
         self._nav2 = nav2_goals if nav2_goals is not None else ActionClientNav2Goals(self)
-        self._task = task_control if task_control is not None else TopicTaskControl(self)
+        self._task = task_control if task_control is not None else NaviRpcTaskControl(self)
 
         self._mission_waypoints = []     # [(x, y, yaw_or_None), ...] of the current/last go
         self._plan_points = []           # raw /plan, (x, y) pairs
         self._last_plan_signature = None
+        # First observation only sets the baseline (see _on_navi_rpc_status):
+        # a value merely cached from before this node subscribed is not
+        # evidence the coordinator just stopped something.
+        self._last_stop_seq = None
 
         self._nav_status_pub = self.create_publisher(
             String, str(self.get_parameter("nav_status_topic").value), 1)
@@ -86,6 +97,9 @@ class GoalRelay(Node):
             self._on_mode_status, 10)
         self.create_subscription(
             Path, str(self.get_parameter("plan_topic").value), self._on_plan, 1)
+        self.create_subscription(
+            String, str(self.get_parameter("navi_rpc_status_topic").value),
+            self._on_navi_rpc_status, 10)
 
         self.create_timer(1.0 / TICK_HZ, self._tick)
         self.create_timer(1.0 / STATUS_HZ, self._status_tick)
@@ -135,6 +149,28 @@ class GoalRelay(Node):
                                  for p in msg.poses]
         except Exception as exc:
             self.get_logger().error(f"plan callback failed: {exc!r}")
+
+    def _on_navi_rpc_status(self, msg: String):
+        # The SP8 C1 contract: navi_rpc_server bumps stop_seq on F6
+        # stopNavigation, F7(false) and a failed run alike, and none of
+        # those asks the supervisor for a mode change - completing the
+        # stop (cancelling the Nav2 goal, which is what actually stops
+        # /autonomy_twist) is this node's job, not the supervisor's.
+        try:
+            payload = json.loads(msg.data)
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            self.get_logger().warn(f"unreadable navi_rpc status: {msg.data!r}")
+            return
+        try:
+            stop_seq = payload.get("stop_seq") if isinstance(payload, dict) else None
+            if isinstance(stop_seq, bool) or not isinstance(stop_seq, int):
+                return
+            if self._last_stop_seq is not None and stop_seq != self._last_stop_seq:
+                self._run.on_coordinator_stop(self._now())
+                self._after_run_mutation()
+            self._last_stop_seq = stop_seq
+        except Exception as exc:
+            self.get_logger().error(f"navi_rpc status callback failed: {exc!r}")
 
     # -- Nav2 goal callbacks, wired when a SEND_GOAL action is dispatched ----
     def _on_goal_succeeded(self):

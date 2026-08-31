@@ -254,6 +254,59 @@ def test_abort_does_not_ask_for_a_mode_change(run):
     assert all(action != rules.REQUEST_MODE for action, _ in run.take_actions())
 
 
+def test_a_bumped_stop_seq_cancels_the_goal_and_pauses_the_run(run):
+    # SP11 task 8: navi_rpc_server bumps stop_seq for F6, F7(false) and a
+    # failed run alike, and asks for no mode change in any of them -
+    # cancelling the Nav2 goal here is what actually stops /autonomy_twist.
+    running(run)
+    run.on_coordinator_stop(3.0)
+    assert run.state == rules.PAUSED
+    assert run.take_actions() == [(rules.CANCEL_GOAL, "coordinator stop")]
+    # No PAUSE_TASK: the coordinator caused this stop, so telling it to
+    # pause again would only be a round trip to itself.
+    assert run.status(3.0)["error"] == "coordinator stopped navigation"
+
+
+def test_a_coordinator_stop_with_no_active_run_does_nothing(run):
+    run.on_coordinator_stop(0.0)
+    assert run.state == rules.IDLE
+    assert run.take_actions() == []
+
+
+def test_a_coordinator_stop_while_already_paused_does_not_double_cancel(run):
+    running(run)
+    run.on_request(2.0, {"action": "pause", "run_id": "gs-1"})
+    run.take_actions()
+    run.on_coordinator_stop(3.0)
+    assert run.state == rules.PAUSED
+    assert run.take_actions() == []
+
+
+def test_arm_timeout_s_is_configurable():
+    # Parked from SP11 task 5: the constructor arg, not the module
+    # constant, is what NavRun.tick() actually enforces.
+    clock = Clock()
+    custom = NavRun(clock=clock, arm_timeout_s=3.0)
+    armed(custom).on_request(0.0, go())
+    custom.take_actions()
+    custom.on_coordinator_state("PrepareAutonomous")
+    custom.tick(3.1)
+    assert custom.state == rules.ABORTED
+    assert "coordinator" in custom.status(3.1)["error"]
+
+
+def test_arm_timeout_s_defaults_to_the_module_constant():
+    clock = Clock()
+    default = NavRun(clock=clock)
+    armed(default).on_request(0.0, go())
+    default.take_actions()
+    default.on_coordinator_state("PrepareAutonomous")
+    default.tick(rules.ARM_TIMEOUT_S - 0.1)
+    assert default.state == rules.STARTING       # not timed out yet
+    default.tick(rules.ARM_TIMEOUT_S + 0.1)
+    assert default.state == rules.ABORTED
+
+
 def test_losing_autonomous_mode_aborts_the_run_with_the_supervisors_reason(run):
     running(run)
     run.on_mode_status(2.0, "manual", "operator takeover")

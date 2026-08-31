@@ -59,8 +59,14 @@ _ACTIVE_STATES = (STARTING, RUNNING, PAUSED)
 
 class NavRun:
 
-    def __init__(self, clock):
+    def __init__(self, clock, arm_timeout_s=ARM_TIMEOUT_S):
         self.clock = clock
+        # A constructor arg rather than a module constant read at each
+        # tick(), so goal_relay's declared "arm_timeout_s" ROS parameter
+        # (SP11 task 5, parked pending this wiring) can actually reach the
+        # timeout it names. The default keeps ARM_TIMEOUT_S the effective
+        # value for every caller that does not pass one, tests included.
+        self._arm_timeout_s = float(arm_timeout_s)
         self._state = IDLE
         self._run_id = None
         self._waypoints = []           # list of (x, y, yaw)
@@ -185,6 +191,31 @@ class NavRun:
         self._coordinator_state = name
         self._changed = True
 
+    def on_coordinator_stop(self, now):
+        """navi_rpc_server bumped stop_seq on /navi_rpc/status: F6
+        stopNavigation, F7(false), or a failed run all share the one stop
+        path on that side (SP8's navi_rpc_state._stop_actions), and none of
+        them asks the supervisor for a mode change - SP8's own plan is
+        explicit that completing this side is SP11's job. The coordinator
+        has already stopped the chassis, so a Nav2 goal still in flight
+        is not driving anything, it is fighting a machine that no longer
+        listens; cancelling it is what actually stops /autonomy_twist.
+
+        No PAUSE_TASK is queued back: the coordinator caused this stop, so
+        telling it to pause again would only be a round trip to itself.
+        The run goes to PAUSED rather than ABORTED because F6 is also how
+        CoordinatorImpl::pause() reaches us while still Autonomous - the
+        operator's own Resume (which re-arms exactly like Go) is still the
+        right next step, and if the coordinator will not accept it the arm
+        timeout aborts the run with a reason, same as any other resume.
+        """
+        if self._state not in (STARTING, RUNNING):
+            return
+        self._state = PAUSED
+        self._error = "coordinator stopped navigation"
+        self._changed = True
+        self._queue(CANCEL_GOAL, "coordinator stop")
+
     def _arm(self, now):
         # Arming requires an OBSERVED transition, never a cached value: a
         # value cached from the previous run, or from a manual
@@ -198,7 +229,7 @@ class NavRun:
         if self._coordinator_state == _COORDINATOR_AUTONOMOUS:
             self._send_current_goal()
             return
-        if now - self._armed_at > ARM_TIMEOUT_S:
+        if now - self._armed_at > self._arm_timeout_s:
             self._abort("coordinator did not reach Autonomous", cancel_reason=None)
 
     def _send_current_goal(self):

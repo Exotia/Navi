@@ -262,6 +262,93 @@ def test_abort_cancels_the_goal_and_aborts_the_task(graph_factory):
     assert task.calls.count(("abort", None)) == 1
 
 
+def test_a_bumped_stop_seq_cancels_the_goal_and_pauses_the_run(graph_factory):
+    # SP11 task 8 / SP8 C1: navi_rpc_server bumps stop_seq on /navi_rpc/status
+    # for F6, F7(false) and a failed run alike; goal_relay is the one that
+    # cancels the Nav2 goal, which is what actually stops /autonomy_twist.
+    executor, relay, server, task, clock, statuses, summaries = graph_factory()
+    relay._on_mode_status(mode("autonomous"))
+    relay._on_nav_request(go())
+    spin(executor, 2.0)
+    assert len(server.received_goals) == 1
+
+    relay._on_navi_rpc_status(_string({"stop_seq": 0}))    # baseline, no-op
+    spin(executor, 0.5)
+    assert statuses[-1]["state"] == "running"
+
+    relay._on_navi_rpc_status(_string({"stop_seq": 1}))
+    spin(executor, 2.0)
+    assert statuses[-1]["state"] == "paused"
+    assert server.cancel_count >= 1
+
+
+def test_goal_relay_binds_naviRpcTaskControl_to_the_real_wire(ros):
+    """8.5's binding test: with goal_relay wired the way main() wires it (no
+    task_control override), a Go produces {"action": "navi_task"} on
+    /drive_command with the operator's waypoints, and a completed run
+    produces notifyTaskFinished's payload - waypoint_reached then
+    destination_reached - on /navi_rpc/progress. This is the one test that
+    checks the real NaviRpcTaskControl reaches the real topics rather than
+    RecordingTaskControl standing in for it.
+    """
+    from navi_autonomy.task_control import NaviRpcTaskControl
+
+    class WireListener(Node):
+        def __init__(self):
+            super().__init__("wire_listener")
+            self.drive_commands = []
+            self.progress = []
+            self.create_subscription(
+                String, "/drive_command",
+                lambda m: self.drive_commands.append(json.loads(m.data)), 10)
+            self.create_subscription(
+                String, "/navi_rpc/progress",
+                lambda m: self.progress.append(json.loads(m.data)), 10)
+            self.status_pub = self.create_publisher(String, "/drive_status", 1)
+
+    clock = Clock()
+    server = FakeNav2Server()
+    listener = WireListener()
+    relay = GoalRelay(clock=clock)     # no task_control override: main()'s own wiring
+    assert isinstance(relay._task, NaviRpcTaskControl)
+
+    executor = SingleThreadedExecutor()
+    executor.add_node(server)
+    executor.add_node(listener)
+    executor.add_node(relay)
+    try:
+        spin(executor, 1.0)     # discovery
+
+        relay._on_mode_status(mode("autonomous"))
+        relay._on_nav_request(go())
+        spin(executor, 1.0)
+        assert {"action": "navi_task",
+                "waypoints": [[3.0, -1.5, 0.0], [8.0, -1.5, 0.0]]} \
+            in listener.drive_commands
+
+        # Arm the run over the real wire, same as bema_bridge would report it.
+        listener.status_pub.publish(_string({"coordinator_state": 5}))
+        spin(executor, 2.0)
+        assert len(server.received_goals) == 1
+
+        server.succeed(0)
+        spin(executor, 2.0)
+        assert {"event": "waypoint_reached", "index": 0, "reason": None} \
+            in listener.progress
+
+        server.succeed(0)
+        spin(executor, 2.0)
+        assert {"event": "destination_reached", "index": None, "reason": None} \
+            in listener.progress
+    finally:
+        executor.remove_node(relay)
+        executor.remove_node(server)
+        executor.remove_node(listener)
+        relay.destroy_node()
+        server.destroy_node()
+        listener.destroy_node()
+
+
 def test_nav_status_is_published_on_every_state_change_and_at_2_hz(graph_factory):
     executor, relay, server, task, clock, statuses, summaries = graph_factory()
     before = len(statuses)

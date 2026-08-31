@@ -1,12 +1,53 @@
-"""What goal_relay needs from the primary's coordinator, and the stopgap
-that stands in until SP8's navi_rpc client exists.
+"""What goal_relay needs from the primary's coordinator, bound to SP8's
+actual navi_rpc / bema_bridge wire (SP11 task 8 - the integration
+checkpoint this file names in its own docstring history).
 
-SP8 builds `navi_rpc_server` (the :21021 endpoint the coordinator calls
-back into) and the coordinator client for task state. SP11 must not guess
-its symbol names, so it names an interface instead and binds SP8's real
-client to it in the integration checkpoint (SP11 task 8). The interface is
-the *sequence* goal_relay asks for; that sequence must not change when the
-stopgap stops being a stopgap.
+SP8 built `navi_rpc_server` (in `navi_supervisor`, not a separate `navi_rpc`
+package - see its plan's decision 1) and the coordinator client for task
+state (`navi_teleop.bema_session.BemaSession`). Reconciled against the real
+code rather than guessed:
+
+  * `start_task`/`pause`/`resume`/`abort` publish JSON on `/drive_command`.
+    `navi_teleop.bema_bridge.BemaBridge._on_command` is the consumer; it
+    turns `{"action": "navi_task", "waypoints": [[x, y, w], ...]}` into
+    `BemaSession.start_navi_task` (coordinator's guarded F0), `pause_task`/
+    `resume_task` into F4/F5, and `{"action": "abort"}` (unchanged from the
+    stopgap) into `BemaSession.abort` (F7). All four already do the
+    coordinator's own just-in-time `__sam__` lease dance inside
+    `bema_session.py`'s `_coord_guarded` - there is no second client to
+    bind, so `abort` keeps the stopgap's path rather than growing one.
+
+  * `notify_waypoint_reached`/`notify_destination_reached` do NOT publish
+    `{"action": "task_finished"}` on `/drive_command` - that would be a
+    second writer of the coordinator's F8. `navi_rpc_server`
+    (`navi_supervisor.navi_rpc_state.NaviRpcState.on_progress`) is the
+    single path from a completed leg to `notifyTaskFinished`: it consumes
+    `/navi_rpc/progress` (`{"event": "waypoint_reached"|"destination_reached",
+    "index": int|None, "reason": None}`) and performs the F8 publish
+    itself. SP8's own task-6 brief says this in as many words: "a second
+    path here would desynchronise /navi_rpc/status's reached_index from
+    the coordinator's real state."
+
+  * `coordinator_state` is untouched: `/drive_status` still carries the
+    coordinator's mission-state int (`BemaSession.status()`'s
+    `coordinator_state`, published by `bema_bridge`), and nothing SP8 built
+    replaces that poll. The mapping table is kept local rather than
+    imported for the same reason `nav2_goals.py` keeps its own copy of
+    `PLAN_FRAME`: this rover package must not import ground_station, and
+    `ground_station.models._COORDINATOR_STATES` is the same seven values -
+    keep them identical.
+
+One finding worth recording rather than papering over: `nav_run.py`'s
+START_TASK action queues bare `(x, y)` pairs with no yaw (pinned by
+`test_nav_run.py` and `test_goal_relay.py` - unchanged by this task, since
+moving that pinned sequence was explicitly out of scope). SP8's own plan
+says "we are the only producer end-to-end" for a target's yaw and expects
+`goal_relay` to supply it; since NavRun does not carry one this far, the
+missing third component is filled with `0.0` here. Harmless: the
+coordinator relays these triples straight back to us as its own NaVi F3
+targets for its own tracking, not for Nav2's path - Nav2 (fed the operator's
+real per-waypoint yaw via goal_relay's own `_resolve_yaw`) is what actually
+drives the rover.
 """
 
 import json
@@ -50,31 +91,19 @@ class RecordingTaskControl(TaskControl):
     def coordinator_state(self): return self.state
 
 
-class TopicTaskControl(TaskControl):
-    """The stopgap. One method is real today and stays real after SP8.
+class NaviRpcTaskControl(TaskControl):
+    """SP8's real bindings - see the module docstring for the reconciliation.
 
-    `abort` publishes {"action": "abort"} on /drive_command - the path
-    bema_bridge already implements (BemaSession.abort: take the
-    coordinator's own __sam__ lease, then F7). Everything else logs and
-    records that it was asked, exactly as NullNav2Control does, and reports
-    the coordinator state bema_bridge already puts on /drive_status.
-
-    `start_task` is a NO-OP here: nothing in this stopgap puts the
-    coordinator into PrepareAutonomous. So with this bound, Go reaches
-    Nav2 only when the coordinator already happens to be in Autonomous
-    from a manual /drive_command; otherwise the run aborts at
-    ARM_TIMEOUT_S with the coordinator named. SP11 task 8 is REQUIRED for
-    the feature, not a tidy-up.
-
-    Removed in SP11 task 8, except `abort`, which SP8's client inherits.
+    Constructed with the rclpy node so it can own its own publishers/
+    subscription, the same shape the stopgap it replaces used.
     """
 
-    # /drive_status carries coordinator_state as an INT (bema_bridge
-    # publishes BemaSession._coord_state). NavRun compares against the
-    # NAME, so the mapping happens here. A local copy of the table rather
-    # than an import: the rover package must not import ground_station,
-    # and ground_station.models._COORDINATOR_STATES is the same seven
-    # values - keep them identical.
+    # /drive_status carries coordinator_state as an INT (BemaSession.status(),
+    # published by bema_bridge). NavRun compares against the NAME, so the
+    # mapping happens here. A local copy of the table rather than an import:
+    # the rover package must not import ground_station, and
+    # ground_station.models._COORDINATOR_STATES is the same seven values -
+    # keep them identical.
     _COORDINATOR_STATES = {
         0: "Disconnected", 1: "Idle", 2: "PrepareManual", 3: "Manual",
         4: "PrepareAutonomous", 5: "Autonomous", 6: "Waiting",
@@ -85,6 +114,7 @@ class TopicTaskControl(TaskControl):
         self.calls = []
         self._last_coordinator_state = None
         self._command_pub = node.create_publisher(String, "/drive_command", 10)
+        self._progress_pub = node.create_publisher(String, "/navi_rpc/progress", 10)
         node.create_subscription(String, "/drive_status", self._on_drive_status, 10)
 
     def _on_drive_status(self, msg):
@@ -97,32 +127,38 @@ class TopicTaskControl(TaskControl):
             payload.get("coordinator_state") if isinstance(payload, dict) else None)
 
     def start_task(self, waypoints) -> None:
-        self.calls.append(("start_task", tuple(waypoints)))
-        self._logger.info(
-            f"navi_task requested for {len(tuple(waypoints))} waypoint(s); "
-            "the stopgap does not arm the coordinator - SP11 task 8 does")
+        waypoints = tuple(waypoints)
+        self.calls.append(("start_task", waypoints))
+        # See the module docstring's finding: NavRun supplies (x, y) only,
+        # yaw filled with 0.0.
+        self._publish_command({
+            "action": "navi_task",
+            "waypoints": [[float(x), float(y), 0.0] for x, y in waypoints]})
 
     def pause(self) -> None:
         self.calls.append(("pause", None))
-        self._logger.info("pause requested; no coordinator RPC until SP8")
+        self._publish_command({"action": "pause_task"})
 
     def resume(self) -> None:
         self.calls.append(("resume", None))
-        self._logger.info("resume requested; no coordinator RPC until SP8")
+        self._publish_command({"action": "resume_task"})
 
     def abort(self) -> None:
+        # Unchanged from the stopgap: BemaSession.abort already takes the
+        # coordinator's own __sam__ lease before F7, so there is nothing
+        # left for a second client to do.
         self.calls.append(("abort", None))
-        msg = String()
-        msg.data = json.dumps({"action": "abort"})
-        self._command_pub.publish(msg)
+        self._publish_command({"action": "abort"})
 
     def notify_waypoint_reached(self, index: int) -> None:
         self.calls.append(("waypoint", index))
-        self._logger.info(f"waypoint {index} reached; no coordinator RPC until SP8")
+        self._publish_progress({
+            "event": "waypoint_reached", "index": int(index), "reason": None})
 
     def notify_destination_reached(self) -> None:
         self.calls.append(("destination", None))
-        self._logger.info("destination reached; no coordinator RPC until SP8")
+        self._publish_progress({
+            "event": "destination_reached", "index": None, "reason": None})
 
     def coordinator_state(self):
         """The name for the last int seen on /drive_status, or None.
@@ -136,3 +172,13 @@ class TopicTaskControl(TaskControl):
         if isinstance(value, bool) or not isinstance(value, int):
             return None
         return self._COORDINATOR_STATES.get(value)
+
+    def _publish_command(self, payload):
+        msg = String()
+        msg.data = json.dumps(payload)
+        self._command_pub.publish(msg)
+
+    def _publish_progress(self, payload):
+        msg = String()
+        msg.data = json.dumps(payload)
+        self._progress_pub.publish(msg)
