@@ -85,6 +85,12 @@ class TraversabilityLayer(Node):
         # width) so it can only touch ground the chassis provably covered;
         # 0 disables the trail. See traversability.stamp_wheel_trail.
         self.declare_parameter('wheel_trail_radius_m', 0.40)
+        # Cells hanging more than this above their neighbours' floor with
+        # nothing beneath are dropped as airborne noise (sun glare, night
+        # grain) - the operator confirmed nothing floats in this yard.
+        # Bigger than any real drivable step, smaller than blob heights;
+        # 0 disables. See traversability.mask_floating_cells.
+        self.declare_parameter('floating_gap_m', 0.35)
 
         self._frame_id = str(self.get_parameter('frame_id').value)
         self._startup_clear_radius_m = float(
@@ -92,6 +98,7 @@ class TraversabilityLayer(Node):
         self._step_lethal_m = float(self.get_parameter('step_lethal_m').value)
         self._wheel_trail_radius_m = float(
             self.get_parameter('wheel_trail_radius_m').value)
+        self._floating_gap_m = float(self.get_parameter('floating_gap_m').value)
         # The trail: world-lattice cells (metres / RESOLUTION) the rover's
         # centre has visited, deduplicated - a set, so hours of driving in
         # the same yard stay bounded by the yard's area, not by time.
@@ -151,7 +158,8 @@ class TraversabilityLayer(Node):
         origin_iy = int(round(float(message.info.pose.position.y) / resolution - n_y / 2.0))
 
         layers, cost = seed_from_elevation(elevation, resolution,
-                                           step_lethal_m=self._step_lethal_m)
+                                           step_lethal_m=self._step_lethal_m,
+                                           floating_gap_m=self._floating_gap_m)
         if self._startup_pose is not None:
             # The stored pose is metres; the seed's cells are indexed from
             # this tick's origin, which moves as the rolling window

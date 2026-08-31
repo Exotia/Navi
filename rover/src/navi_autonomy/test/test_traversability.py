@@ -307,3 +307,40 @@ def test_a_zero_radius_disables_the_trail():
     cost = np.full((4, 4), 100, dtype=np.int8)
     stamp_wheel_trail(cost, [(2, 2)], radius_cells=0)
     assert (cost == 100).all()
+
+
+# -- floating cells ---------------------------------------------------------
+
+def test_a_floating_blob_with_no_floor_connection_is_dropped_as_unseen():
+    from navi_autonomy.traversability import mask_floating_cells
+    elevation = np.zeros((15, 15), dtype=np.float32)
+    elevation[7, 7] = 0.9          # a blob in mid-air over flat ground
+    elevation[7, 8] = 0.8
+    masked = mask_floating_cells(elevation, gap_m=0.35)
+    assert np.isnan(masked[7, 7]) and np.isnan(masked[7, 8])
+    assert masked[7, 6] == 0.0     # the floor around it is untouched
+    # And through the seed: the blob becomes unknown, not a lethal wall.
+    _, cost = seed_from_elevation(elevation, floating_gap_m=0.35)
+    assert cost[7, 7] == UNKNOWN
+    assert not (cost[6:9, 5:10] == LETHAL).any()
+
+
+def test_a_real_wall_face_connects_to_the_floor_and_survives():
+    from navi_autonomy.traversability import mask_floating_cells
+    elevation = np.zeros((15, 15), dtype=np.float32)
+    elevation[:, 8:] = 0.9         # a wall: every high cell neighbours high cells
+    masked = mask_floating_cells(elevation, gap_m=0.35)
+    # The wall's interior and its edge keep their measured height - their
+    # neighbour median is high too, so nothing "floats".
+    assert masked[7, 9] == np.float32(0.9)
+    assert masked[7, 10] == np.float32(0.9)
+    _, cost = seed_from_elevation(elevation, floating_gap_m=0.35)
+    assert (cost[7, 7:10] == LETHAL).any()   # the step onto the wall stays lethal
+
+
+def test_a_zero_gap_disables_the_floating_filter():
+    from navi_autonomy.traversability import mask_floating_cells
+    elevation = np.zeros((9, 9), dtype=np.float32)
+    elevation[4, 4] = 2.0
+    masked = mask_floating_cells(elevation, gap_m=0.0)
+    assert masked[4, 4] == np.float32(2.0)

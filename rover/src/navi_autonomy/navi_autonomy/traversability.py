@@ -21,6 +21,7 @@ monitor, not a guess made here.
 """
 
 import math
+import warnings
 
 import numpy as np
 
@@ -140,6 +141,35 @@ def valid_layer(elevation) -> np.ndarray:
     for dy, dx in _FOUR:
         ok &= np.isfinite(_shift(padded, dy, dx, rows, cols))
     return ok.astype(np.float32)
+
+
+def mask_floating_cells(elevation, gap_m: float) -> np.ndarray:
+    """NaN out cells that hang in the air with no connection to the floor.
+
+    A cell's height is the 20th percentile of its returns (elevation_grid),
+    so a cell containing any real ground reads near that ground, and a rock
+    or wall face - whose points run down to its base - reads near its base
+    too. A cell whose height floats more than `gap_m` ABOVE the median of
+    its valid 8-neighbours can only be a return cloud with nothing beneath
+    it: ZED noise blobs in mid-air (sun glare, night grain), which the
+    operator confirmed do not exist as physical objects in this yard.
+    Masked cells become NaN = unseen, not free: the ground under the blob
+    genuinely was not measured. gap_m <= 0 disables. Returns a copy.
+    """
+    e = np.asarray(elevation, dtype=np.float32).copy()
+    if gap_m <= 0.0 or e.ndim != 2:
+        return e
+    padded = np.pad(e, 1, mode='constant', constant_values=np.nan)
+    rows, cols = e.shape
+    neighbours = np.stack([
+        padded[1 + dy:1 + dy + rows, 1 + dx:1 + dx + cols]
+        for dy in (-1, 0, 1) for dx in (-1, 0, 1) if (dy, dx) != (0, 0)])
+    with np.errstate(invalid='ignore'), warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)   # all-NaN slices
+        floor = np.nanmedian(neighbours, axis=0)
+    floating = (e - floor) > float(gap_m)      # NaN comparisons are False
+    e[floating] = np.nan
+    return e
 
 
 def derive(elevation, resolution: float = RESOLUTION) -> dict:
@@ -301,8 +331,13 @@ def clear_startup_patch(cost: np.ndarray, centre_cell, radius_cells: int) -> np.
 
 
 def seed_from_elevation(elevation, resolution: float = RESOLUTION,
-                        step_lethal_m: float = STEP_LETHAL_M) -> tuple:
-    """(the four layers, the int8 cost grid) - the whole derive in one call."""
+                        step_lethal_m: float = STEP_LETHAL_M,
+                        floating_gap_m: float = 0.0) -> tuple:
+    """(the four layers, the int8 cost grid) - the whole derive in one call.
+    floating_gap_m > 0 first drops cells hanging in the air with no
+    connection to the floor (see mask_floating_cells)."""
+    if floating_gap_m > 0.0:
+        elevation = mask_floating_cells(elevation, floating_gap_m)
     layers = derive(elevation, resolution)
     cost = costmap_seed(layers['slope'], layers['step'],
                         layers['roughness'], layers['valid'],
