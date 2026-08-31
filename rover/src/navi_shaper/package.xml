@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://relaxng.org/ns/structure/1.0"?>
+<package format="3">
+  <name>navi_shaper</name>
+  <version>0.1.0</version>
+  <description>The Asterope rover's feasibility clamp: shapes /rover_twist into
+  a twist the real 2.42 inverse kinematics can execute, and publishes it on
+  /chassis_twist for bema_bridge.</description>
+  <maintainer email="oxe.pxs@gmail.com">star</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
