@@ -91,6 +91,45 @@ expect "a state that stays OFF warns loudly and continues" 0 "WARNING" OFF
 # Nothing publishing at all is the one case that fails the launcher.
 LOC_STATUS_SECONDS=3 expect "no status at all fails the gate" 1 "never arrived" NONE
 
+# ---------------------------------------------------------------------------
+# twist_shaper wiring: the launch section is below the NAVI_FUNCTIONS_ONLY
+# return above and so cannot be sourced - these check the script text itself.
+# ---------------------------------------------------------------------------
+
+check() {
+    local name="$1" ok="$2"
+    if [ "$ok" -eq 0 ]; then
+        echo "ok   $name"
+    else
+        echo "FAIL $name"
+        FAILURES=$((FAILURES + 1))
+    fi
+}
+
+# bema_bridge must be re-pointed at the shaper's output, not the raw stream -
+# this is the whole point of SP10 and must never silently regress.
+grep -q 'twist_topic:=/chassis_twist' "$SCRIPT"
+check "bema_bridge is passed twist_topic:=/chassis_twist" $?
+
+! grep -q 'twist_topic:=/rover_twist' "$SCRIPT"
+check "bema_bridge no longer reads twist_topic:=/rover_twist" $?
+
+# The shaper's launch line must come before the bridge's, so the bridge's
+# source has a publisher by the time it subscribes.
+shaper_line=$(grep -n 'ros2 run navi_shaper twist_shaper' "$SCRIPT" | head -1 | cut -d: -f1)
+bridge_line=$(grep -n 'ros2 run navi_teleop bema_bridge' "$SCRIPT" | head -1 | cut -d: -f1)
+[ -n "$shaper_line" ] && [ -n "$bridge_line" ] && awk -v s="$shaper_line" -v b="$bridge_line" 'BEGIN { exit !(s < b) }'
+check "twist_shaper launch line precedes bema_bridge's" $?
+
+# --no-shaper must be accepted by the argument loop and set START_SHAPER=0.
+grep -q -- '--no-shaper) START_SHAPER=0; shift ;;' "$SCRIPT"
+check "--no-shaper is accepted and sets START_SHAPER=0" $?
+
+# The stale-cleanup section must name the shaper's node so a killed run
+# doesn't leave a stale twist_shaper answering the next one.
+grep -q 'navi_shaper/twist_shaper' "$SCRIPT"
+check "stale cleanup names navi_shaper/twist_shaper" $?
+
 if [ "$FAILURES" -ne 0 ]; then
     echo "$FAILURES check(s) failed"
     exit 1

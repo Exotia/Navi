@@ -11,12 +11,14 @@
 #      msgpack-RPC on :21021. It is what makes startNaViTask succeed instead
 #      of logging "NaVi not reachable"; the 192.168.178.18 alias this script
 #      adds is the address the coordinator has hard-coded.
-#   6. bema_bridge - the BEMA drive bridge, fed from /rover_twist, idle
+#   6. twist_shaper - the feasibility clamp: /rover_twist -> /chassis_twist,
+#      plus /ik_feasibility
+#   7. bema_bridge - the BEMA drive bridge, fed from /chassis_twist, idle
 #      until the ground station drives
-#   7. localization.launch.py - the ZED 2i wrapper with positional tracking,
+#   8. localization.launch.py - the ZED 2i wrapper with positional tracking,
 #      plus localization_status publishing /localization/pose and
 #      /localization/status
-#   8. nav2_bringup.launch.py - Nav2: Theta*/RPP planning to /autonomy_twist,
+#   9. nav2_bringup.launch.py - Nav2: Theta*/RPP planning to /autonomy_twist,
 #      which only mode_supervisor reads. Nav2 needs the frames and the
 #      odometry localisation publishes, so it is skipped when --no-localization
 #      is given.
@@ -26,6 +28,9 @@
 #   ./start_navi.sh --no-drive-bridge  no bema_bridge (rover drive is idle, or one is already running)
 #   ./start_navi.sh --no-supervisor  no mode_supervisor (nothing publishes /rover_twist, so the rover cannot be driven)
 #   ./start_navi.sh --no-navi-rpc  no navi_rpc_server (the coordinator cannot arm an autonomous run)
+#   ./start_navi.sh --no-shaper   no twist_shaper (bema_bridge then has no
+#                                 publisher on /chassis_twist and the rover
+#                                 cannot be driven - for bench work only)
 #   ./start_navi.sh --no-video   no video_sender
 #   ./start_navi.sh --no-localization  no ZED tracking; video from the camera as a UVC device
 #   ./start_navi.sh --no-nav2    no Nav2 (nothing plans; manual drive is unaffected)
@@ -51,6 +56,7 @@ START_BRIDGE=1
 START_DRIVE_BRIDGE=1
 START_SUPERVISOR=1
 START_NAVI_RPC=1
+START_SHAPER=1
 START_VIDEO=1
 START_LOCALIZATION=1
 START_NAV2=1
@@ -62,6 +68,7 @@ while [ $# -gt 0 ]; do
         --no-drive-bridge) START_DRIVE_BRIDGE=0; shift ;;
         --no-supervisor) START_SUPERVISOR=0; shift ;;
         --no-navi-rpc) START_NAVI_RPC=0; shift ;;
+        --no-shaper) START_SHAPER=0; shift ;;
         --no-video) START_VIDEO=0; shift ;;
         --no-localization) START_LOCALIZATION=0; shift ;;
         --no-nav2) START_NAV2=0; shift ;;
@@ -308,7 +315,8 @@ fi
 if [ "$CLEAN_STALE" -eq 1 ]; then
     kill_stale "navi_teleop nodes" "navi_teleop/(manual_twist_listener|video_sender|bema_bridge)"
     kill_stale "navi_supervisor nodes" "navi_supervisor/(mode_supervisor|navi_rpc_server)"
-    kill_stale "ros2 run wrappers" "ros2 run navi_(teleop|supervisor)"
+    kill_stale "navi_shaper nodes" "navi_shaper/twist_shaper"
+    kill_stale "ros2 run wrappers" "ros2 run navi_(teleop|supervisor|shaper)"
     # The pipeline video_sender spawns. Matched on the elements it always
     # contains, so an unrelated gst-launch on this machine is left alone.
     kill_stale "video pipelines" "gst-launch-1\.0.*v4l2src.*udpsink"
@@ -457,11 +465,29 @@ if [ "$START_NAVI_RPC" -eq 1 ]; then
     BACKGROUND_PIDS+=("$!")
 fi
 
+if [ "$START_SHAPER" -eq 1 ]; then
+    # After the supervisor and before the bridge: each consumer's source
+    # must have a publisher by the time it subscribes. This node is the
+    # feasibility clamp - it turns /rover_twist into a twist the real 2.42
+    # IK can execute and republishes it on /chassis_twist.
+    echo "starting twist_shaper (/rover_twist -> /chassis_twist)"
+    ros2 run navi_shaper twist_shaper &
+    BACKGROUND_PIDS+=("$!")
+fi
+
 if [ "$START_DRIVE_BRIDGE" -eq 1 ]; then
-    # twist_topic is already the default; it is passed here as well so the
-    # wiring can be read at the launch site rather than only in the node.
-    echo "starting bema_bridge on /rover_twist (idle until the ground station drives)"
-    ros2 run navi_teleop bema_bridge --ros-args -p twist_topic:=/rover_twist &
+    if [ "$START_SHAPER" -eq 0 ]; then
+        echo "warning: --no-shaper with the drive bridge running." >&2
+        echo "         Nothing publishes /chassis_twist, so the bridge will" >&2
+        echo "         see no twist and its 1 s deadman will hold the rover" >&2
+        echo "         stopped. This is deliberate: the bridge is NOT" >&2
+        echo "         re-pointed at /rover_twist, because an unclamped path" >&2
+        echo "         to the wheels is the failure SP10 exists to prevent." >&2
+    fi
+    # The feasibility-clamped stream, not /rover_twist. Passed explicitly
+    # so the wiring reads at the launch site rather than only in the node.
+    echo "starting bema_bridge on /chassis_twist (idle until something drives)"
+    ros2 run navi_teleop bema_bridge --ros-args -p twist_topic:=/chassis_twist &
     BACKGROUND_PIDS+=("$!")
 fi
 
