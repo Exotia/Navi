@@ -438,13 +438,10 @@ if [ "$START_NAV2" -eq 1 ]; then
         # forever and plans nothing.
         echo "skipping nav2: it needs localisation for TF (--no-localization was given)"
     else
-        # The perception pair first: Nav2's global costmap reads the latched
-        # /autonomy/costmap_seed, and a seed that arrives before the costmap
-        # subscribes is kept by transient_local - this order just avoids an
-        # empty-costmap window on the way up.
-        echo "starting autonomy perception (tiles -> /autonomy/costmap_seed)"
-        ros2 launch navi_autonomy autonomy_perception.launch.py &
-        BACKGROUND_PIDS+=("$!")
+        # nav2_bringup.launch.py already includes SP7's perception pair
+        # (tile_aggregator + traversability_layer) via its perception:=true
+        # default - starting them here as well runs every node twice, which
+        # the first live camera session actually hit.
         echo "starting nav2 (plans to /autonomy_twist; only mode_supervisor drives)"
         ros2 launch navi_nav2 nav2_bringup.launch.py &
         BACKGROUND_PIDS+=("$!")
