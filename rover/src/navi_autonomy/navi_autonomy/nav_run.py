@@ -248,8 +248,19 @@ class NavRun:
         self._feedback = None
         self._index += 1
         if self._index < len(self._waypoints):
-            x, y, yaw = self._waypoints[self._index]
-            self._queue(SEND_GOAL, (self._index, x, y, yaw))
+            # NOT the next SEND_GOAL: notifyTaskFinished(TAG_WaypointReached)
+            # moves the coordinator to Waiting, which force-disables BEMA
+            # movement until the operator resumes (CoordinatorImpl.cpp:218-236
+            # - its LED even shows the Waiting pattern). A goal sent now would
+            # drive a braked chassis into the 45 s progress abort. PAUSED is
+            # the state whose Resume already runs the full re-arming path
+            # (RESUME_TASK -> observed Autonomous -> goal), so the operator's
+            # Resume at the waypoint is the release, exactly as the
+            # coordinator's state machine intends.
+            self._state = PAUSED
+            self._error = (f"waypoint {self._index}/{len(self._waypoints)} "
+                           "reached - coordinator holds in Waiting, resume "
+                           "to continue")
         else:
             self._queue(NOTIFY_DESTINATION, None)
             self._state = SUCCEEDED

@@ -146,12 +146,24 @@ def test_arming_that_never_completes_aborts_with_a_reason(run):
     assert (rules.ABORT_TASK, None) in run.take_actions()
 
 
-def test_each_reached_waypoint_is_notified_and_the_next_goal_is_sent(run):
+def test_a_reached_waypoint_is_notified_and_the_run_holds_for_resume(run):
+    # notifyTaskFinished(TAG_WaypointReached) moves the coordinator to
+    # Waiting with movement force-disabled until the operator resumes
+    # (CoordinatorImpl.cpp:218-236), so the next goal must NOT go out with
+    # the notification - a goal driven into a braked chassis is the 45 s
+    # progress abort. The run holds in PAUSED; Resume re-arms and only an
+    # OBSERVED Autonomous releases the next waypoint's goal.
     running(run)
     run.on_goal_succeeded(2.0)
-    assert run.take_actions() == [(rules.NOTIFY_WAYPOINT, 0),
-                                  (rules.SEND_GOAL, (1, 8.0, -1.5, None))]
-    run.on_goal_succeeded(3.0)
+    assert run.take_actions() == [(rules.NOTIFY_WAYPOINT, 0)]
+    assert run.state == rules.PAUSED
+    assert "waypoint 1/2 reached" in run.status(2.0)["error"]
+    run.on_request(3.0, {"action": "resume", "run_id": "gs-1"})
+    assert run.take_actions() == [(rules.RESUME_TASK, None)]
+    run.on_coordinator_state("Autonomous")
+    run.tick(4.0)
+    assert run.take_actions() == [(rules.SEND_GOAL, (1, 8.0, -1.5, None))]
+    run.on_goal_succeeded(5.0)
     assert run.take_actions() == [(rules.NOTIFY_WAYPOINT, 1),
                                   (rules.NOTIFY_DESTINATION, None)]
     assert run.state == rules.SUCCEEDED
@@ -171,11 +183,15 @@ def test_pause_cancels_the_goal_and_keeps_the_waypoint_index(run):
     running(run)
     run.on_goal_succeeded(2.0)
     run.take_actions()
-    run.on_request(3.0, {"action": "pause", "run_id": "gs-1"})
+    run.on_request(3.0, {"action": "resume", "run_id": "gs-1"})
+    run.on_coordinator_state("Autonomous")
+    run.tick(4.0)
+    run.take_actions()                       # SEND_GOAL(1, ...) - in flight
+    run.on_request(5.0, {"action": "pause", "run_id": "gs-1"})
     assert run.state == rules.PAUSED
     assert run.take_actions() == [(rules.CANCEL_GOAL, "operator paused"),
                                   (rules.PAUSE_TASK, None)]
-    assert run.status(3.0)["waypoint_index"] == 1
+    assert run.status(5.0)["waypoint_index"] == 1
 
 
 def test_resume_re_checks_the_coordinator_before_it_re_sends_the_waypoint(run):

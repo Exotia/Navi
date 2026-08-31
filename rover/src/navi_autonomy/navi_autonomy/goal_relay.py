@@ -113,12 +113,15 @@ class GoalRelay(Node):
             self.get_logger().warn(f"unreadable nav request: {msg.data!r}")
             return
         try:
-            if isinstance(request, dict) and request.get("action") == "go":
+            if (isinstance(request, dict) and request.get("action") == "go"
+                    and self._run.state not in _ACTIVE_STATES):
                 # A fresh mission: the previous run's waypoints and plan
                 # must not linger and be drawn under, or used to resolve
-                # yaw for, this one. If Go is refused nothing overwrites
-                # this again, and the empty plan is exactly what a refused
-                # run should show.
+                # yaw for, this one. Gated on no-active-run with the same
+                # check NavRun's own _on_go refuses by: a stray go during a
+                # live run is refused there, and the refusal must not have
+                # already replaced the live run's waypoint mirror (yaw
+                # resolution and the drawn plan both read it).
                 waypoints = request.get("waypoints") or []
                 self._mission_waypoints = [
                     (float(w["x"]), float(w["y"]), w.get("yaw"))
@@ -231,7 +234,11 @@ class GoalRelay(Node):
                 waypoints = []
             payload = path_summary.summary_payload(
                 status["run_id"], points, waypoints, self._now())
-            signature = (tuple(map(tuple, payload["points"])), payload["source_points"])
+            # Waypoints are part of the signature: two runs can share an
+            # identical decimated corridor while their clicked waypoints
+            # differ, and the mirror must not keep drawing the old markers.
+            signature = (tuple(map(tuple, payload["points"])),
+                         payload["source_points"], tuple(waypoints))
             if signature == self._last_plan_signature:
                 return
             self._last_plan_signature = signature

@@ -207,7 +207,7 @@ def test_go_with_an_unarmed_coordinator_aborts_at_the_timeout(graph_factory):
     assert server.received_goals == []
 
 
-def test_each_waypoint_reached_is_notified_and_the_last_one_is_the_destination(graph_factory):
+def test_each_waypoint_reached_is_notified_and_the_run_holds_for_resume(graph_factory):
     executor, relay, server, task, clock, statuses, summaries = graph_factory()
     relay._on_mode_status(mode("autonomous"))
     relay._on_nav_request(go())
@@ -218,6 +218,15 @@ def test_each_waypoint_reached_is_notified_and_the_last_one_is_the_destination(g
     spin(executor, 2.0)
     assert ("waypoint", 0) in task.calls
     assert ("destination", None) not in task.calls
+    # The waypoint notification put the coordinator in Waiting with
+    # movement force-disabled; the next goal must wait for the operator's
+    # resume, not drive a braked chassis into the progress abort.
+    assert len(server.received_goals) == 1
+    assert statuses[-1]["state"] == "paused"
+
+    relay._on_nav_request(_string({"action": "resume", "run_id": "gs-1"}))
+    spin(executor, 2.0)
+    assert ("resume", None) in task.calls
     assert len(server.received_goals) == 2
 
     server.succeed(0)
@@ -335,6 +344,12 @@ def test_goal_relay_binds_naviRpcTaskControl_to_the_real_wire(ros):
         spin(executor, 2.0)
         assert {"event": "waypoint_reached", "index": 0, "reason": None} \
             in listener.progress
+        # Held at the waypoint (coordinator in Waiting): the operator's
+        # resume releases the next leg over the same real wire.
+        assert len(server.received_goals) == 1
+        relay._on_nav_request(_string({"action": "resume", "run_id": "gs-1"}))
+        spin(executor, 2.0)
+        assert len(server.received_goals) == 2
 
         server.succeed(0)
         spin(executor, 2.0)
