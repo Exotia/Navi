@@ -18,13 +18,20 @@ LEFT_STICK_X = 0
 LEFT_STICK_Y = 1
 RIGHT_STICK_X = 3
 
-DEADZONE = 0.1
+DEADZONE = 0.15
 MAX_LINEAR_SPEED = 0.05  # m/s at full stick deflection - deliberately 1/10 of the 0.5 the drive train can take, for the first careful hardware sessions
 MAX_ANGULAR_SPEED = 0.1  # rad/s at full stick deflection - same 1/10 caution factor
 
 
 def _apply_deadzone(value: float, deadzone: float = DEADZONE) -> float:
-    return 0.0 if abs(value) < deadzone else value
+    # Rescaled, not a hard cutoff: the live [deadzone..1] range maps back
+    # onto [0..1], so crossing the edge starts the rover from zero instead
+    # of jumping straight to deadzone-fraction speed - at these deliberately
+    # tiny caps that step would be a fifth of full speed.
+    if abs(value) < deadzone:
+        return 0.0
+    sign = 1.0 if value > 0.0 else -1.0
+    return sign * min(1.0, (abs(value) - deadzone) / (1.0 - deadzone))
 
 
 class GamepadReader:

@@ -116,8 +116,29 @@ def test_init_restores_default_sigint_and_sigterm_handlers():
 def test_read_twist_applies_deadzone():
     fake_pygame = FakePygame()
     reader = GamepadReader(pygame_module=fake_pygame)
-    # all axes within the deadzone - should read as exactly centered
-    fake_pygame.joystick.plug_in(0, FakeJoystick({0: 0.05, 1: -0.05, 2: 0.0, 3: 0.08}))
+    # all axes within the deadzone - should read as exactly centered; 0.14
+    # is the drift level the real controller showed past the old 0.1 zone
+    fake_pygame.joystick.plug_in(0, FakeJoystick({0: 0.05, 1: -0.14, 2: 0.0, 3: 0.08}))
     reader.poll()
 
     assert reader.read_twist() == (0.0, 0.0, 0.0)
+
+
+def test_the_deadzone_rescales_instead_of_stepping():
+    # Crossing the deadzone edge must start the rover from ~zero, not jump
+    # to deadzone-fraction speed; half-way through the live range is half
+    # speed. Guards the (value - deadzone) / (1 - deadzone) remap.
+    from ground_station.gamepad_input import DEADZONE
+    fake_pygame = FakePygame()
+    reader = GamepadReader(pygame_module=fake_pygame)
+    just_past = -(DEADZONE + 0.01)                      # stick barely forward
+    half_way = -(DEADZONE + (1.0 - DEADZONE) / 2.0)     # stick half deflected
+    stick = FakeJoystick({0: 0.0, 1: just_past, 2: 0.0, 3: 0.0})
+    fake_pygame.joystick.plug_in(0, stick)
+    reader.poll()
+    linear_x, _, _ = reader.read_twist()
+    assert 0.0 < linear_x < 0.02 * MAX_LINEAR_SPEED
+
+    stick._axis_values[1] = half_way
+    linear_x, _, _ = reader.read_twist()
+    assert abs(linear_x - 0.5 * MAX_LINEAR_SPEED) < 1e-9
