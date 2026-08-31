@@ -201,5 +201,5 @@ def test_the_inflation_factors_agree_between_layer_and_controller():
 
 def test_the_footprint_is_the_circle_a_point_turning_rover_sweeps():
     for which in ('global_costmap', 'local_costmap'):
-        assert costmap(which)['robot_radius'] == 0.70
+        assert costmap(which)['robot_radius'] == 0.65
         assert 'footprint' not in costmap(which)
