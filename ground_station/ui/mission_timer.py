@@ -56,9 +56,10 @@ class MissionTimer(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
-        clock_label = QLabel("MISSION")
-        clock_label.setStyleSheet(theme.section_title_style())
-        layout.addWidget(clock_label)
+        # No "MISSION" caption: a mm:ss readout beside Start/Reset needs no
+        # label, and the header has rover state to fit. The word lives in
+        # the tooltip instead.
+        self.time_label.setToolTip("Mission elapsed time.")
         layout.addWidget(self.time_label)
         layout.addWidget(self.start_button)
         layout.addWidget(self.reset_button)

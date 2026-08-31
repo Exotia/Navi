@@ -2,7 +2,9 @@
 Resume/Abort mission controls, and a status area fed from /nav_status. Built
 to ui/drive_row.py's structure exactly - signals out, no ROS in here; the
 window routes both the requests and the wire status. STOP is not duplicated
-here: it lives on the DRIVE row, which is visible in every mode."""
+here: it is the window's header button, visible in every view. Abort is,
+deliberately, the one control on this row with no confirmation in its
+way."""
 
 from time import monotonic
 

@@ -221,7 +221,7 @@ class MainWindow(QMainWindow):
         header = QWidget()
         header.setStyleSheet(f"background-color: {theme.BG};")
         header_layout = QHBoxLayout(header)
-        header_layout.setSpacing(10)
+        header_layout.setSpacing(8)
         header_layout.addWidget(self.logo)
         header_layout.addLayout(wordmark)
         header_layout.addSpacing(14)
@@ -657,8 +657,11 @@ class MainWindow(QMainWindow):
         if pose is None:
             text = f"LOC: {state}" if state else "LOC: NO POSE"
         else:
+            # Compact on purpose: this chip shares the header with the
+            # rover mode, the clock and the link controls, and the word
+            # "yaw" costs more room than the number it introduces.
             coords = (f"x {pose['x']:.2f}  y {pose['y']:.2f}  "
-                      f"yaw {math.degrees(pose['yaw']):.1f}°")
+                      f"{math.degrees(pose['yaw']):.0f}°")
             text = f"LOC: {state}  {coords}" if state else f"LOC: {coords}"
         self.localization_label.setText(text)
 

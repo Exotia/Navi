@@ -1,7 +1,9 @@
-"""The Drive row: STOP, Manual, Init and the reset/mode buttons, plus a
-status area of small chips fed from /drive_status. Shown when a rover
-drive link is wanted. No ROS in this file - it talks through signals the
-window routes."""
+"""The Drive row: taking manual control, a drawer of once-per-boot setup
+buttons, and a status area of small chips fed from /drive_status - the
+BRIDGE's story (lease, coordinator state, deadman, twist age), not the
+supervisor's mode, which the header owns. STOP is not here either: it is
+the window's header button, one of it, visible in every view. No ROS in
+this file - it talks through signals the window routes."""
 
 from time import monotonic
 

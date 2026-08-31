@@ -765,7 +765,7 @@ def test_the_header_reads_out_the_pose(qtbot):
         "orientation": {"x": 0.0, "y": 0.0,
                         "z": math.sin(math.pi / 4), "w": math.cos(math.pi / 4)}}}})
 
-    assert window.localization_label.text() == "LOC: x 1.50  y -2.25  yaw 90.0°"
+    assert window.localization_label.text() == "LOC: x 1.50  y -2.25  90°"
 
 
 def test_the_header_says_so_before_any_pose_arrives(qtbot):
