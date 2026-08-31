@@ -19,7 +19,12 @@
 #      plus localization_status publishing /localization/pose and
 #      /localization/status
 #   9. nav2_bringup.launch.py - Nav2: Theta*/RPP planning to /autonomy_twist,
-#      which only mode_supervisor reads. Nav2 needs the frames and the
+#      which only mode_supervisor reads. With it come the perception pair
+#      (tile_aggregator + traversability_layer, the elevation tiles stitched
+#      and turned into /autonomy/costmap_seed) and goal_relay (the /nav_request
+#      listener that drives Nav2 and the coordinator task together) - Nav2
+#      without them has empty costmaps and no one to give it a goal.
+#      Nav2 needs the frames and the
 #      odometry localisation publishes, so it is skipped when --no-localization
 #      is given.
 #
@@ -316,7 +321,10 @@ if [ "$CLEAN_STALE" -eq 1 ]; then
     kill_stale "navi_teleop nodes" "navi_teleop/(manual_twist_listener|video_sender|bema_bridge)"
     kill_stale "navi_supervisor nodes" "navi_supervisor/(mode_supervisor|navi_rpc_server)"
     kill_stale "navi_shaper nodes" "navi_shaper/twist_shaper"
-    kill_stale "ros2 run wrappers" "ros2 run navi_(teleop|supervisor|shaper)"
+    kill_stale "navi_autonomy nodes" "navi_autonomy/(tile_aggregator|traversability_layer|goal_relay)"
+    kill_stale "autonomy perception launches" "ros2 launch navi_autonomy"
+    kill_stale "nav2 launches" "ros2 launch navi_nav2"
+    kill_stale "ros2 run wrappers" "ros2 run navi_(teleop|supervisor|shaper|autonomy)"
     # The pipeline video_sender spawns. Matched on the elements it always
     # contains, so an unrelated gst-launch on this machine is left alone.
     kill_stale "video pipelines" "gst-launch-1\.0.*v4l2src.*udpsink"
@@ -430,8 +438,18 @@ if [ "$START_NAV2" -eq 1 ]; then
         # forever and plans nothing.
         echo "skipping nav2: it needs localisation for TF (--no-localization was given)"
     else
+        # The perception pair first: Nav2's global costmap reads the latched
+        # /autonomy/costmap_seed, and a seed that arrives before the costmap
+        # subscribes is kept by transient_local - this order just avoids an
+        # empty-costmap window on the way up.
+        echo "starting autonomy perception (tiles -> /autonomy/costmap_seed)"
+        ros2 launch navi_autonomy autonomy_perception.launch.py &
+        BACKGROUND_PIDS+=("$!")
         echo "starting nav2 (plans to /autonomy_twist; only mode_supervisor drives)"
         ros2 launch navi_nav2 nav2_bringup.launch.py &
+        BACKGROUND_PIDS+=("$!")
+        echo "starting goal_relay (/nav_request -> Nav2 + coordinator task)"
+        ros2 run navi_autonomy goal_relay &
         BACKGROUND_PIDS+=("$!")
     fi
 fi
