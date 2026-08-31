@@ -70,6 +70,16 @@ class ModeSupervisor(Node):
         self.create_timer(1.0 / PUBLISH_HZ, self._publish_tick)
         self.create_timer(1.0 / STATUS_HZ, self._status_tick)
 
+    def attach_nav2_control(self, nav2_control):
+        """Replace the Nav2 hook after construction.
+
+        RosNav2Control needs this node to create its service clients, so it
+        cannot be passed to __init__.  The constructor default stays
+        NullNav2Control: a supervisor built by a test, or by anything that
+        has no Nav2, must still record what it asked for.
+        """
+        self._nav2 = nav2_control
+
     # --- inputs ----------------------------------------------------------
     def _on_manual_twist(self, msg: Twist):
         try:
@@ -209,8 +219,19 @@ class ModeSupervisor(Node):
 
 
 def main():
+    # Imported here, not at module scope: ros_nav2_control pulls in
+    # nav2_msgs and action_msgs, and mode_supervisor must stay importable -
+    # and runnable with NullNav2Control - on a box that has neither.  It
+    # also keeps those two packages out of the import path of all 49
+    # existing SP5 tests (11 in test_mode_supervisor.py, 38 in
+    # test_supervisor_state.py).
+    from navi_supervisor.ros_nav2_control import RosNav2Control
+
     rclpy.init()
     node = ModeSupervisor()
+    # The stub is the constructor default so tests and Nav2-less bringups
+    # keep working; a real run talks to a real Nav2.
+    node.attach_nav2_control(RosNav2Control(node))
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
