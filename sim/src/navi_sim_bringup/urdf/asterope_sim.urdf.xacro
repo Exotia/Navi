@@ -100,5 +100,16 @@
   <gazebo reference="wheel_rear_left"><gravity>false</gravity></gazebo>
   <gazebo reference="steer_rear_right"><gravity>false</gravity></gazebo>
   <gazebo reference="wheel_rear_right"><gravity>false</gravity></gazebo>
+  <!-- The CHASSIS too, finishing what the eight lines above started: this
+       model is a puppet - its pose is written by localisation (semi-auto)
+       or dead reckoning (simulation), and the terrain it appears to stand
+       on is a visual-only mesh with no collision on purpose. Any link
+       still feeling gravity accelerates through that mesh between pose
+       writes, which the operator sees as the rover falling through the
+       map. The reference ERC stack draws the same conclusion by never
+       putting the mirror in a physics engine at all: nothing here should
+       ever be held up by physics, only by the pose that placed it. -->
+  <gazebo reference="base_link"><gravity>false</gravity></gazebo>
+  <gazebo reference="base_footprint"><gravity>false</gravity></gazebo>
 
 </robot>
