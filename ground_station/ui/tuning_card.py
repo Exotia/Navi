@@ -59,6 +59,10 @@ _ROWS = (
      "Disc around the rover's CURRENT position forced free in the costmap, "
      "measured obstacles included - the rover standing there is the proof. "
      "Cost only; the height layers keep what was measured."),
+    ("observation_decay_s", "Observation decay", "s", 0, 5.0, 0.0, 600.0,
+     "Ground the camera has not confirmed for this long fades back to "
+     "unknown - phantoms heal themselves, real obstacles survive because "
+     "they keep being seen. 0 disables and the map never forgets."),
     ("relative_radius_m", "Rover-relative radius", "m", 2, 0.1, 0.0, 10.0,
      "How far around the rover the two limits above are judged. Keep it "
      "small: applied to the whole map, a gentle 5 degree yard rises past "

@@ -48,6 +48,8 @@ numbers above - see _on_tuning and _publish_tuning_state.
 import json
 import math
 
+import numpy as np
+
 import rclpy
 from geometry_msgs.msg import PoseStamped
 from rcl_interfaces.msg import SetParametersResult
@@ -62,16 +64,18 @@ from navi_autonomy.grid_map_io import (
     ELEVATION_LAYER, build_grid_map, build_occupancy_grid, layer_from_message)
 from navi_autonomy.tile_aggregator import MAP_TOPIC, POSE_TOPIC, latched_qos
 from navi_autonomy.traversability import (CLIMB_LETHAL_M, DROP_LETHAL_M,
-                                          RELATIVE_RADIUS_M, SLOPE_FIT_RADIUS_M,
+                                          RELATIVE_RADIUS_M, SLOPE_FIT_RADIUS_M, UNKNOWN,
                                           SLOPE_LETHAL_DEG,
                                           STEP_LETHAL_M, clear_startup_patch,
-                                          ground_under, heal_goal_patch,
+                                          coarsen_cost, ground_under,
+                                          heal_goal_patch,
                                           seed_from_elevation,
                                           stamp_wheel_trail)
 from navi_localization.elevation_grid import RESOLUTION
 
 TRAVERSABILITY_TOPIC = '/autonomy/traversability'
 COSTMAP_SEED_TOPIC = '/autonomy/costmap_seed'
+COARSE_SEED_TOPIC = '/autonomy/costmap_seed_coarse'
 # 'slope' here is traversability.slope_layer_fitted, not the raw two-cell
 # gradient - it is the number the seed's cost is actually built from, and
 # the operator reads this published layer to see why ground was refused,
@@ -130,6 +134,7 @@ class TraversabilityLayer(Node):
         self.declare_parameter('pose_topic', POSE_TOPIC)
         self.declare_parameter('traversability_topic', TRAVERSABILITY_TOPIC)
         self.declare_parameter('costmap_seed_topic', COSTMAP_SEED_TOPIC)
+        self.declare_parameter('coarse_seed_topic', COARSE_SEED_TOPIC)
         self.declare_parameter('frame_id', 'map')
         self.declare_parameter('startup_clear_radius_m', STARTUP_CLEAR_RADIUS_M)
         # 0.25 m by default now, not the spec's 0.14: the chassis clears far
@@ -161,6 +166,15 @@ class TraversabilityLayer(Node):
         # file's docstring, now ordered deliberately by the same operator
         # with live runs behind the change of mind.
         self.declare_parameter('rover_heal_radius_m', ROVER_HEAL_RADIUS_M)
+        # Cells whose observation is older than this fade back to UNKNOWN
+        # in the seed - the reference stack that keeps winning ERC expires
+        # every obstacle in 30 s and phantoms simply heal themselves there,
+        # where this stack needed three hand-built amnesty mechanisms.
+        # Unknown is plannable here (allow_unknown), so decayed ground is
+        # not walled off, merely no longer asserted. 0 disables. The
+        # age_s layer arrives from the aggregator; a map without it (an
+        # old publisher mid-deploy) decays nothing.
+        self.declare_parameter('observation_decay_s', 45.0)
         # 35 degrees by default, not the spec's 25 - see
         # traversability.SLOPE_LETHAL_DEG for the tipping arithmetic behind
         # it. Retunable like the step limit, and for the same reason: the
@@ -204,6 +218,8 @@ class TraversabilityLayer(Node):
             self.get_parameter('goal_heal_radius_m').value)
         self._rover_heal_radius_m = float(
             self.get_parameter('rover_heal_radius_m').value)
+        self._observation_decay_s = float(
+            self.get_parameter('observation_decay_s').value)
         self._slope_lethal_deg = float(
             self.get_parameter('slope_lethal_deg').value)
         self._slope_fit_radius_m = float(
@@ -245,6 +261,9 @@ class TraversabilityLayer(Node):
         self._seed_publisher = self.create_publisher(
             OccupancyGrid, str(self.get_parameter('costmap_seed_topic').value),
             latched_qos())
+        self._coarse_seed_publisher = self.create_publisher(
+            OccupancyGrid,
+            str(self.get_parameter('coarse_seed_topic').value), latched_qos())
         self.create_subscription(
             GridMap, str(self.get_parameter('map_topic').value), self._on_map,
             latched_qos())
@@ -298,6 +317,7 @@ class TraversabilityLayer(Node):
         'wheel_trail_radius_m': '_wheel_trail_radius_m',
         'goal_heal_radius_m': '_goal_heal_radius_m',
         'rover_heal_radius_m': '_rover_heal_radius_m',
+        'observation_decay_s': '_observation_decay_s',
         'startup_clear_radius_m': '_startup_clear_radius_m',
         'slope_lethal_deg': '_slope_lethal_deg',
         'slope_fit_radius_m': '_slope_fit_radius_m',
@@ -503,6 +523,16 @@ class TraversabilityLayer(Node):
                           int(round(x / resolution)) - origin_ix)
             radius_cells = int(round(self._startup_clear_radius_m / resolution))
             clear_startup_patch(cost, centre_cell, radius_cells)
+        if self._observation_decay_s > 0.0:
+            # Decay BEFORE the patches, so the rover heal, goal heal,
+            # startup patch and wheel trail all outrank age - presence and
+            # proof stay stronger claims than staleness.
+            try:
+                age = layer_from_message(message, 'age_s')
+            except ValueError:
+                age = None
+            if age is not None:
+                cost[np.asarray(age) > self._observation_decay_s] = UNKNOWN
         if rover_cell is not None and self._rover_heal_radius_m > 0.0:
             # Same force-free write as the goal heal, same licence shape:
             # a human vouches for the goal, the rover's own presence
@@ -532,6 +562,19 @@ class TraversabilityLayer(Node):
         stamp = message.header.stamp
         self._seed_publisher.publish(build_occupancy_grid(
             cost, origin_ix, origin_iy, resolution, self._frame_id, stamp))
+        # The GLOBAL costmap plans on a half-resolution copy: at 0.05 m the
+        # 48 m window is 921,600 cells and the planner pays for every one
+        # of them on a Jetson - the reference ERC stack plans globally at
+        # 0.2 m. Max-pooled 2x2, so a block containing any lethal cell
+        # stays lethal and unknown only survives where the whole block is
+        # unknown - coarsening may only ever err toward caution. The local
+        # costmap keeps the full-resolution seed; an odd row or column is
+        # dropped rather than padded (a half-cell of window edge, nothing
+        # more), and the origin floors to the coarse lattice, at worst a
+        # 0.05 m shift the 0.10 m planner cannot resolve anyway.
+        self._coarse_seed_publisher.publish(build_occupancy_grid(
+            coarsen_cost(cost), origin_ix // 2, origin_iy // 2,
+            resolution * 2.0, self._frame_id, stamp))
         if self._traversability_subscribers() > 0:
             grid_map = build_grid_map(
                 {name: layers[name] for name in LAYER_ORDER},

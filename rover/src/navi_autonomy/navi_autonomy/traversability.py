@@ -672,6 +672,24 @@ def clear_startup_patch(cost: np.ndarray, centre_cell, radius_cells: int) -> np.
     return cost
 
 
+def coarsen_cost(cost: np.ndarray) -> np.ndarray:
+    """The cost grid max-pooled 2x2 for the global planner.
+
+    Max is the only defensible pool for costs: a block containing any
+    LETHAL cell stays lethal, scaled costs keep their worst member, and
+    UNKNOWN (-1) survives only where the whole block is unknown - so the
+    coarse copy can refuse ground the fine copy allows, never the other
+    way round. An odd trailing row or column is dropped, half a cell of
+    rolling-window edge.
+    """
+    grid = np.asarray(cost)
+    rows, cols = grid.shape
+    rows -= rows % 2
+    cols -= cols % 2
+    blocks = grid[:rows, :cols].reshape(rows // 2, 2, cols // 2, 2)
+    return blocks.max(axis=(1, 3))
+
+
 def heal_goal_patch(cost: np.ndarray, centre_cell, radius_cells: int) -> np.ndarray:
     """The operator says a goal is reachable, so the map does not get to
     veto it: every cell within `radius_cells` of the goal becomes free.

@@ -46,6 +46,7 @@ def node(ros):
     node = TraversabilityLayer()
     node._traversability_publisher = Recorder()
     node._seed_publisher = Recorder()
+    node._coarse_seed_publisher = Recorder()
     node._tuning_state_publisher = Recorder()
     node._traversability_subscribers = lambda: 1
     yield node
@@ -731,3 +732,65 @@ def test_the_rover_heal_radius_is_live_retunable(node):
 
     assert result.successful is True
     assert node._rover_heal_radius_m == pytest.approx(1.5)
+
+
+def test_a_stale_observation_decays_to_unknown_and_a_fresh_one_does_not(node):
+    # The reference ERC stack expires every obstacle in 30 seconds and
+    # phantoms heal themselves; here a cell whose observation has outlived
+    # observation_decay_s falls back to UNKNOWN, which allow_unknown keeps
+    # plannable - the ground is no longer asserted, not walled off.
+    plain, lo = pit_map()
+    grid = np.zeros((24, 24), dtype=np.float32)
+    grid[lo:lo + 6, lo:lo + 6] = -0.3   # the pit again - grounded, so the
+                                        # floating filter (which rightly eats
+                                        # a lone airborne spike) leaves it be
+    age = np.full((24, 24), 5.0, dtype=np.float32)
+    age[lo - 1, lo - 1] = 120.0         # one rim cell seen long ago
+    message = build_grid_map({'elevation': grid, 'age_s': age},
+                             -12, -12, 0.05, 'map', Time())
+
+    node._on_map(message)
+
+    cost = seed_of(node)
+    assert cost[lo - 1, lo - 1] == UNKNOWN
+    assert cost[lo - 1, lo + 2] == LETHAL   # a fresh rim cell keeps its truth
+    assert cost[2, 2] == 0                  # fresh flat ground is untouched
+
+
+def test_a_map_without_an_age_layer_decays_nothing(node):
+    message, lo = pit_map()
+
+    node._on_map(message)
+
+    assert seed_of(node)[lo - 1, lo - 1] == LETHAL
+
+
+def test_zero_decay_disables_ageing(node):
+    node._observation_decay_s = 0.0
+    plain, lo = pit_map()
+    grid = np.zeros((24, 24), dtype=np.float32)
+    grid[lo:lo + 6, lo:lo + 6] = -0.3
+    age = np.full((24, 24), 500.0, dtype=np.float32)
+    message = build_grid_map({'elevation': grid, 'age_s': age},
+                             -12, -12, 0.05, 'map', Time())
+
+    node._on_map(message)
+
+    assert seed_of(node)[lo - 1, lo - 1] == LETHAL
+
+
+def test_the_coarse_seed_is_half_resolution_and_never_freer_than_the_fine_one(node):
+    message, lo = pit_map()
+
+    node._on_map(message)
+
+    fine = node._seed_publisher.messages[-1]
+    coarse = node._coarse_seed_publisher.messages[-1]
+    assert coarse.info.resolution == pytest.approx(0.10)
+    assert coarse.info.width == fine.info.width // 2
+    fine_grid = np.asarray(fine.data, dtype=np.int8).reshape(
+        fine.info.height, fine.info.width)
+    coarse_grid = np.asarray(coarse.data, dtype=np.int8).reshape(
+        coarse.info.height, coarse.info.width)
+    assert (fine_grid == LETHAL).any()
+    assert (coarse_grid == LETHAL).any()

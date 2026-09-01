@@ -13,7 +13,7 @@ import pytest
 from navi_autonomy.traversability import (
     CLIMB_LETHAL_M, DROP_LETHAL_M, LETHAL, MAX_SCALED_COST, RELATIVE_RADIUS_M,
     ROUGHNESS_REF_M, SLOPE_FIT_RADIUS_M, SLOPE_LETHAL_DEG, SLOPE_LETHAL_RAD,
-    STEP_LETHAL_M, UNKNOWN, clear_startup_patch, costmap_seed, derive,
+    STEP_LETHAL_M, UNKNOWN, clear_startup_patch, coarsen_cost, costmap_seed, derive,
     ground_under, heal_goal_patch, height_relative_to, roughness_layer,
     seed_from_elevation, slope_layer, slope_layer_fitted, stamp_wheel_trail,
     step_layer, valid_layer)
@@ -726,3 +726,22 @@ def test_a_rover_straddling_a_rock_is_standing_beside_it_not_on_it():
     value = ground_under(grid, (10, 10), radius_cells=5)
 
     assert value == pytest.approx(0.0)
+
+
+def test_coarsening_keeps_the_worst_of_every_block_and_never_frees_anything():
+    cost = np.full((4, 4), 20, dtype=np.int8)
+    cost[0, 1] = LETHAL                  # one lethal cell in the top-left block
+    cost[2:4, 2:4] = UNKNOWN             # a wholly unknown block
+
+    coarse = coarsen_cost(cost)
+
+    assert coarse.shape == (2, 2)
+    assert coarse[0, 0] == LETHAL        # any lethal member condemns the block
+    assert coarse[1, 1] == UNKNOWN       # unknown survives only when unanimous
+    assert coarse[0, 1] == 20
+
+
+def test_coarsening_drops_an_odd_edge_rather_than_padding_it():
+    cost = np.zeros((5, 5), dtype=np.int8)
+
+    assert coarsen_cost(cost).shape == (2, 2)

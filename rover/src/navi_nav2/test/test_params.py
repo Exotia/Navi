@@ -90,11 +90,19 @@ def test_every_collision_polygon_looks_only_forwards():
 
 # -- the seed contract (SP7) ------------------------------------------------
 
-def test_both_costmaps_read_the_seed_at_the_elevation_resolution():
+def test_each_costmap_reads_the_seed_cut_for_it():
+    # The local costmap keeps the elevation resolution; the global one
+    # plans at half resolution on the max-pooled copy the layer publishes
+    # for exactly this consumer - 4x fewer cells at every replan, and the
+    # pooling can only ever err toward caution.
+    local = costmap('local_costmap')
+    assert local['resolution'] == 0.05
+    assert local['static_layer']['map_topic'] == '/autonomy/costmap_seed'
+    globl = costmap('global_costmap')
+    assert globl['resolution'] == 0.10
+    assert globl['static_layer']['map_topic'] == '/autonomy/costmap_seed_coarse'
     for which in ('global_costmap', 'local_costmap'):
         layer = costmap(which)['static_layer']
-        assert costmap(which)['resolution'] == 0.05
-        assert layer['map_topic'] == '/autonomy/costmap_seed'
         assert layer['map_subscribe_transient_local'] is True
         assert layer['subscribe_to_updates'] is False
 
