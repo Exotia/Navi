@@ -55,6 +55,10 @@ _ROWS = (
      "How far BELOW the rover's ground a nearby cell may fall. Tighter "
      "than the climb on purpose: a wheel climbs a rock it would fall "
      "into."),
+    ("rover_heal_radius_m", "Rover heal radius", "m", 2, 0.1, 0.0, 3.0,
+     "Disc around the rover's CURRENT position forced free in the costmap, "
+     "measured obstacles included - the rover standing there is the proof. "
+     "Cost only; the height layers keep what was measured."),
     ("relative_radius_m", "Rover-relative radius", "m", 2, 0.1, 0.0, 10.0,
      "How far around the rover the two limits above are judged. Keep it "
      "small: applied to the whole map, a gentle 5 degree yard rises past "

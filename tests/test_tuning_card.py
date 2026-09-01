@@ -19,6 +19,7 @@ FULL_VALUES = {
     "climb_lethal_m": 0.25,
     "drop_lethal_m": 0.14,
     "relative_radius_m": 3.0,
+    "rover_heal_radius_m": 1.0,
 }
 
 

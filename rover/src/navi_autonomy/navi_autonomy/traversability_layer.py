@@ -84,6 +84,18 @@ ACTIVE_GOAL_TOPIC = '/autonomy/active_goal'
 # the chassis is provably over right now.
 FOOTPRINT_RADIUS_M = 0.44
 
+# The disc around the rover's CURRENT position forced free in the seed,
+# measured LETHAL included - the operator's standing instruction
+# (2026-09-01): "the ground around the rover centre should be healed in a
+# 1 m radius". The rover is standing there; ground it is standing on is
+# drivable by demonstration, and Nav2 validates the start pose against the
+# 0.80 m robot radius, so a phantom-lethal cell in the ring the 0.40 m
+# wheel trail does not reach was ending runs with "start pose is an
+# obstacle" while the rover sat on perfectly good ground. 1.0 covers the
+# footprint and that ring with margin. Cost only, never elevation - the
+# height layers stay exactly what was measured, here as everywhere.
+ROVER_HEAL_RADIUS_M = 1.0
+
 # Radius of the free disc forced around the active goal. 1.4 m, the
 # operator's number: wide enough to swallow a goal that landed inside a
 # phantom wall together with the approach to it, narrow enough that what it
@@ -136,6 +148,12 @@ class TraversabilityLayer(Node):
         # by both planners, so the run ends before it starts. 0 disables.
         # See traversability.heal_goal_patch for the trade this accepts.
         self.declare_parameter('goal_heal_radius_m', GOAL_HEAL_RADIUS_M)
+        # See ROVER_HEAL_RADIUS_M above; 0 disables. Unlike the startup
+        # patch this follows the rover, and unlike the wheel trail it
+        # clears measured cost - the moving clearing disc rejected in this
+        # file's docstring, now ordered deliberately by the same operator
+        # with live runs behind the change of mind.
+        self.declare_parameter('rover_heal_radius_m', ROVER_HEAL_RADIUS_M)
         # 35 degrees by default, not the spec's 25 - see
         # traversability.SLOPE_LETHAL_DEG for the tipping arithmetic behind
         # it. Retunable like the step limit, and for the same reason: the
@@ -170,6 +188,8 @@ class TraversabilityLayer(Node):
         self._floating_gap_m = float(self.get_parameter('floating_gap_m').value)
         self._goal_heal_radius_m = float(
             self.get_parameter('goal_heal_radius_m').value)
+        self._rover_heal_radius_m = float(
+            self.get_parameter('rover_heal_radius_m').value)
         self._slope_lethal_deg = float(
             self.get_parameter('slope_lethal_deg').value)
         self._climb_lethal_m = float(self.get_parameter('climb_lethal_m').value)
@@ -261,6 +281,7 @@ class TraversabilityLayer(Node):
         'floating_gap_m': '_floating_gap_m',
         'wheel_trail_radius_m': '_wheel_trail_radius_m',
         'goal_heal_radius_m': '_goal_heal_radius_m',
+        'rover_heal_radius_m': '_rover_heal_radius_m',
         'startup_clear_radius_m': '_startup_clear_radius_m',
         'slope_lethal_deg': '_slope_lethal_deg',
         'climb_lethal_m': '_climb_lethal_m',
@@ -464,6 +485,13 @@ class TraversabilityLayer(Node):
                           int(round(x / resolution)) - origin_ix)
             radius_cells = int(round(self._startup_clear_radius_m / resolution))
             clear_startup_patch(cost, centre_cell, radius_cells)
+        if rover_cell is not None and self._rover_heal_radius_m > 0.0:
+            # Same force-free write as the goal heal, same licence shape:
+            # a human vouches for the goal, the rover's own presence
+            # vouches for this.
+            heal_goal_patch(
+                cost, rover_cell,
+                int(round(self._rover_heal_radius_m / resolution)))
         if self._active_goal is not None and self._goal_heal_radius_m > 0.0:
             # Same per-tick conversion as the startup patch above: the
             # stored metres never change, the origin they are measured from

@@ -176,6 +176,11 @@ def test_a_measured_cell_inside_the_startup_patch_is_never_overwritten(node):
     grid[11:15, 23:27] = -0.2              # a 0.2 m pit, 10 cells above the pose
     message = build_grid_map({'elevation': grid}, -25, -25, 0.05, 'map', Time())
 
+    # The rover heal (operator's order: presence outranks measurement
+    # within 1 m) would cover this whole patch and is tested on its own -
+    # off here, so what the STARTUP patch does to a measurement is
+    # observable at all.
+    node._rover_heal_radius_m = 0.0
     node._on_pose(pose_at(0.0, 0.0))       # (x, y) = (0, 0) is cell (25, 25)
     node._on_map(message)
 
@@ -625,3 +630,65 @@ def test_a_drifted_pose_z_no_longer_walls_the_rover_in(node):
 
     cost = seed_of(node)
     assert (cost == LETHAL).sum() == 0
+
+
+# -- the rover-centred heal --------------------------------------------------
+
+def test_the_ground_the_rover_stands_on_is_never_lethal(node):
+    # The operator's instruction after "start pose is an obstacle" ended a
+    # run with the rover parked on good ground: a 1 m disc at the CURRENT
+    # position is forced free, measured lethal included, because the rover
+    # standing there is the proof.
+    message, lo = pit_map()
+    pose = Odometry()
+    # Park the rover 0.6 m from the rim cell under test: inside the 1 m
+    # heal disc but OUTSIDE the 0.40 m wheel trail, so what frees the cell
+    # is provably the heal and not the trail.
+    pose.pose.pose.position.x = (lo - 1 + -12) * 0.05
+    pose.pose.pose.position.y = (lo - 1 + -12 + 12) * 0.05
+
+    node._on_pose(pose)
+    node._on_map(message)
+
+    assert seed_of(node)[lo - 1 + 12, lo - 1] != LETHAL
+    assert seed_of(node)[lo - 1, lo - 1] == 0
+
+
+def test_the_rover_heal_touches_cost_and_never_the_height_layers(node):
+    # "The rover and current map pos should keep their height": the heal is
+    # a statement about drivability, not about the world's shape - the
+    # published elevation-derived layers stay exactly what was measured.
+    message, lo = pit_map()
+    pose = Odometry()
+    pose.pose.pose.position.x = (lo - 1 + -12) * 0.05
+    pose.pose.pose.position.y = (lo - 1 + -12) * 0.05
+
+    node._on_pose(pose)
+    node._on_map(message)
+
+    published = node._traversability_publisher.messages[0]
+    step = layer_from_message(published, 'step')
+    assert np.nanmax(step) == pytest.approx(0.3)
+
+
+def test_a_zero_rover_heal_radius_disables_it(node):
+    message, lo = pit_map()
+    node._rover_heal_radius_m = 0.0
+    pose = Odometry()
+    # 0.6 m from the rim cell: past the wheel trail's 0.40 m, so with the
+    # heal off nothing else frees it.
+    pose.pose.pose.position.x = (lo - 1 + -12) * 0.05
+    pose.pose.pose.position.y = (lo - 1 + -12 + 12) * 0.05
+
+    node._on_pose(pose)
+    node._on_map(message)
+
+    assert seed_of(node)[lo - 1, lo - 1] == LETHAL
+
+
+def test_the_rover_heal_radius_is_live_retunable(node):
+    result = node._on_set_parameters(
+        [Parameter('rover_heal_radius_m', Parameter.Type.DOUBLE, 1.5)])
+
+    assert result.successful is True
+    assert node._rover_heal_radius_m == pytest.approx(1.5)

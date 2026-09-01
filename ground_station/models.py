@@ -813,7 +813,7 @@ def new_probe_id(now_s: float, counter: int) -> str:
 TUNING_KEYS = ("step_lethal_m", "slope_lethal_deg", "floating_gap_m",
               "wheel_trail_radius_m", "goal_heal_radius_m",
               "startup_clear_radius_m", "climb_lethal_m", "drop_lethal_m",
-              "relative_radius_m")
+              "relative_radius_m", "rover_heal_radius_m")
 
 
 def parse_tuning_state(payload: str):
