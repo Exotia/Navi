@@ -28,6 +28,7 @@ setup(
             'elevation_mapper = navi_localization.elevation_mapper:main',
             'site_anchor = navi_localization.site_anchor:main',
             'site_probe = navi_localization.site_probe:main',
+            'twist_odometry = navi_localization.twist_odometry:main',
         ],
     },
 )

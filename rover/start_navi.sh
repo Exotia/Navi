@@ -17,7 +17,9 @@
 #      until the ground station drives
 #   8. localization.launch.py - the ZED 2i wrapper with positional tracking,
 #      plus localization_status publishing /localization/pose and
-#      /localization/status
+#      /localization/status, and twist_odometry publishing /odom/twist -
+#      dead-reckoned odometry from /chassis_twist and the ZED's gyro, the
+#      honest fallback for when the sun blinds the camera's own tracking
 #   9. nav2_bringup.launch.py - Nav2: Theta*/RPP planning to /autonomy_twist,
 #      which only mode_supervisor reads. With it come the perception pair
 #      (tile_aggregator + traversability_layer, the elevation tiles stitched
@@ -361,6 +363,7 @@ if [ "$CLEAN_STALE" -eq 1 ]; then
     kill_stale "ZED wrapper containers" "component_container_isolated.*zed"
     kill_stale "localisation launches" "ros2 launch navi_localization"
     kill_stale "localization_status nodes" "navi_localization/localization_status"
+    kill_stale "twist_odometry nodes" "navi_localization/twist_odometry"
     kill_stale "nav2 launches" "ros2 launch navi_nav2"
     # The stdin-fed encode pipeline video_sender's zed_topic source spawns.
     kill_stale "video pipe pipelines" "gst-launch-1\.0.*fdsrc.*udpsink"
@@ -473,6 +476,10 @@ if [ "$START_LOCALIZATION" -eq 1 ]; then
     if ! wait_for_localization "$LOC_PID"; then
         exit 1
     fi
+
+    echo "starting twist_odometry (/chassis_twist + ZED gyro -> /odom/twist)"
+    ros2 run navi_localization twist_odometry &
+    BACKGROUND_PIDS+=("$!")
 fi
 
 if [ "$START_NAV2" -eq 1 ]; then
