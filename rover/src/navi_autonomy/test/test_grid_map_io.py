@@ -136,3 +136,43 @@ def test_the_layer_name_asked_for_is_the_one_returned():
 
 def test_the_elevation_layer_name_matches_the_mapper():
     assert ELEVATION_LAYER == 'elevation'
+
+
+def test_the_age_layer_name_matches_the_mapper():
+    assert AGE_LAYER == 'age_s'
+
+
+def test_layer_from_message_raises_cleanly_when_age_s_is_absent():
+    """Documents the contract the decay consumer (traversability_layer, not
+    this package) relies on: a message from an old publisher has no
+    `age_s` layer at all, and asking for it by name raises ValueError
+    exactly like asking for any other missing layer - never a KeyError,
+    never a silent empty array. A caller must check
+    `'age_s' in message.layers` (as tile_from_message does) before
+    trusting age is there at all."""
+    message = build_grid_map({'elevation': np.zeros((2, 2), dtype=np.float32)},
+                             0, 0, 0.05, 'map', Time())
+    with pytest.raises(ValueError, match='age_s'):
+        layer_from_message(message, 'age_s')
+
+
+def test_age_s_is_small_enough_for_float32_but_an_epoch_stamp_would_not_be():
+    """The whole reason age_s carries a duration instead of an absolute ROS
+    stamp: GridMap layers are float32, whose 24-bit mantissa gives it about
+    256 s of resolution at the ~1.7e9 s magnitude of a current epoch stamp -
+    two absolute stamps a few seconds apart would round to the identical
+    float32 value and any downstream age computed from them could be wrong
+    by minutes. A duration measured in the tens or hundreds of seconds
+    keeps far more of its precision instead."""
+    epoch_like = 1_700_000_000.0
+    assert np.float32(epoch_like + 2.0) == np.float32(epoch_like)   # the trap, demonstrated
+
+    age = 2.0
+    assert float(np.float32(age)) == pytest.approx(2.0, abs=1e-6)   # not a problem at this scale
+
+
+def test_a_published_age_layer_is_small_not_epoch_scale():
+    age = np.full((51, 51), 3.5, dtype=np.float32)
+    message = build_tile_message((0, 0), a_tile(), 'map', Time(), age=age)
+    got_age = layer_from_message(message, AGE_LAYER)
+    assert np.nanmax(got_age) < 1000.0     # nowhere near an epoch second (~1.7e9)

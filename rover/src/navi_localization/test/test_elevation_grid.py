@@ -7,6 +7,7 @@ Run on this laptop with:
 and on the Orin as part of ./deploy_rover.sh --test.
 """
 
+import dataclasses
 import time
 
 import numpy as np
@@ -319,6 +320,108 @@ def test_replace_refuses_a_state_bigger_than_the_cap():
 
     with pytest.raises(ValueError):
         grid.replace(state)
+
+
+def test_fusing_a_cloud_stamps_exactly_the_cells_it_wrote_and_only_those():
+    grid = ElevationGrid()
+    grid.update([(0.02, 0.02, 1.0), (0.12, 0.02, 2.0)], observed_at=100.0)
+
+    stamp = grid.snapshot().stamp
+    assert stamp[0, 0] == pytest.approx(100.0)
+    assert stamp[0, 2] == pytest.approx(100.0)
+    assert np.isnan(stamp[0, 1])                # the gap cell nothing ever touched
+
+    # A later cloud that only rewrites one of those two cells leaves the
+    # other cell's stamp exactly as it was.
+    grid.update([(0.02, 0.02, 5.0)], observed_at=200.0)
+    stamp = grid.snapshot().stamp
+    assert stamp[0, 0] == pytest.approx(200.0)
+    assert stamp[0, 2] == pytest.approx(100.0)
+
+
+def test_update_without_an_observed_at_leaves_stamps_untouched():
+    # A grid has no clock of its own - update() must not invent a time
+    # when the caller does not supply one, rather than silently stamping
+    # cells with something meaningless.
+    grid = ElevationGrid()
+    grid.update([(0.02, 0.02, 1.0)])
+    assert np.isnan(grid.snapshot().stamp[0, 0])
+
+
+def test_equals_ignores_the_observation_stamp():
+    # Mirrors the "top is not published" exclusion just below: a cell
+    # re-fused to the *same* height still gets a fresh stamp, so if stamp
+    # gated equality every single cloud would count as a change and the
+    # "unchanged map is not republished" check this stands in for would
+    # never fire again.
+    grid = ElevationGrid()
+    grid.update([(0.02, 0.02, 1.0)], observed_at=1.0)
+    first = grid.snapshot()
+    grid.update([(0.02, 0.02, 1.0)], observed_at=999.0)
+    second = grid.snapshot()
+    assert second.equals(first)
+
+
+def test_growth_keeps_stamps_attached_to_the_cells_they_describe():
+    # Same shape as test_growth_clips_to_the_cap_instead_of_freezing_short_of_it:
+    # the second update forces _fit_window's grow-and-copy branch, and the
+    # stamp array has to move with height/top/count through it rather than
+    # being left behind or scrambled.
+    grid = ElevationGrid(max_cells=5)
+    grid.update([(0.02, 0.02, 1.0), (0.12, 0.02, 2.0)], observed_at=10.0)   # cols 0, 2 -> 3 cols
+    grid.update([(0.22, 0.02, 4.0)], observed_at=20.0)                      # col 4 -> grows to 5
+
+    stamp = grid.snapshot().stamp
+    assert stamp.shape == (1, 5)
+    assert stamp[0, 0] == pytest.approx(10.0)    # carried across the grow, untouched
+    assert stamp[0, 2] == pytest.approx(10.0)
+    assert stamp[0, 4] == pytest.approx(20.0)    # freshly written by the second update
+    assert np.isnan(stamp[0, 1])
+    assert np.isnan(stamp[0, 3])                 # a gap the grow introduced, still never seen
+
+
+def test_state_round_trips_the_observation_stamp():
+    grid = ElevationGrid()
+    grid.update([(0.02, 0.02, 1.0), (0.12, 0.02, 2.0)], observed_at=42.0)
+    state = grid.state()
+
+    assert state.stamp.dtype == np.float64       # never float32 - see the module docstring
+    assert state.stamp[0, 0] == pytest.approx(42.0)
+    assert np.isnan(state.stamp[0, 1])
+
+    other = ElevationGrid()
+    other.replace(state)
+    stamp = other.snapshot().stamp
+    assert stamp[0, 0] == pytest.approx(42.0)
+    assert stamp[0, 2] == pytest.approx(42.0)
+    assert np.isnan(stamp[0, 1])
+
+
+def test_replacing_a_state_with_no_stamp_field_marks_every_seen_cell_observed_now():
+    # The stand-in for "loading an old .npz saved before stamps existed":
+    # map_store.py builds a stamp-less GridState today for every load, so
+    # this is the fallback path that actually runs in production right now.
+    grid = ElevationGrid()
+    grid.update([(0.02, 0.02, 1.0), (0.12, 0.02, 2.0)])
+    old_style_state = dataclasses.replace(grid.state(), stamp=None)
+
+    other = ElevationGrid()
+    other.replace(old_style_state, now=999.0)
+
+    stamp = other.snapshot().stamp
+    assert stamp[0, 0] == pytest.approx(999.0)
+    assert stamp[0, 2] == pytest.approx(999.0)
+    assert np.isnan(stamp[0, 1])                 # never observed, still never observed
+
+
+def test_replace_without_a_stamp_or_now_refuses_rather_than_guessing():
+    grid = ElevationGrid()
+    grid.update([(0.0, 0.0, 1.0)])
+    state = dataclasses.replace(grid.state(), stamp=None)
+
+    other = ElevationGrid()
+    with pytest.raises(ValueError):
+        other.replace(state)
 
 
 def test_update_remembers_the_tiles_it_touched_including_the_halo():

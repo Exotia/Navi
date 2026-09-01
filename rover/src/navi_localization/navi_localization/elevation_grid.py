@@ -18,6 +18,26 @@ of the ground and whatever else was overhead. Each cell also keeps `top`,
 the maximum z seen in the update, so a later change can draw obstacles from
 it without another pass over the cloud; `top` is not published anywhere
 yet.
+
+Each cell also keeps `stamp`, the ROS time its height/top/count were last
+*written* by fusion - the prerequisite a downstream decay (obstacles that
+were never re-confirmed expire, so a phantom self-heals) needs to know how
+old an observation is. What "written" means here is worth being precise
+about, because the ZED SDK's fused cloud is ambiguous at first glance:
+`update()`'s own comment below explains that the cloud is the *whole* map
+fused so far, re-sent every cycle - but the wrapper zero-fills chunks that
+did not change and `finite_points` throws those zeros away (see its
+docstring), so a message's *surviving* points are exactly the chunks the
+SDK actually re-fused this cycle. `unique_flat` in `update()` is therefore
+already the true "touched this cycle" set, at the effective, filtered
+level - not a meaningless whole-map re-stamp - and `stamp` records exactly
+that set's write time. It is still one step removed from "last time the
+camera's line of sight crossed this cell": it is "last time the SDK's own
+chunk-update bookkeeping decided this region needed re-fusing", which
+tracks recent coverage closely but at the SDK's chunk granularity, not the
+camera's shutter. A downstream consumer computing age from this should
+read it as "time since fusion last wrote this cell", not "time since it
+was last in view".
 """
 
 from dataclasses import dataclass
@@ -72,6 +92,17 @@ class GridState:
     origin_ix: int
     origin_iy: int
     resolution: float
+    # (rows, cols) float64, NaN where never observed; ROS time (seconds)
+    # each cell was last written by fusion. float64, not float32 like the
+    # others: this holds an absolute epoch-scale second (~1.7e9), and
+    # float32's 24-bit mantissa only carries ~256 s of resolution at that
+    # magnitude - the exact trap the age_s wire layer downstream is built
+    # to avoid (see elevation_mapper.build_tile_message). None is the
+    # backwards-compatible default: a GridState built by map_store.py from
+    # an .npz saved before this field existed has no stamp at all, and
+    # replace() below turns that into "every seen cell observed now"
+    # rather than raising or decaying the resumed map away instantly.
+    stamp: np.ndarray | None = None
 
 
 # eq=False: a generated __eq__ would compare numpy arrays with ==, which
@@ -88,11 +119,22 @@ class GridSnapshot:
     resolution: float
     origin_ix: int             # lattice index of column 0
     origin_iy: int             # lattice index of row 0
+    # (rows, cols) float64, NaN where never observed; see GridState.stamp
+    # for why this is float64 and not float32. Optional, defaulting to
+    # None, purely so code outside this module that still builds a
+    # GridSnapshot by hand (navi_localization/test/test_tiles.py, which
+    # this task does not own) keeps constructing one without it.
+    stamp: np.ndarray | None = None
 
     def equals(self, other) -> bool:
         if other is None:
             return False
-        # top is not published, so it does not gate republishing either.
+        # top is not published, so it does not gate republishing either;
+        # stamp is excluded for the same reason, plus a sharper one - a
+        # cell re-fused to the *same* height still gets a fresh stamp, so
+        # including it here would mean every single cloud counts as a
+        # change and the "unchanged map is not republished" optimisation
+        # this compares for would never fire again.
         return (self.elevation.shape == other.elevation.shape
                 and self.center_x == other.center_x
                 and self.center_y == other.center_y
@@ -123,13 +165,27 @@ class ElevationGrid:
         self._height = np.zeros((0, 0), dtype=np.float64)
         self._top = np.zeros((0, 0), dtype=np.float64)
         self._count = np.zeros((0, 0), dtype=np.int64)
+        # Unlike height/top/count, NaN is its own sentinel here - a real
+        # stamp is never NaN - so this needs no separate count-based
+        # masking at read time the way height/top do; it is simply correct
+        # everywhere count is 0 by construction (see _fit_window and
+        # update() below, which only ever write the two together).
+        self._stamp = np.full((0, 0), np.nan, dtype=np.float64)
 
-    def update(self, points, already_filtered: bool = False) -> None:
+    def update(self, points, already_filtered: bool = False, observed_at: float = None) -> None:
         """`already_filtered=True`: `points` is already the output of
         `finite_points` (the obstacle voxeliser needs the same filtered
         array, and `finite_points` + index flooring cost ~40 ms per 200k
         points - see elevation_mapper._on_cloud, which calls it once and
-        hands the result to both this and `ObstacleMap.update`)."""
+        hands the result to both this and `ObstacleMap.update`).
+
+        `observed_at`: the ROS time (float seconds) fusion is happening at,
+        stamped onto exactly the cells this call writes. `None` (the
+        default, and every call in this module's own tests) means the
+        caller is not telling us when - the update still happens, but the
+        cells it touches keep whatever stamp they already had rather than
+        this being treated as "observed now": a grid with no notion of
+        time of its own must not invent one silently."""
         kept = points if already_filtered else finite_points(points)
         if kept.size == 0:
             return
@@ -172,6 +228,12 @@ class ElevationGrid:
         self._height.flat[unique_flat] = z_sorted[percentile_rank]
         self._top.flat[unique_flat] = z_sorted[max_rank]
         self._count.flat[unique_flat] = counts
+        if observed_at is not None:
+            # Exactly the cells height/top/count were just replaced for -
+            # see the module docstring on why that set is the honest
+            # "touched this cycle" set even though the SDK's cloud is
+            # cumulative.
+            self._stamp.flat[unique_flat] = float(observed_at)
         self._note_touched(unique_flat, cols)
 
     def _note_touched(self, unique_flat: np.ndarray, cols: int) -> None:
@@ -239,6 +301,7 @@ class ElevationGrid:
             self._height = np.zeros((rows, cols), dtype=np.float64)
             self._top = np.zeros((rows, cols), dtype=np.float64)
             self._count = np.zeros((rows, cols), dtype=np.int64)
+            self._stamp = np.full((rows, cols), np.nan, dtype=np.float64)
             return
 
         rows, cols = self._height.shape
@@ -251,12 +314,15 @@ class ElevationGrid:
         grown_height = np.zeros((new_rows, new_cols), dtype=np.float64)
         grown_top = np.zeros((new_rows, new_cols), dtype=np.float64)
         grown_count = np.zeros((new_rows, new_cols), dtype=np.int64)
+        grown_stamp = np.full((new_rows, new_cols), np.nan, dtype=np.float64)
         r0 = self._origin_iy - new_oy
         c0 = self._origin_ix - new_ox
         grown_height[r0:r0 + rows, c0:c0 + cols] = self._height
         grown_top[r0:r0 + rows, c0:c0 + cols] = self._top
         grown_count[r0:r0 + rows, c0:c0 + cols] = self._count
+        grown_stamp[r0:r0 + rows, c0:c0 + cols] = self._stamp
         self._height, self._top, self._count = grown_height, grown_top, grown_count
+        self._stamp = grown_stamp
         self._origin_ix, self._origin_iy = new_ox, new_oy
 
     def clear(self) -> None:
@@ -265,6 +331,7 @@ class ElevationGrid:
         self._height = np.zeros((0, 0), dtype=np.float64)
         self._top = np.zeros((0, 0), dtype=np.float64)
         self._count = np.zeros((0, 0), dtype=np.int64)
+        self._stamp = np.full((0, 0), np.nan, dtype=np.float64)
         self.points_outside_cap = 0
 
     def state(self) -> GridState | None:
@@ -273,15 +340,28 @@ class ElevationGrid:
         snapshot = self.snapshot()
         return GridState(elevation=snapshot.elevation, top=snapshot.top,
                          count=self._count.astype(np.int32),
+                         stamp=snapshot.stamp,
                          origin_ix=int(self._origin_ix), origin_iy=int(self._origin_iy),
                          resolution=self.resolution)
 
-    def replace(self, state: GridState) -> None:
+    def replace(self, state: GridState, now: float = None) -> None:
         """The grid becomes `state`, exactly. Internal storage is rebuilt
         directly from `state.elevation`/`state.top` (NaN -> 0 where unseen,
         harmless since `count` masks those cells everywhere they are read),
         so a later update() replaces a touched cell exactly as it would
-        have on the original."""
+        have on the original.
+
+        `now`: the ROS time (float seconds) to stamp every seen cell at
+        when `state.stamp` is `None` - an .npz saved before stamps existed,
+        which is every .npz today, since map_store.py's save()/load() have
+        not been taught this field yet. "Observed now" is deliberate, not
+        an approximation of the truth: the alternative, leaving every cell
+        NaN ("never observed"), would make a freshly resumed map decay
+        away the instant a downstream consumer starts reading age from it,
+        which is worse than not knowing the real age at all. `now` is
+        required in that case - this grid has no clock of its own, and a
+        silent fallback would risk mixing time bases (wall clock vs a ROS
+        clock under sim time) the caller never asked for."""
         self._touched_tiles = set()
         if state.resolution != self.resolution:
             raise ValueError(
@@ -294,6 +374,15 @@ class ElevationGrid:
         self._count = state.count.astype(np.int64)
         self._height = np.nan_to_num(state.elevation.astype(np.float64), nan=0.0)
         self._top = np.nan_to_num(state.top.astype(np.float64), nan=0.0)
+        if state.stamp is not None:
+            self._stamp = np.asarray(state.stamp, dtype=np.float64)
+        else:
+            if now is None:
+                raise ValueError(
+                    "state has no per-cell observation stamp (an old save) "
+                    "and no `now` was given to time-stamp it as 'observed "
+                    "now' - the caller must supply the current time here")
+            self._stamp = np.where(self._count > 0, float(now), np.nan)
         self.points_outside_cap = 0
 
     def _clipped_axis(self, origin: int, size: int, low: int, high: int):
@@ -333,7 +422,29 @@ class ElevationGrid:
         return GridSnapshot(
             elevation=elevation,
             top=top,
+            # Copied, not handed out live: a caller mutating this must
+            # never be able to corrupt the grid's own notion of when a
+            # cell was last written. float64 throughout - see the module
+            # docstring and GridState.stamp for why an absolute ROS
+            # second must never be narrowed to float32.
+            stamp=self._stamp.copy(),
             center_x=(self._origin_ix + cols / 2.0) * self.resolution,
             center_y=(self._origin_iy + rows / 2.0) * self.resolution,
             resolution=self.resolution,
             origin_ix=int(self._origin_ix), origin_iy=int(self._origin_iy))
+
+    def stamp_snapshot(self):
+        """(stamp, origin_ix, origin_iy) - the raw per-cell observation-time
+        array (float64 seconds, NaN where never written) and the lattice
+        origin it is indexed from, or None before the first point.
+
+        Kept separate from snapshot(): a stamp is not read at the moment a
+        cloud lands, but later, right before a tile is cut for publishing,
+        when it is turned into an age relative to "now" (see
+        elevation_mapper's tile builder). Bundling it into every
+        snapshot() call would cost two extra full-grid copies (elevation,
+        top) on every read of a value nothing but that one call site
+        needs."""
+        if self._origin_ix is None:
+            return None
+        return self._stamp.copy(), self._origin_ix, self._origin_iy

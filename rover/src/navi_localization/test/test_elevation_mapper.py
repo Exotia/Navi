@@ -122,6 +122,21 @@ def test_the_tile_layout_is_grid_maps_column_major_with_index_zero_at_max_x_max_
     assert data.data[-1] == 1.0
 
 
+def test_build_tile_message_without_age_omits_the_layer_entirely():
+    message = build_tile_message((0, 0), tile(), 'map', Time())
+    assert message.layers == ['elevation']
+    assert len(message.data) == 1
+
+
+def test_build_tile_message_with_an_age_array_adds_the_age_s_layer():
+    age = tile(2.5)
+    message = build_tile_message((0, 0), tile(), 'map', Time(), age=age)
+    assert list(message.layers) == ['elevation', 'age_s']
+    assert message.basic_layers == ['elevation']       # age_s is not a basic layer
+    assert len(message.data) == 2
+    assert message.data[1].data[0] == pytest.approx(2.5)
+
+
 def test_build_obstacle_message_carries_tile_identity_and_voxel_centres():
     voxels = np.array([[2, 2, 10], [2, 3, 10]], dtype=np.int32)
     message = build_obstacle_message((0, 1), voxels, Time())
@@ -230,6 +245,34 @@ def test_a_cloud_then_a_tick_publishes_the_tiles_it_touched(node):
     keys = sorted(tile_index_of(m.info.pose.position.x, m.info.pose.position.y)
                   for m in node._tile_publisher.messages)
     assert keys == [(0, 0), (1, 0)]
+
+
+def test_a_published_tiles_age_s_is_publish_time_minus_observation_time(node):
+    message = cloud(points_at(0.1, 0.1))          # tiles (0, 0), (1, 0)
+    message.header.stamp = Time(sec=100)
+    node._on_cloud(message)
+    node._tick(now=142.0)
+
+    published = node._tile_publisher.messages[0]
+    assert 'age_s' in published.layers
+    age_layer = published.data[published.layers.index('age_s')]
+    age = np.asarray(age_layer.data, dtype=np.float32)
+    finite = age[np.isfinite(age)]
+    assert finite.size > 0
+    assert finite == pytest.approx(42.0, abs=1e-3)
+
+
+def test_a_blanking_tile_carries_an_all_nan_age_s_layer(node):
+    node._on_cloud(cloud(points_at(0.1, 0.1)))
+    node._tick(now=0.0)
+    node._tile_publisher.messages.clear()
+    node._on_command(String(data='{"action":"clear"}'))
+    node._tick(now=1.0)
+
+    for message in node._tile_publisher.messages:
+        assert 'age_s' in message.layers
+        age = np.asarray(message.data[message.layers.index('age_s')].data, dtype=np.float32)
+        assert np.isnan(age).all()
 
 
 def test_an_unchanged_map_sends_one_keepalive_tile_per_tick(node):

@@ -65,6 +65,11 @@ MAP_COMMAND_TOPIC = '/localization/map_command'
 MAP_STATUS_TOPIC = '/localization/map_status'
 LOCALIZATION_STATUS_TOPIC = '/localization/status'
 LAYER = 'elevation'
+# Paired with navi_autonomy.grid_map_io.AGE_LAYER, which cannot be imported
+# here: this module is navi_localization, and navi_autonomy is the package
+# that depends on it, never the other way around. LAYER/ELEVATION_LAYER
+# above already duplicate the same string for the same reason.
+AGE_LAYER = 'age_s'
 
 # Depth of the tile writer, and how many blanking tiles a tick may send.
 #
@@ -106,23 +111,51 @@ def points_from_cloud(message: PointCloud2) -> np.ndarray:
     return floats.reshape(-1, stride)[:, :3].astype(np.float64)
 
 
-def build_tile_message(key, tile: np.ndarray, frame_id: str, stamp) -> GridMap:
-    """One tile as a GridMap, in grid_map's own index order.
-
-    grid_map's convention: index (0, 0) is the sample at the *maximum* x
-    and maximum y, rows run in -x, columns in -y, data column-major. The
-    tile array is the opposite (row 0 at minimum y, column 0 at minimum
-    x), so both axes are reversed and the result transposed.
-    """
-    grid = np.asarray(tile, dtype=np.float32)[::-1, ::-1].T
-    n_rows, n_cols = grid.shape
+def _grid_map_layer(grid: np.ndarray) -> Float32MultiArray:
+    """One layer's worth of `grid` (already in the storage convention: row
+    0 at minimum y, column 0 at minimum x) as a grid_map Float32MultiArray,
+    flipped and transposed into grid_map's own index order - index (0, 0)
+    at the *maximum* x and y, rows running in -x, columns in -y, data
+    column-major. The identical flip lives in
+    navi_autonomy.grid_map_io._layer_message; it is duplicated here rather
+    than imported because this module must not depend on navi_autonomy,
+    which is the package that depends on it."""
+    flipped = np.asarray(grid, dtype=np.float32)[::-1, ::-1].T
+    n_rows, n_cols = flipped.shape
     layer = Float32MultiArray()
     layer.layout.dim = [
         MultiArrayDimension(label='column_index', size=n_cols, stride=n_rows * n_cols),
         MultiArrayDimension(label='row_index', size=n_rows, stride=n_rows),
     ]
     layer.layout.data_offset = 0
-    layer.data = grid.flatten(order='F').tolist()
+    layer.data = flipped.flatten(order='F').tolist()
+    return layer
+
+
+def build_tile_message(key, tile: np.ndarray, frame_id: str, stamp, age: np.ndarray = None) -> GridMap:
+    """One tile as a GridMap, in grid_map's own index order.
+
+    grid_map's convention: index (0, 0) is the sample at the *maximum* x
+    and maximum y, rows run in -x, columns in -y, data column-major. The
+    tile array is the opposite (row 0 at minimum y, column 0 at minimum
+    x), so both axes are reversed and the result transposed.
+
+    `age`: this tile's `age_s` layer - seconds since each cell was
+    observed, as of *this* publish, NaN where never observed - or `None`
+    (the default) to omit the layer entirely, which every call from
+    before this feature existed does and every blanking tile also chooses
+    explicitly (there is no observation to age). `age` is deliberately a
+    duration, not the absolute stamp elevation_grid keeps: a grid_map
+    layer is float32, and float32's 24-bit mantissa only carries ~256 s of
+    resolution at a ROS epoch second's magnitude (~1.7e9) - two absolute
+    stamps a few seconds apart would collapse to the same float32 value.
+    A duration measured in the tens or hundreds of seconds keeps its
+    precision instead. Never put an absolute stamp on this wire.
+    """
+    # Flipping and transposing swap the axes but not their sizes, so the
+    # message's own row/column counts read straight off the input shape.
+    n_cols, n_rows = np.asarray(tile).shape
+    layer = _grid_map_layer(tile)
 
     center_x, center_y = tile_center(*key)
     message = GridMap()
@@ -135,9 +168,13 @@ def build_tile_message(key, tile: np.ndarray, frame_id: str, stamp) -> GridMap:
     message.info.pose.position.y = float(center_y)
     message.info.pose.position.z = 0.0
     message.info.pose.orientation.w = 1.0
-    message.layers = [LAYER]
     message.basic_layers = [LAYER]
-    message.data = [layer]
+    if age is None:
+        message.layers = [LAYER]
+        message.data = [layer]
+    else:
+        message.layers = [LAYER, AGE_LAYER]
+        message.data = [layer, _grid_map_layer(age)]
     message.outer_start_index = 0
     message.inner_start_index = 0
     return message
@@ -197,6 +234,11 @@ def parse_obstacle_frame(frame_id: str) -> tuple:
 # A rover-height change beyond this since the last full cut moves the clamp
 # band enough to matter for every tile, so the next offer cuts them all.
 CLAMP_RECUT_M = 0.05
+
+
+def _stamp_seconds(stamp) -> float:
+    """A builtin_interfaces/Time as float seconds."""
+    return stamp.sec + stamp.nanosec * 1e-9
 
 
 class ElevationMapper(Node):
@@ -364,7 +406,15 @@ class ElevationMapper(Node):
         # the grid and the obstacle voxeliser, rather than each filtering
         # its own copy of the same cloud.
         points = finite_points(raw_points)
-        self._grid.update(points, already_filtered=True)
+        # The message's own header stamp, so a cell's age tracks when the
+        # camera's fusion pass actually happened rather than when this
+        # node got around to processing the callback; a zero stamp (no
+        # time_source on the ZED wrapper, or a bench mock) falls back to
+        # this node's own clock rather than stamping every cell 1970.
+        observed_at = _stamp_seconds(message.header.stamp)
+        if observed_at == 0.0:
+            observed_at = self._now()
+        self._grid.update(points, already_filtered=True, observed_at=observed_at)
         if self._grid.points_outside_cap and not self._warned_about_cap:
             self._warned_about_cap = True
             self.get_logger().warn(
@@ -509,10 +559,42 @@ class ElevationMapper(Node):
                 self._pending_nan_keys.add(entry)
                 self._pending_nan.append(entry)
 
+    def _tile_age(self, key, now: float) -> np.ndarray:
+        """The `age_s` layer for tile `key` - seconds since each of its
+        cells was last written by fusion, as of `now` - read fresh from
+        the grid's *current* per-cell stamps rather than from whatever was
+        cached when the tile was offered: the scheduler can hold a dirty
+        tile for up to MIN_INTERVAL_S before it is actually due, and age_s
+        promises the age at publish time, not at offer time. NaN where the
+        cell has never been observed or falls outside the grid's current
+        window.
+
+        The crop itself repeats tiles_of_snapshot's index arithmetic
+        (navi_localization/tiles.py) rather than calling it, because that
+        function only knows how to cut a snapshot's `elevation` array; a
+        raw stamp array plus its own origin is not a GridSnapshot."""
+        live = self._grid.stamp_snapshot()
+        if live is None:
+            return np.full((TILE_SAMPLES, TILE_SAMPLES), np.nan, dtype=np.float32)
+        stamp, origin_ix, origin_iy = live
+        rows, cols = stamp.shape
+        tx, ty = key
+        xs = np.arange(tx * TILE_CELLS, tx * TILE_CELLS + TILE_SAMPLES) - origin_ix
+        ys = np.arange(ty * TILE_CELLS, ty * TILE_CELLS + TILE_SAMPLES) - origin_iy
+        cropped = np.full((TILE_SAMPLES, TILE_SAMPLES), np.nan, dtype=np.float64)
+        in_x = (xs >= 0) & (xs < cols)
+        in_y = (ys >= 0) & (ys < rows)
+        if in_x.any() and in_y.any():
+            cropped[np.ix_(in_y, in_x)] = stamp[np.ix_(ys[in_y], xs[in_x])]
+        # The subtraction, not the stamp itself, is what may ever reach a
+        # float32 GridMap layer - see build_tile_message's docstring.
+        return (now - cropped).astype(np.float32)
+
     def _tick(self, now: float = None) -> None:
         now = self._now() if now is None else now
         stamp = self.get_clock().now().to_msg()
         empty_terrain = np.full((TILE_SAMPLES, TILE_SAMPLES), np.nan, dtype=np.float32)
+        empty_age = np.full((TILE_SAMPLES, TILE_SAMPLES), np.nan, dtype=np.float32)
         empty_voxels = np.zeros((0, 3), dtype=np.int32)
         sent = 0
         while self._pending_nan and sent < NAN_TILES_PER_TICK:
@@ -523,13 +605,14 @@ class ElevationMapper(Node):
             kind, key = entry
             if kind == 'terrain':
                 self._tile_publisher.publish(
-                    build_tile_message(key, empty_terrain, self._frame_id, stamp))
+                    build_tile_message(key, empty_terrain, self._frame_id, stamp, age=empty_age))
             else:
                 self._obstacle_publisher.publish(build_obstacle_message(
                     key, empty_voxels, stamp, voxel_m=self._obstacles.voxel_m, frame_id=self._frame_id))
             sent += 1
         for key, tile in self._scheduler.due(now):
-            self._tile_publisher.publish(build_tile_message(key, tile, self._frame_id, stamp))
+            self._tile_publisher.publish(
+                build_tile_message(key, tile, self._frame_id, stamp, age=self._tile_age(key, now)))
             self._scheduler.published(key, tile, now)
         # Obstacle tiles go out after the terrain tiles - the operator's
         # ground, which the rover can drive on, matters more than the
@@ -609,7 +692,11 @@ class ElevationMapper(Node):
 
     def _load(self, name) -> None:
         state, voxels, voxel_m = self._store.load(name)
-        self._grid.replace(state)
+        # map_store.py does not persist a stamp yet (see GridState.stamp),
+        # so `now` is always the fallback path here today: every loaded
+        # cell reads as "observed at load time" rather than decaying away
+        # the instant a downstream consumer starts reading its age.
+        self._grid.replace(state, now=self._now())
         self._obstacles.replace(*self._rescaled_voxels(voxels, voxel_m))
         self._loaded = name
         # A load replaces the grid and the obstacle map outright, so each
