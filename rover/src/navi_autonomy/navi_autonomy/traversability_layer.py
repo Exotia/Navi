@@ -37,8 +37,15 @@ wherever the rover is then, which the wheels prove again.
 
 Only the OccupancyGrid seed is touched; the GridMap layers stay exactly what
 the elevation says, because elevation data is never faked.
+
+The ground station's rosbridge link speaks only JSON over std_msgs/String,
+never a ROS service, so `ros2 param set` is unreachable from the operator's
+screen standing in the yard. /autonomy/tuning (inbound) and
+/autonomy/tuning_state (outbound, latched) close that gap for the six
+numbers above - see _on_tuning and _publish_tuning_state.
 """
 
+import json
 import math
 
 import rclpy
@@ -46,7 +53,9 @@ from geometry_msgs.msg import PoseStamped
 from rcl_interfaces.msg import SetParametersResult
 from grid_map_msgs.msg import GridMap
 from nav_msgs.msg import Odometry, OccupancyGrid
+from std_msgs.msg import String
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 
 from navi_autonomy.grid_map_io import (
@@ -72,6 +81,12 @@ ACTIVE_GOAL_TOPIC = '/autonomy/active_goal'
 # phantom wall together with the approach to it, narrow enough that what it
 # erases is a patch the operator can see around the waypoint they placed.
 GOAL_HEAL_RADIUS_M = 1.4
+
+# The wire contract with the ground station's rosbridge link: it can publish
+# and subscribe to plain topics but has no way to call a ROS service, so
+# these two close the gap `ros2 param set`/`get` leave for that operator.
+TUNING_TOPIC = '/autonomy/tuning'
+TUNING_STATE_TOPIC = '/autonomy/tuning_state'
 
 
 def view_qos() -> QoSProfile:
@@ -120,6 +135,8 @@ class TraversabilityLayer(Node):
         # what an operator reads off a slope, radians everywhere inside.
         self.declare_parameter('slope_lethal_deg', SLOPE_LETHAL_DEG)
         self.declare_parameter('active_goal_topic', ACTIVE_GOAL_TOPIC)
+        self.declare_parameter('tuning_topic', TUNING_TOPIC)
+        self.declare_parameter('tuning_state_topic', TUNING_STATE_TOPIC)
 
         self._frame_id = str(self.get_parameter('frame_id').value)
         self._startup_clear_radius_m = float(
@@ -147,6 +164,11 @@ class TraversabilityLayer(Node):
         # Fixed for the node's lifetime - see the module docstring for why a
         # single patch, not a disc that follows the rover around.
         self._startup_pose = None
+        # The reason last logged for a rejected /autonomy/tuning payload
+        # (None until one has been). Compared, not counted: a ground
+        # station retrying the same bad payload at 2 Hz must not fill the
+        # log, but a change in reason is worth a fresh line.
+        self._last_tuning_warning = None
 
         self._traversability_topic = str(self.get_parameter('traversability_topic').value)
         self._traversability_publisher = self.create_publisher(
@@ -162,7 +184,19 @@ class TraversabilityLayer(Node):
         self.create_subscription(
             PoseStamped, str(self.get_parameter('active_goal_topic').value),
             self._on_active_goal, latched_qos())
+        # Outbound state is latched (see the module docstring): a ground
+        # station that connects after start-up still learns the current
+        # six values without waiting on the next retune. Inbound tuning is
+        # not - a stale retune sitting in the queue is not something a late
+        # subscriber should ever replay onto the node.
+        self._tuning_state_publisher = self.create_publisher(
+            String, str(self.get_parameter('tuning_state_topic').value),
+            latched_qos())
+        self.create_subscription(
+            String, str(self.get_parameter('tuning_topic').value),
+            self._on_tuning, 10)
         self.add_on_set_parameters_callback(self._on_set_parameters)
+        self._publish_tuning_state()
 
     def _traversability_subscribers(self) -> int:
         return self.count_subscribers(self._traversability_topic)
@@ -224,6 +258,79 @@ class TraversabilityLayer(Node):
             self.get_logger().info(
                 "retuned: " + ", ".join(f"{a.lstrip('_')}={v}" for a, v in pending))
         return SetParametersResult(successful=True)
+
+    def _warn_about_tuning(self, reason: str, message: str) -> None:
+        """Logs `message` unless `reason` is the one last logged here.
+
+        A ground station that cannot reach a rejected value some other way
+        will retry it at 2 Hz; that must not fill the log the way one
+        warning per distinct reason does not.
+        """
+        if reason == self._last_tuning_warning:
+            return
+        self._last_tuning_warning = reason
+        self.get_logger().warn(message)
+
+    def _on_tuning(self, message: String) -> None:
+        """A live retune sent as JSON, for the ground station's rosbridge
+        link, which can reach a topic but never a ROS service.
+
+        Validated the same way a batch from `ros2 param set` is: a bad
+        value anywhere in the payload rejects the whole payload, because
+        half-applied tuning is worse than none. An unknown key costs the
+        rest of the message nothing, so an older ground station sending a
+        key this build does not have still gets everything else applied.
+        """
+        try:
+            payload = json.loads(message.data)
+        except (json.JSONDecodeError, TypeError):
+            self._warn_about_tuning(
+                'bad JSON', f"/autonomy/tuning: not valid JSON ({message.data!r})")
+            return
+        if not isinstance(payload, dict):
+            self._warn_about_tuning(
+                'not an object',
+                f"/autonomy/tuning: payload must be a JSON object, got {payload!r}")
+            return
+        if not payload:
+            self._warn_about_tuning('empty object', "/autonomy/tuning: empty payload")
+            return
+
+        parameters = []
+        for name, value in payload.items():
+            attribute = self._LIVE_PARAMETERS.get(name)
+            if attribute is None:
+                continue     # an older or newer ground station's key we don't have
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value < 0.0):
+                self.get_logger().warn(
+                    f"/autonomy/tuning: {name}={value!r} must be finite and not "
+                    "negative; the whole message is ignored")
+                return
+            parameters.append(Parameter(name, Parameter.Type.DOUBLE, float(value)))
+
+        if not parameters:
+            return           # every key present was one this build does not have
+
+        # set_parameters, never a direct attribute write: this is the one
+        # validated path that already exists (_on_set_parameters above),
+        # and it is what keeps `ros2 param get` telling the truth about
+        # what the node is actually using.
+        self.set_parameters(parameters)
+        self._publish_tuning_state()
+
+    def _publish_tuning_state(self) -> None:
+        """All six live values, latched so a ground station connecting
+        after start-up still learns them without waiting on a retune.
+
+        Built from the node's own attributes, not from whatever a message
+        last asked for, so what goes out is what the node is using.
+        """
+        payload = {name: getattr(self, attribute)
+                   for name, attribute in self._LIVE_PARAMETERS.items()}
+        state = String()
+        state.data = json.dumps(payload)
+        self._tuning_state_publisher.publish(state)
 
     def _on_active_goal(self, message: PoseStamped) -> None:
         """The goal the rover is driving to now. Replaced, never

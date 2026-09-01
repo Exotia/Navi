@@ -5,6 +5,8 @@ cells out. Publishers replaced by recorders; no ROS graph.
     PYTHONPATH=$PWD/rover/src/navi_autonomy:$PWD/rover/src/navi_localization \
     python3 -m pytest rover/src/navi_autonomy/test/test_traversability_layer.py -q'
 """
+import json
+
 import numpy as np
 import pytest
 import rclpy
@@ -12,12 +14,13 @@ from builtin_interfaces.msg import Time
 from geometry_msgs.msg import PoseStamped
 from rclpy.parameter import Parameter
 from nav_msgs.msg import Odometry
+from std_msgs.msg import String
 
 from navi_autonomy.grid_map_io import build_grid_map, layer_from_message
 from navi_autonomy.traversability import LETHAL, UNKNOWN, clear_startup_patch
 from navi_autonomy.traversability_layer import (
     ACTIVE_GOAL_TOPIC, COSTMAP_SEED_TOPIC, GOAL_HEAL_RADIUS_M, MAP_TOPIC,
-    TRAVERSABILITY_TOPIC, TraversabilityLayer)
+    TRAVERSABILITY_TOPIC, TUNING_STATE_TOPIC, TUNING_TOPIC, TraversabilityLayer)
 
 
 class Recorder:
@@ -41,6 +44,7 @@ def node(ros):
     node = TraversabilityLayer()
     node._traversability_publisher = Recorder()
     node._seed_publisher = Recorder()
+    node._tuning_state_publisher = Recorder()
     node._traversability_subscribers = lambda: 1
     yield node
     node.destroy_node()
@@ -373,3 +377,100 @@ def test_the_slope_ceiling_can_be_lowered_while_the_node_runs(node):
 
     assert result.successful is True
     assert node._slope_lethal_deg == pytest.approx(20.0)
+
+
+# -- the ground station's own retune path: JSON over rosbridge, no service --
+
+def tuning_message(payload: dict) -> String:
+    message = String()
+    message.data = json.dumps(payload)
+    return message
+
+
+def test_the_tuning_topics_are_the_wire_contracts_names():
+    assert TUNING_TOPIC == '/autonomy/tuning'
+    assert TUNING_STATE_TOPIC == '/autonomy/tuning_state'
+
+
+def test_a_valid_payload_changes_the_attribute_and_is_visible_through_get_parameter(node):
+    # get_parameter, not just the attribute: this is the proof the value
+    # went through set_parameters rather than around it.
+    node._on_tuning(tuning_message({'step_lethal_m': 0.6}))
+
+    assert node._step_lethal_m == pytest.approx(0.6)
+    assert node.get_parameter('step_lethal_m').value == pytest.approx(0.6)
+
+
+def test_an_unknown_key_does_not_cost_the_rest_of_the_message(node):
+    # An older ground station sending a key this build does not have must
+    # not lose everything else in the same message.
+    node._on_tuning(tuning_message({
+        'not_a_real_parameter': 1.0, 'step_lethal_m': 0.6}))
+
+    assert node._step_lethal_m == pytest.approx(0.6)
+
+
+def test_a_negative_value_rejects_the_whole_tuning_message(node):
+    before_step = node._step_lethal_m
+    before_gap = node._floating_gap_m
+
+    node._on_tuning(tuning_message({
+        'floating_gap_m': 0.9, 'step_lethal_m': -1.0}))
+
+    assert node._step_lethal_m == pytest.approx(before_step)
+    assert node._floating_gap_m == pytest.approx(before_gap)
+
+
+def test_infinite_and_nan_values_reject_the_whole_tuning_message(node):
+    # json.loads accepts both Infinity and NaN as numbers, so both must be
+    # caught here the same way a negative value is - neither is finite.
+    before_step = node._step_lethal_m
+    before_slope = node._slope_lethal_deg
+
+    nan_message = String()
+    nan_message.data = '{"slope_lethal_deg": NaN, "step_lethal_m": 0.6}'
+    node._on_tuning(nan_message)
+    assert node._slope_lethal_deg == pytest.approx(before_slope)
+    assert node._step_lethal_m == pytest.approx(before_step)
+
+    inf_message = String()
+    inf_message.data = '{"step_lethal_m": Infinity}'
+    node._on_tuning(inf_message)
+    assert node._step_lethal_m == pytest.approx(before_step)
+
+
+def test_malformed_json_does_not_raise_out_of_the_callback(node):
+    message = String()
+    message.data = '{not valid json'
+
+    node._on_tuning(message)      # must not raise
+
+
+def test_a_json_array_does_not_raise_out_of_the_callback(node):
+    message = String()
+    message.data = json.dumps([1, 2, 3])
+
+    node._on_tuning(message)      # must not raise
+
+
+def test_the_state_topic_carries_all_six_keys_at_start_up(node):
+    # __init__ already published this once, to the publisher that existed
+    # before the fixture swapped a Recorder in for it (same as the seed
+    # and traversability publishers above) - calling it again here reaches
+    # the identical payload, since nothing has retuned the node since.
+    node._publish_tuning_state()
+
+    assert len(node._tuning_state_publisher.messages) == 1
+    payload = json.loads(node._tuning_state_publisher.messages[0].data)
+    assert set(payload) == set(TraversabilityLayer._LIVE_PARAMETERS)
+
+
+def test_the_state_topic_is_republished_after_an_accepted_change(node):
+    node._on_tuning(tuning_message({'step_lethal_m': 0.6}))
+
+    assert len(node._tuning_state_publisher.messages) == 1
+    payload = json.loads(node._tuning_state_publisher.messages[-1].data)
+    assert payload['step_lethal_m'] == pytest.approx(0.6)
+    # Built from the node's own attributes, not from the message: every
+    # other value in the same publish is what the node is actually using.
+    assert payload['slope_lethal_deg'] == pytest.approx(node._slope_lethal_deg)
