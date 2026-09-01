@@ -330,6 +330,41 @@ def clear_startup_patch(cost: np.ndarray, centre_cell, radius_cells: int) -> np.
     return cost
 
 
+def heal_goal_patch(cost: np.ndarray, centre_cell, radius_cells: int) -> np.ndarray:
+    """The operator says a goal is reachable, so the map does not get to
+    veto it: every cell within `radius_cells` of the goal becomes free.
+
+    Unlike clear_startup_patch this clears MEASURED cost, LETHAL included -
+    which is the whole point. A goal typed from the judges' site plan sat on
+    ground the elevation layer called an obstacle ("the target seemed to be
+    in the ground"), and both planners refused a goal inside a wall, so the
+    run ended before it began.
+
+    The trade is real and deliberate: an obstacle that genuinely stands at
+    the goal is erased here too, and the rover will drive into it. The
+    radius is the whole safeguard - it must stay small enough that the
+    operator can see what they are clearing when they place the waypoint,
+    and it clears one disc around one commanded point, never a corridor.
+
+    `centre_cell` is (row, col) in this tick's grid, or None to heal
+    nothing. Mutates `cost` in place and returns it.
+    """
+    cost = np.asarray(cost)
+    if cost.ndim != 2:
+        raise ValueError(f"a cost grid is 2-D, got shape {cost.shape}")
+    rows, cols = cost.shape
+    if centre_cell is None or radius_cells <= 0:
+        return cost
+
+    row, col = centre_cell
+    offsets = _disc_offsets(radius_cells)
+    ry = offsets[:, 0] + int(row)
+    rx = offsets[:, 1] + int(col)
+    in_bounds = (ry >= 0) & (ry < rows) & (rx >= 0) & (rx < cols)
+    cost[ry[in_bounds], rx[in_bounds]] = 0
+    return cost
+
+
 def seed_from_elevation(elevation, resolution: float = RESOLUTION,
                         step_lethal_m: float = STEP_LETHAL_M,
                         floating_gap_m: float = 0.0) -> tuple:

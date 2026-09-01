@@ -31,8 +31,11 @@ import math
 from time import monotonic
 
 import rclpy
+from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path
 from rclpy.node import Node
+from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
+                       ReliabilityPolicy)
 from std_msgs.msg import String
 
 from navi_autonomy import nav_run as rules
@@ -60,6 +63,10 @@ class GoalRelay(Node):
         self.declare_parameter("nav_request_topic", "/nav_request")
         self.declare_parameter("nav_status_topic", "/nav_status")
         self.declare_parameter("nav_path_summary_topic", "/nav_path_summary")
+        # Where the traversability layer reads the goal it must heal a
+        # disc around. Latched, because the layer may start after the
+        # goal was sent and a goal nobody heard is a goal not healed.
+        self.declare_parameter("active_goal_topic", "/autonomy/active_goal")
         self.declare_parameter("plan_topic", "/plan")
         self.declare_parameter("mode_status_topic", "/mode_status")
         self.declare_parameter("navi_rpc_status_topic", "/navi_rpc/status")
@@ -99,6 +106,11 @@ class GoalRelay(Node):
             String, str(self.get_parameter("nav_status_topic").value), 1)
         self._nav_path_summary_pub = self.create_publisher(
             String, str(self.get_parameter("nav_path_summary_topic").value), 1)
+        self._active_goal_pub = self.create_publisher(
+            PoseStamped, str(self.get_parameter("active_goal_topic").value),
+            QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                       history=HistoryPolicy.KEEP_LAST, depth=1))
 
         self.create_subscription(
             String, str(self.get_parameter("nav_request_topic").value),
@@ -201,6 +213,21 @@ class GoalRelay(Node):
             self._last_stop_seq = stop_seq
         except Exception as exc:
             self.get_logger().error(f"navi_rpc status callback failed: {exc!r}")
+
+    def _publish_active_goal(self, x: float, y: float) -> None:
+        """Tell the traversability layer which point to heal a disc around.
+
+        Published with the goal, not with the plan: the goal has to be
+        drivable before a plan can exist, which is the whole reason the
+        healing is there.
+        """
+        goal = PoseStamped()
+        goal.header.frame_id = "map"
+        goal.header.stamp = self.get_clock().now().to_msg()
+        goal.pose.position.x = float(x)
+        goal.pose.position.y = float(y)
+        goal.pose.orientation.w = 1.0
+        self._active_goal_pub.publish(goal)
 
     # -- Nav2 goal callbacks, wired when a SEND_GOAL action is dispatched ----
     def _on_goal_succeeded(self):
@@ -311,6 +338,7 @@ class GoalRelay(Node):
             self._runlog.event(
                 "goal_sent", f"waypoint {index + 1}/{len(self._mission_waypoints)}"
                              f" -> ({x:.2f}, {y:.2f}) yaw {yaw_txt}")
+            self._publish_active_goal(x, y)
             self._nav2.send_goal(x, y, yaw, self._on_goal_succeeded,
                                  self._on_goal_failed, self._on_feedback)
         elif action == rules.CANCEL_GOAL:

@@ -12,8 +12,9 @@ import pytest
 
 from navi_autonomy.traversability import (
     LETHAL, MAX_SCALED_COST, ROUGHNESS_REF_M, SLOPE_LETHAL_DEG, SLOPE_LETHAL_RAD,
-    STEP_LETHAL_M, UNKNOWN, clear_startup_patch, costmap_seed, derive, roughness_layer,
-    seed_from_elevation, slope_layer, stamp_wheel_trail, step_layer, valid_layer)
+    STEP_LETHAL_M, UNKNOWN, clear_startup_patch, costmap_seed, derive,
+    heal_goal_patch, roughness_layer, seed_from_elevation, slope_layer,
+    stamp_wheel_trail, step_layer, valid_layer)
 
 
 def pit(depth=0.2, size=6, extent=24):
@@ -344,3 +345,67 @@ def test_a_zero_gap_disables_the_floating_filter():
     elevation[4, 4] = 2.0
     masked = mask_floating_cells(elevation, gap_m=0.0)
     assert masked[4, 4] == np.float32(2.0)
+
+
+# -- "the operator says the goal is reachable" (heal a disc at the goal) ---
+
+def test_the_goal_patch_clears_measured_lethal_ground_the_startup_patch_would_keep():
+    # The difference that matters: clear_startup_patch only fills unknown,
+    # this overrides a measured obstacle - a goal inside a phantom wall is
+    # exactly the case it exists for.
+    cost = np.full((21, 21), LETHAL, dtype=np.int8)
+
+    heal_goal_patch(cost, (10, 10), radius_cells=3)
+
+    assert cost[10, 10] == 0
+    assert cost[7, 10] == 0
+    assert cost[10, 13] == 0
+    assert cost[7, 7] == LETHAL      # outside the Euclidean disc
+    assert cost[0, 0] == LETHAL
+
+
+def test_the_goal_patch_covers_exactly_the_disc_and_no_more():
+    cost = np.full((21, 21), LETHAL, dtype=np.int8)
+
+    heal_goal_patch(cost, (10, 10), radius_cells=3)
+
+    expected = int(((np.mgrid[-3:4, -3:4][0] ** 2
+                     + np.mgrid[-3:4, -3:4][1] ** 2) <= 9).sum())
+    assert (cost == 0).sum() == expected
+
+
+def test_a_goal_at_the_edge_heals_what_is_on_the_grid_and_does_not_wrap():
+    cost = np.full((11, 11), LETHAL, dtype=np.int8)
+
+    heal_goal_patch(cost, (0, 0), radius_cells=3)
+
+    assert cost[0, 0] == 0
+    assert cost[10, 10] == LETHAL    # no wrap-around to the far corner
+    assert cost[0, 10] == LETHAL
+
+
+def test_no_goal_heals_nothing():
+    cost = np.full((5, 5), LETHAL, dtype=np.int8)
+
+    result = heal_goal_patch(cost, None, radius_cells=3)
+
+    assert (result == LETHAL).all()
+
+
+def test_a_zero_radius_heals_nothing():
+    cost = np.full((5, 5), LETHAL, dtype=np.int8)
+
+    result = heal_goal_patch(cost, (2, 2), radius_cells=0)
+
+    assert (result == LETHAL).all()
+
+
+def test_healing_leaves_unknown_ground_free_too():
+    # Unknown at the goal is the dark-yard case; it must end up drivable
+    # for the same reason a phantom wall must.
+    cost = np.full((11, 11), UNKNOWN, dtype=np.int8)
+
+    heal_goal_patch(cost, (5, 5), radius_cells=2)
+
+    assert cost[5, 5] == 0
+    assert cost[0, 0] == UNKNOWN

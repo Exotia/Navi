@@ -9,12 +9,14 @@ import numpy as np
 import pytest
 import rclpy
 from builtin_interfaces.msg import Time
+from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 
 from navi_autonomy.grid_map_io import build_grid_map, layer_from_message
 from navi_autonomy.traversability import LETHAL, UNKNOWN, clear_startup_patch
 from navi_autonomy.traversability_layer import (
-    COSTMAP_SEED_TOPIC, MAP_TOPIC, TRAVERSABILITY_TOPIC, TraversabilityLayer)
+    ACTIVE_GOAL_TOPIC, COSTMAP_SEED_TOPIC, GOAL_HEAL_RADIUS_M, MAP_TOPIC,
+    TRAVERSABILITY_TOPIC, TraversabilityLayer)
 
 
 class Recorder:
@@ -214,3 +216,90 @@ def test_a_second_pose_does_not_move_or_add_a_patch(node):
     only_patch = np.full((40, 40), UNKNOWN, dtype=np.int8)
     clear_startup_patch(only_patch, (20, 20), radius_cells)
     assert (cost == 0).sum() == (only_patch == 0).sum()
+
+
+# -- the goal-heal disc ----------------------------------------------------
+
+def goal_at(x, y):
+    goal = PoseStamped()
+    goal.header.frame_id = 'map'
+    goal.pose.position.x = float(x)
+    goal.pose.position.y = float(y)
+    return goal
+
+
+def seed_of(node):
+    seed = node._seed_publisher.messages[-1]
+    return np.asarray(seed.data, dtype=np.int8).reshape(
+        seed.info.height, seed.info.width)
+
+
+def test_the_goal_topic_and_radius_are_the_operators_numbers():
+    assert ACTIVE_GOAL_TOPIC == '/autonomy/active_goal'
+    assert GOAL_HEAL_RADIUS_M == pytest.approx(1.4)
+
+
+def test_a_goal_inside_a_pit_is_healed_to_free_ground(node):
+    # The pit's rim is LETHAL (see the first test in this file). A goal
+    # placed on that rim is the "target is in the ground" case: without the
+    # heal both planners refuse it.
+    message, lo = pit_map()
+    # cell (lo-1, lo-1) in a map whose corner lattice index is (-12, -12),
+    # 0.05 m cells -> metres.
+    goal_x = (lo - 1 + -12) * 0.05
+    goal_y = (lo - 1 + -12) * 0.05
+
+    node._on_map(message)
+    assert seed_of(node)[lo - 1, lo - 1] == LETHAL
+
+    node._on_active_goal(goal_at(goal_x, goal_y))
+    node._on_map(message)
+
+    assert seed_of(node)[lo - 1, lo - 1] == 0
+
+
+def test_the_heal_reaches_a_metre_and_a_bit_and_no_further(node):
+    message, lo = pit_map()
+    goal_x = (lo - 1 + -12) * 0.05
+    goal_y = (lo - 1 + -12) * 0.05
+    node._on_active_goal(goal_at(goal_x, goal_y))
+
+    node._on_map(message)
+    cost = seed_of(node)
+
+    radius_cells = int(round(GOAL_HEAL_RADIUS_M / 0.05))
+    assert radius_cells == 28
+    # Everything the 24x24 map holds is inside a 1.4 m disc centred near its
+    # corner, so nothing lethal survives - which is the point being made:
+    # the disc is large next to this map, and the operator sees it.
+    assert (cost == LETHAL).sum() == 0
+
+
+def test_without_a_goal_nothing_is_healed(node):
+    message, lo = pit_map()
+
+    node._on_map(message)
+
+    assert seed_of(node)[lo - 1, lo - 1] == LETHAL
+
+
+def test_a_new_goal_replaces_the_old_one_rather_than_accumulating(node):
+    message, lo = pit_map()
+    node._on_active_goal(goal_at(0.0, 0.0))
+    node._on_active_goal(goal_at(99.0, 99.0))
+
+    node._on_map(message)
+
+    # The second goal is far off this map, so the first goal's disc must be
+    # gone: healing follows the current goal, it does not leave a trail.
+    assert seed_of(node)[lo - 1, lo - 1] == LETHAL
+
+
+def test_a_zero_radius_turns_the_heal_off(node):
+    message, lo = pit_map()
+    node._goal_heal_radius_m = 0.0
+    node._on_active_goal(goal_at((lo - 1 + -12) * 0.05, (lo - 1 + -12) * 0.05))
+
+    node._on_map(message)
+
+    assert seed_of(node)[lo - 1, lo - 1] == LETHAL

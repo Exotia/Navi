@@ -427,3 +427,23 @@ def test_an_unreadable_nav_request_is_logged_and_the_node_survives(graph_factory
     relay._on_nav_request(go())
     spin(executor, 2.0)
     assert len(server.received_goals) == 1
+
+
+def test_the_active_goal_is_announced_for_the_traversability_layer(graph_factory):
+    # The layer heals a disc around this point, so it has to be the same
+    # point Nav2 was given - and it has to be published, not merely stored.
+    executor, relay, server, task, clock, statuses, summaries = graph_factory()
+    published = []
+    relay._active_goal_pub = type(
+        "Recorder", (), {"publish": lambda self, m: published.append(m)})()
+
+    relay._on_mode_status(mode("autonomous"))
+    relay._on_nav_request(go())
+    spin(executor, 2.0)
+
+    assert len(published) == 1
+    assert published[0].pose.position.x == pytest.approx(3.0)
+    assert published[0].pose.position.y == pytest.approx(-1.5)
+    assert published[0].header.frame_id == "map"
+    assert published[0].pose.position.x == pytest.approx(
+        server.received_goals[0].pose.pose.position.x)

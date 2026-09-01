@@ -40,6 +40,7 @@ the elevation says, because elevation data is never faked.
 """
 
 import rclpy
+from geometry_msgs.msg import PoseStamped
 from grid_map_msgs.msg import GridMap
 from nav_msgs.msg import Odometry, OccupancyGrid
 from rclpy.node import Node
@@ -49,7 +50,8 @@ from navi_autonomy.grid_map_io import (
     ELEVATION_LAYER, build_grid_map, build_occupancy_grid, layer_from_message)
 from navi_autonomy.tile_aggregator import MAP_TOPIC, POSE_TOPIC, latched_qos
 from navi_autonomy.traversability import (STEP_LETHAL_M, clear_startup_patch,
-                                          seed_from_elevation, stamp_wheel_trail)
+                                          heal_goal_patch, seed_from_elevation,
+                                          stamp_wheel_trail)
 from navi_localization.elevation_grid import RESOLUTION
 
 TRAVERSABILITY_TOPIC = '/autonomy/traversability'
@@ -59,6 +61,14 @@ LAYER_ORDER = ('slope', 'step', 'roughness', 'valid')
 # The costmap's robot_radius (nav2_rover.yaml) is 0.80 m; the operator's
 # margin on top of it is 10 cm. 0.90 m is the startup patch's disc radius.
 STARTUP_CLEAR_RADIUS_M = 0.90
+
+ACTIVE_GOAL_TOPIC = '/autonomy/active_goal'
+
+# Radius of the free disc forced around the active goal. 1.4 m, the
+# operator's number: wide enough to swallow a goal that landed inside a
+# phantom wall together with the approach to it, narrow enough that what it
+# erases is a patch the operator can see around the waypoint they placed.
+GOAL_HEAL_RADIUS_M = 1.4
 
 
 def view_qos() -> QoSProfile:
@@ -91,6 +101,13 @@ class TraversabilityLayer(Node):
         # Bigger than any real drivable step, smaller than blob heights;
         # 0 disables. See traversability.mask_floating_cells.
         self.declare_parameter('floating_gap_m', 0.35)
+        # A disc of this radius around the ACTIVE GOAL is forced free,
+        # measured LETHAL included. The operator placed the waypoint and
+        # says it is reachable; a goal the map calls an obstacle is refused
+        # by both planners, so the run ends before it starts. 0 disables.
+        # See traversability.heal_goal_patch for the trade this accepts.
+        self.declare_parameter('goal_heal_radius_m', GOAL_HEAL_RADIUS_M)
+        self.declare_parameter('active_goal_topic', ACTIVE_GOAL_TOPIC)
 
         self._frame_id = str(self.get_parameter('frame_id').value)
         self._startup_clear_radius_m = float(
@@ -99,6 +116,12 @@ class TraversabilityLayer(Node):
         self._wheel_trail_radius_m = float(
             self.get_parameter('wheel_trail_radius_m').value)
         self._floating_gap_m = float(self.get_parameter('floating_gap_m').value)
+        self._goal_heal_radius_m = float(
+            self.get_parameter('goal_heal_radius_m').value)
+        # (x, y) metres of the goal currently being driven to, or None. Kept
+        # in metres, converted per tick like the startup patch, because the
+        # rolling window's origin moves under it.
+        self._active_goal = None
         # The trail: world-lattice cells (metres / RESOLUTION) the rover's
         # centre has visited, deduplicated - a set, so hours of driving in
         # the same yard stay bounded by the yard's area, not by time.
@@ -122,6 +145,9 @@ class TraversabilityLayer(Node):
             latched_qos())
         self.create_subscription(
             Odometry, str(self.get_parameter('pose_topic').value), self._on_pose, 1)
+        self.create_subscription(
+            PoseStamped, str(self.get_parameter('active_goal_topic').value),
+            self._on_active_goal, latched_qos())
 
     def _traversability_subscribers(self) -> int:
         return self.count_subscribers(self._traversability_topic)
@@ -135,6 +161,13 @@ class TraversabilityLayer(Node):
         if self._startup_pose is not None:
             return          # the patch is fixed at the first pose, permanently
         self._startup_pose = (x, y)
+
+    def _on_active_goal(self, message: PoseStamped) -> None:
+        """The goal the rover is driving to now. Replaced, never
+        accumulated: healing follows the current goal, so a waypoint list
+        does not leave a trail of cleared discs behind it."""
+        self._active_goal = (float(message.pose.position.x),
+                             float(message.pose.position.y))
 
     def _on_map(self, message: GridMap) -> None:
         resolution = float(message.info.resolution)
@@ -170,6 +203,16 @@ class TraversabilityLayer(Node):
                           int(round(x / resolution)) - origin_ix)
             radius_cells = int(round(self._startup_clear_radius_m / resolution))
             clear_startup_patch(cost, centre_cell, radius_cells)
+        if self._active_goal is not None and self._goal_heal_radius_m > 0.0:
+            # Same per-tick conversion as the startup patch above: the
+            # stored metres never change, the origin they are measured from
+            # does.
+            gx, gy = self._active_goal
+            heal_goal_patch(
+                cost,
+                (int(round(gy / resolution)) - origin_iy,
+                 int(round(gx / resolution)) - origin_ix),
+                int(round(self._goal_heal_radius_m / resolution)))
         if self._trail and self._wheel_trail_radius_m > 0.0:
             # World-lattice -> this tick's grid indices, same origin shift
             # as the startup patch above. AFTER the patch and the derive:
