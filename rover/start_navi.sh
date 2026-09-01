@@ -44,6 +44,18 @@
 #   ./start_navi.sh --no-nav2    no Nav2 (nothing plans; manual drive is unaffected)
 #   ./start_navi.sh --port 9091  serve rosbridge on a different port
 #   ./start_navi.sh --keep-stale don't clean up a previous run first
+#   ./start_navi.sh --resume     elevation_mapper starts from the most
+#                                 recently saved map under ~/navi_maps
+#                                 instead of an empty grid
+#   ./start_navi.sh --resume treppenhaus  starts from that saved map by
+#                                 name instead of the most recent one
+#
+# Without --resume, elevation_mapper always starts with an empty grid -
+# that is the point of the flag, not a side effect of it. Nothing under
+# ~/navi_maps is ever touched by this script or by elevation_mapper's
+# start-up: --resume only chooses which saved file to read, and a missing
+# or corrupt one is a warning, not a crash - the rover still comes up with
+# an empty map rather than being stranded on a start line.
 #
 # Bring the rover up BEFORE starting any simulation on ROS domain 0. The
 # ZED wrapper's startup grows from ~5 s to ~35 s with a sim running, because
@@ -69,6 +81,8 @@ START_VIDEO=1
 START_LOCALIZATION=1
 START_NAV2=1
 CLEAN_STALE=1
+RESUME=0
+RESUME_MAP=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -78,6 +92,17 @@ while [ $# -gt 0 ]; do
         --no-navi-rpc) START_NAVI_RPC=0; shift ;;
         --no-shaper) START_SHAPER=0; shift ;;
         --no-video) START_VIDEO=0; shift ;;
+        --resume)
+            # NAME is optional: consume it only when it is actually there
+            # and is not the next flag, so `--resume --no-nav2` does not
+            # swallow --no-nav2 as a map name.
+            RESUME=1
+            shift
+            if [ $# -gt 0 ] && [[ "$1" != --* ]]; then
+                RESUME_MAP="$1"
+                shift
+            fi
+            ;;
         --no-localization) START_LOCALIZATION=0; shift ;;
         --no-nav2) START_NAV2=0; shift ;;
         --keep-stale) CLEAN_STALE=0; shift ;;
@@ -421,8 +446,25 @@ if [ "$START_BRIDGE" -eq 1 ]; then
 fi
 
 if [ "$START_LOCALIZATION" -eq 1 ]; then
-    echo "starting localisation (ZED 2i tracking)"
-    ros2 launch navi_localization localization.launch.py &
+    # --resume with no name means the newest file under ~/navi_maps, not
+    # any particular one; --resume NAME means that file by name; no
+    # --resume at all means elevation_mapper starts with an empty grid.
+    # Either way this never reads or writes a .npz itself - the argument
+    # only tells elevation_mapper's own start-up, over in
+    # localization.launch.py, which of those three to do.
+    STARTUP_MAP_ARGS=()
+    if [ "$RESUME" -eq 1 ]; then
+        if [ -n "$RESUME_MAP" ]; then
+            echo "starting localisation (ZED 2i tracking); elevation map resuming '$RESUME_MAP'"
+            STARTUP_MAP_ARGS=(startup_map:="$RESUME_MAP")
+        else
+            echo "starting localisation (ZED 2i tracking); elevation map resuming the most recently saved map"
+            STARTUP_MAP_ARGS=(startup_map:=latest)
+        fi
+    else
+        echo "starting localisation (ZED 2i tracking); elevation map starts empty"
+    fi
+    ros2 launch navi_localization localization.launch.py "${STARTUP_MAP_ARGS[@]}" &
     LOC_PID=$!
     BACKGROUND_PIDS+=("$LOC_PID")
 

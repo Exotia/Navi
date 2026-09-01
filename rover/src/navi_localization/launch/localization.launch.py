@@ -52,6 +52,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 from navi_localization.pose_composition import STATIC_FRAMES
@@ -196,10 +197,19 @@ def generate_launch_description():
     # The mapper's subscription is what makes the SDK extract the fused
     # cloud at all, so it belongs in the same launch as the wrapper rather
     # than being something an operator has to remember to start.
+    #
+    # startup_map has no DeclareLaunchArgument of its own: start_navi.sh is
+    # the only caller, and ros2 launch sets a launch configuration from a
+    # bare `name:=value` on its command line whether or not it was declared
+    # - see IncludeLaunchDescription's own launch_arguments above for the
+    # same mechanism in use already. The default keeps a plain `ros2 launch
+    # navi_localization localization.launch.py` (no start_navi.sh in the
+    # way) starting with an empty map rather than failing to resolve.
     mapper = Node(
         package='navi_localization',
         executable='elevation_mapper',
         name='elevation_mapper',
+        parameters=[{'startup_map': LaunchConfiguration('startup_map', default='')}],
         output='screen',
     )
 

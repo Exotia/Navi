@@ -39,6 +39,7 @@ Measured numbers: see launch/localization.launch.py.
 
 import dataclasses
 import json
+import os
 from collections import deque
 from datetime import datetime, timezone
 
@@ -200,12 +201,18 @@ CLAMP_RECUT_M = 0.05
 
 class ElevationMapper(Node):
 
-    def __init__(self, map_directory: str = None) -> None:
+    def __init__(self, map_directory: str = None, startup_map: str = None) -> None:
         super().__init__('elevation_mapper')
         self.declare_parameter('cloud_topic', FUSED_CLOUD_TOPIC)
         self.declare_parameter('frame_id', 'map')
         self.declare_parameter('tick_seconds', 1.0)
         self.declare_parameter('map_directory', map_directory or DEFAULT_DIRECTORY)
+        # Empty (the default): start with an empty grid. A name: load that
+        # map at start-up through the same _load path a live 'load' command
+        # uses. 'latest': whichever .npz in map_directory was modified most
+        # recently. See _load_startup_map - a missing or corrupt file here
+        # must never stop the rover coming up.
+        self.declare_parameter('startup_map', startup_map or '')
         # <= 0 disables that side of the clamp. Defaults are the spec's
         # numbers: a rover-height window that keeps a wall or an
         # overhanging branch out of the drawn terrain without clamping the
@@ -276,6 +283,56 @@ class ElevationMapper(Node):
         self.get_logger().info(
             f"mapping {self.get_parameter('cloud_topic').value} into {MAP_TILE_TOPIC} "
             f"({RESOLUTION} m cells, 2.5 m tiles); maps under {self._store.directory}")
+        self._load_startup_map()
+
+    def _latest_map_name(self):
+        """Name of the most recently modified `.npz` in the map directory,
+        or None when there are no saved maps yet. Newest by modification
+        time, not alphabetically last - a map named `a` saved after `z`
+        must still win. Never touches the files themselves: 'latest'
+        only chooses which one to read, and reading a map must never be
+        able to lose one - there is no path here, or anywhere in this
+        node, that deletes a `.npz` file."""
+        names = self._store.list_names()
+        if not names:
+            return None
+        return max(names, key=lambda name: os.path.getmtime(
+            os.path.join(self._store.directory, f"{name}.npz")))
+
+    def _load_startup_map(self) -> None:
+        """Applies the `startup_map` parameter once, at construction time.
+
+        Empty means the operator asked for a clean run: the grid is
+        already empty at this point, so this only has to say so plainly.
+        A name, or 'latest', goes through the same _load path a live
+        'load' command uses. Any failure to load - the name does not
+        exist, 'latest' with no saved maps, a corrupt file - is a warning,
+        never an exception: this runs from the constructor, so a raised
+        error here would stop the node coming up at all, and an operator
+        stranded on a start line with no autonomy is worse than one who
+        starts with an empty map they did not expect."""
+        requested = str(self.get_parameter('startup_map').value)
+        if not requested:
+            self.get_logger().info("starting with an empty map (no startup_map given)")
+            return
+        name = requested
+        if requested == 'latest':
+            name = self._latest_map_name()
+            if name is None:
+                self.get_logger().info(
+                    "startup_map is 'latest' but no saved maps exist yet; "
+                    "starting with an empty map")
+                return
+        try:
+            self._load(name)
+        except Exception as error:                          # noqa: BLE001
+            # Same reasoning as _on_command's catch-all: the caller here is
+            # __init__, not a subscription, but the consequence of letting
+            # this escape is worse - the node never finishes constructing,
+            # so nothing maps at all rather than starting from an empty grid.
+            self.get_logger().warn(
+                f"could not load startup map {name!r} ({error}); "
+                "starting with an empty map instead")
 
     # -- mapping ----------------------------------------------------------
 

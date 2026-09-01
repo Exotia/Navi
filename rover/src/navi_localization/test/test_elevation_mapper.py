@@ -8,6 +8,8 @@ Needs grid_map_msgs and sensor_msgs importable, so:
 """
 
 import json
+import os
+import time
 
 import numpy as np
 import pytest
@@ -864,3 +866,116 @@ def test_an_unreadable_localisation_status_stops_fusing_rather_than_crashing(nod
     node._on_cloud(cloud(points_at(0.1, 0.1)))
     node._tick(now=0.0)
     assert node._tile_publisher.messages == []
+
+
+# -- startup_map --------------------------------------------------------
+#
+# These construct ElevationMapper directly rather than through the `node`
+# fixture, because the behaviour under test happens once, in __init__,
+# before there is a node to hand back. None of it ever writes to or
+# removes a saved map: 'latest' and a named load both only choose which
+# .npz to read, so a bug here can at worst start the rover from the wrong
+# map or an empty one - never lose one of the operator's saved files.
+
+
+def _writer(tmp_path):
+    """An ElevationMapper with Recorders in place, for building fixture
+    maps on disk exactly the way a live 'save' command would."""
+    writer = ElevationMapper(map_directory=str(tmp_path))
+    writer._tile_publisher = Recorder()
+    writer._obstacle_publisher = Recorder()
+    writer._status_publisher = Recorder()
+    return writer
+
+
+def test_with_no_startup_map_the_grid_is_empty_after_construction(node):
+    assert node._grid.snapshot() is None
+    assert node._loaded is None
+
+
+def test_a_named_startup_map_is_loaded_into_the_grid(ros, tmp_path):
+    writer = _writer(tmp_path)
+    writer._on_cloud(cloud(points_at(0.1, 0.1)))
+    writer._on_command(String(data='{"action":"save","name":"yard"}'))
+    writer.destroy_node()
+
+    node = ElevationMapper(map_directory=str(tmp_path), startup_map='yard')
+    try:
+        assert node._loaded == 'yard'
+        snapshot = node._grid.snapshot()
+        assert snapshot is not None
+        assert np.isfinite(snapshot.elevation).any()
+    finally:
+        node.destroy_node()
+
+
+def test_startup_map_latest_picks_the_most_recently_modified_file_not_the_alphabetically_last(ros, tmp_path):
+    writer = _writer(tmp_path)
+    writer._on_cloud(cloud(points_at(0.1, 0.1)))
+    writer._on_command(String(data='{"action":"save","name":"zzz"}'))
+    writer._on_cloud(cloud(points_at(5.0, 5.0)))
+    writer._on_command(String(data='{"action":"save","name":"aaa"}'))
+    writer.destroy_node()
+
+    # 'aaa' sorts before 'zzz', so a bug that used the alphabetically last
+    # name instead of the file's own mtime would pick 'zzz' here - the
+    # wrong one, once the timestamps below say otherwise.
+    now = time.time()
+    os.utime(str(tmp_path / 'zzz.npz'), (now - 100, now - 100))
+    os.utime(str(tmp_path / 'aaa.npz'), (now, now))
+
+    node = ElevationMapper(map_directory=str(tmp_path), startup_map='latest')
+    try:
+        assert node._loaded == 'aaa'
+    finally:
+        node.destroy_node()
+
+
+def test_startup_map_latest_with_an_empty_directory_is_an_empty_grid_not_an_error(ros, tmp_path):
+    node = ElevationMapper(map_directory=str(tmp_path), startup_map='latest')
+    try:
+        assert node._grid.snapshot() is None
+        assert node._loaded is None
+    finally:
+        node.destroy_node()
+
+
+def test_a_startup_map_that_does_not_exist_leaves_the_grid_empty_and_the_node_usable(ros, tmp_path):
+    node = ElevationMapper(map_directory=str(tmp_path), startup_map='does_not_exist')
+    try:
+        assert node._grid.snapshot() is None
+        assert node._loaded is None
+        # A missing map at start-up must never leave the node half-built:
+        # it still maps a live cloud exactly as it would have with no
+        # startup_map at all.
+        node._tile_publisher = Recorder()
+        node._obstacle_publisher = Recorder()
+        node._status_publisher = Recorder()
+        node._on_cloud(cloud(points_at(0.1, 0.1)))
+        node._tick(now=0.0)
+        assert node._tile_publisher.messages
+    finally:
+        node.destroy_node()
+
+
+def test_a_corrupt_startup_map_leaves_the_grid_empty_and_the_node_usable(ros, tmp_path):
+    writer = _writer(tmp_path)
+    writer._on_cloud(cloud(points_at(0.1, 0.1)))
+    writer._on_command(String(data='{"action":"save","name":"yard"}'))
+    writer.destroy_node()
+    path = tmp_path / 'yard.npz'
+    whole = path.read_bytes()
+    path.write_bytes(whole[:len(whole) // 2])
+
+    node = ElevationMapper(map_directory=str(tmp_path), startup_map='yard')
+    try:
+        assert node._grid.snapshot() is None
+        assert node._loaded is None
+        node._tile_publisher = Recorder()
+        node._obstacle_publisher = Recorder()
+        node._status_publisher = Recorder()
+        node._on_cloud(cloud(points_at(0.1, 0.1)))
+        node._tick(now=0.0)
+        assert node._tile_publisher.messages
+    finally:
+        node.destroy_node()
