@@ -13,7 +13,7 @@ import pytest
 from navi_autonomy.traversability import (
     CLIMB_LETHAL_M, DROP_LETHAL_M, LETHAL, MAX_SCALED_COST, RELATIVE_RADIUS_M,
     ROUGHNESS_REF_M, SLOPE_LETHAL_DEG, SLOPE_LETHAL_RAD, STEP_LETHAL_M, UNKNOWN,
-    clear_startup_patch, costmap_seed, derive, heal_goal_patch,
+    clear_startup_patch, costmap_seed, derive, ground_under, heal_goal_patch,
     height_relative_to, roughness_layer, seed_from_elevation, slope_layer,
     stamp_wheel_trail, step_layer, valid_layer)
 
@@ -585,3 +585,34 @@ def test_a_zero_relative_radius_reproduces_todays_output_byte_for_byte():
     _, cost_after = seed_from_elevation(grid, rover_z=0.0, rover_cell=(lo, lo),
                                         relative_radius_m=0.0)
     assert np.array_equal(cost_before, cost_after)
+
+
+# -- the reference ground comes from the map, not the pose ------------------
+
+def test_ground_under_reads_the_footprint_median_and_ignores_unseen_cells():
+    grid = np.zeros((21, 21), dtype=np.float32)
+    grid[10, 10] = np.nan                 # the cell under the hub, unseen
+    grid[10, 11] = 3.0                    # a noise spike under the belly
+
+    value = ground_under(grid, (10, 10), radius_cells=3)
+
+    # The median of the footprint is the flat ground, not the spike and
+    # not poisoned by the NaN.
+    assert value == pytest.approx(0.0)
+
+
+def test_ground_under_is_none_when_nothing_under_the_rover_is_mapped():
+    grid = np.full((11, 11), np.nan, dtype=np.float32)
+
+    assert ground_under(grid, (5, 5), radius_cells=2) is None
+
+
+def test_a_rover_straddling_a_rock_is_standing_beside_it_not_on_it():
+    # A maximum would lift the reference onto the rock, and every cell of
+    # ordinary ground would then read as a lethal drop.
+    grid = np.zeros((21, 21), dtype=np.float32)
+    grid[9:12, 9:12] = 0.30               # the rock under the belly
+
+    value = ground_under(grid, (10, 10), radius_cells=5)
+
+    assert value == pytest.approx(0.0)

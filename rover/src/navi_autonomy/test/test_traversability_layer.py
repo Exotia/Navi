@@ -604,3 +604,24 @@ def test_an_empty_frame_id_retracts_the_heal_disc(node):
     node._on_map(message)
 
     assert seed_of(node)[lo - 1, lo - 1] == LETHAL
+
+
+def test_a_drifted_pose_z_no_longer_walls_the_rover_in(node):
+    # The operator's "glitches under the ground": the ZED's z drifts
+    # against the very grid it built, and with the pose as the reference a
+    # rover standing on level mapped ground read every nearby cell as a
+    # lethal climb - route on screen, goal accepted, wheels never moving.
+    # The reference is the map's own ground under the footprint now, so
+    # the pose's z can say anything it likes.
+    flat = np.zeros((24, 24), dtype=np.float32)
+    message = build_grid_map({'elevation': flat}, -12, -12, 0.05, 'map', Time())
+    pose = Odometry()
+    pose.pose.pose.position.x = 0.0
+    pose.pose.pose.position.y = 0.0
+    pose.pose.pose.position.z = -5.0      # five metres under the ground
+
+    node._on_pose(pose)
+    node._on_map(message)
+
+    cost = seed_of(node)
+    assert (cost == LETHAL).sum() == 0

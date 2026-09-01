@@ -260,6 +260,41 @@ def derive(elevation, resolution: float = RESOLUTION) -> dict:
     }
 
 
+def ground_under(elevation, cell, radius_cells: int):
+    """The height of the ground the rover is standing on, read from the
+    map itself: the median of the seen cells within `radius_cells` of
+    `cell` - the footprint. None when nothing under the rover has been
+    mapped yet.
+
+    This exists because the pose's own z is the wrong reference for the
+    rover-relative test. The ZED's z drifts - 0.8 m in one measured night -
+    and it drifts against the very grid the test judges, so a drifted pose
+    makes level ground read as a climb and the rover walls itself in and
+    refuses to move ("glitches under the ground", in the operator's words,
+    which is exactly what it looks like). The map's height under the rover
+    cannot disagree with the map: wherever the frame drifts, it drifts with
+    both.
+
+    The median, deliberately not the maximum: the wheels stand on the
+    common ground, and a rover straddling a rock is standing beside it,
+    not on it - a maximum would lift the reference onto every rock and
+    noise spike under the belly, and everything else would then read as a
+    lethal drop.
+    """
+    grid = np.asarray(elevation)
+    rows, cols = grid.shape
+    row, col = int(cell[0]), int(cell[1])
+    offsets = _disc_offsets(radius_cells)
+    ry = offsets[:, 0] + row
+    rx = offsets[:, 1] + col
+    in_bounds = (ry >= 0) & (ry < rows) & (rx >= 0) & (rx < cols)
+    values = grid[ry[in_bounds], rx[in_bounds]]
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return None
+    return float(np.median(values))
+
+
 def height_relative_to(elevation, rover_z: float) -> np.ndarray:
     """Each cell's height above (positive) or below (negative) the ground
     the rover is standing on. NaN stays NaN.

@@ -64,7 +64,8 @@ from navi_autonomy.tile_aggregator import MAP_TOPIC, POSE_TOPIC, latched_qos
 from navi_autonomy.traversability import (CLIMB_LETHAL_M, DROP_LETHAL_M,
                                           RELATIVE_RADIUS_M, SLOPE_LETHAL_DEG,
                                           STEP_LETHAL_M, clear_startup_patch,
-                                          heal_goal_patch, seed_from_elevation,
+                                          ground_under, heal_goal_patch,
+                                          seed_from_elevation,
                                           stamp_wheel_trail)
 from navi_localization.elevation_grid import RESOLUTION
 
@@ -77,6 +78,11 @@ LAYER_ORDER = ('slope', 'step', 'roughness', 'valid')
 STARTUP_CLEAR_RADIUS_M = 0.90
 
 ACTIVE_GOAL_TOPIC = '/autonomy/active_goal'
+
+# The disc the rover's reference ground is read from: the footprint's
+# inscribed circle, the same 0.445 m the wheel trail is bounded by - ground
+# the chassis is provably over right now.
+FOOTPRINT_RADIUS_M = 0.44
 
 # Radius of the free disc forced around the active goal. 1.4 m, the
 # operator's number: wide enough to swallow a goal that landed inside a
@@ -423,10 +429,20 @@ class TraversabilityLayer(Node):
             # Per-tick conversion, never cached, same as the startup patch
             # and the goal heal just below: the rolling window's origin
             # moves under it even though the pose itself has not changed.
-            x, y, z = self._current_pose
-            rover_z = z
+            x, y, _pose_z = self._current_pose
             rover_cell = (int(round(y / resolution)) - origin_iy,
                          int(round(x / resolution)) - origin_ix)
+            # The reference ground is read from THIS map, never from the
+            # pose's z: the ZED's z drifts against the grid it built, and a
+            # drifted reference turns level ground into a lethal climb ring
+            # around the rover - route on screen, goal accepted, wheels
+            # never move. See ground_under for the full argument. When the
+            # ground under the rover is unmapped there is no reference and
+            # the rover-relative test simply sits this tick out - the step,
+            # drop and slope layers still guard on their own.
+            rover_z = ground_under(
+                elevation, rover_cell,
+                int(round(FOOTPRINT_RADIUS_M / resolution)))
 
         layers, cost = seed_from_elevation(
             elevation, resolution,
