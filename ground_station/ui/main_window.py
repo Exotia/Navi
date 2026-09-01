@@ -327,6 +327,8 @@ class MainWindow(QMainWindow):
         )
         self.dashboard_page.video_panel.stream_requested.connect(self._on_stream_requested)
         self.dashboard_page.mode_changed.connect(self._on_mode_changed)
+        self.dashboard_page.speed_card.speed_changed.connect(
+            self.gamepad_reader.set_max_linear_speed)
 
         row = self.dashboard_page.map_row
         row.save_requested.connect(lambda name: self._send_map_command("save", name))
@@ -1083,6 +1085,12 @@ class MainWindow(QMainWindow):
         # so it is no longer hidden by the nav row's own visibility and has
         # to be switched with it.
         self.dashboard_page.waypoint_panel.setVisible(mode == "autonomous")
+        # Manual and semi-autonomous are the views where a human holds the
+        # sticks, so they are where the top speed is set. The cap itself is
+        # not mode-gated - it lives on the gamepad reader and keeps whatever
+        # it was last set to - because a cap that reset itself on a view
+        # change would be a speed change nobody asked for.
+        self.dashboard_page.speed_card.setVisible(mode in ("manual", "semi_auto"))
         # The drive row is not mode-gated - see the setVisible(True) call in
         # __init__: the gamepad drives in every mode, so STOP and the
         # deadman/lease line must stay visible in every mode too.

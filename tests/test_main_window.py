@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 from time import monotonic
 
+import pytest
+
 from ground_station import theme
 from ground_station.landmark_table import load_landmark_table
 from ground_station.models import Waypoint, new_run_id, parse_path_summary, parse_sightings
@@ -90,6 +92,8 @@ class FakeGamepadReader:
     def __init__(self, connected: bool = False, twist: tuple = (0.0, 0.0, 0.0)):
         self._connected = connected
         self._twist = twist
+        #: Every top speed the window has asked for, in order.
+        self.max_linear_speeds = []
 
     def poll(self) -> bool:
         return self._connected
@@ -102,6 +106,9 @@ class FakeGamepadReader:
 
     def set_twist(self, twist: tuple) -> None:
         self._twist = twist
+
+    def set_max_linear_speed(self, speed: float) -> None:
+        self.max_linear_speeds.append(speed)
 
 
 def make_fake_client_factory():
@@ -1633,3 +1640,37 @@ def test_pressing_camera_restarted_twice_re_expresses_exactly_once(qtbot):
 
     assert window._site_transform == once
     assert once == reexpress_at_lock_pose(transform, 0.5, -0.3, 0.1)
+
+
+def test_the_speed_slider_reaches_the_gamepad_reader(qtbot):
+    reader = FakeGamepadReader()
+    window, _ = make_window(qtbot, gamepad_reader=reader)
+
+    window.dashboard_page.speed_card.slider.setValue(25)
+
+    assert reader.max_linear_speeds == [pytest.approx(0.25)]
+
+
+def test_the_speed_slider_is_shown_in_the_two_hand_driven_views(qtbot):
+    window, _ = make_window(qtbot)
+    card = window.dashboard_page.speed_card
+
+    for mode, shown in (("manual", True), ("semi_auto", True),
+                        ("autonomous", False), ("simulation", False)):
+        window._on_mode_changed(mode)
+        assert card.isVisibleTo(window.dashboard_page) is shown, mode
+
+
+def test_the_speed_cap_survives_a_view_change(qtbot):
+    # The slider is hidden in autonomy, but hiding a control must not undo
+    # what it set: the gamepad still drives there, and a cap that reset
+    # itself would be a speed change nobody asked for.
+    reader = FakeGamepadReader()
+    window, _ = make_window(qtbot, gamepad_reader=reader)
+    window.dashboard_page.speed_card.slider.setValue(25)
+
+    window._on_mode_changed("autonomous")
+    window._on_mode_changed("manual")
+
+    assert reader.max_linear_speeds == [pytest.approx(0.25)]
+    assert window.dashboard_page.speed_card.speed == pytest.approx(0.25)

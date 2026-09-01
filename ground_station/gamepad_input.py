@@ -22,6 +22,19 @@ DEADZONE = 0.15
 MAX_LINEAR_SPEED = 0.05  # m/s at full stick deflection - deliberately 1/10 of the 0.5 the drive train can take, for the first careful hardware sessions
 MAX_ANGULAR_SPEED = 0.1  # rad/s at full stick deflection - same 1/10 caution factor
 
+#: What the speed slider may ask for. The floor is slower than the default
+#: (there are days when 5 cm/s is still too fast to park with); the ceiling
+#: is the 0.5 m/s the drive train takes, which the default deliberately
+#: sits a tenth of.
+MIN_SETTABLE_LINEAR_SPEED = 0.02
+MAX_SETTABLE_LINEAR_SPEED = 0.50
+
+#: Turning rate per unit of top speed, from the pair of constants above.
+#: The slider sets one number; this keeps the other in the same proportion,
+#: so raising the speed does not quietly leave the rover turning at the
+#: crawl rate that was chosen to match 0.05 m/s.
+ANGULAR_PER_LINEAR = MAX_ANGULAR_SPEED / MAX_LINEAR_SPEED
+
 
 def _apply_deadzone(value: float, deadzone: float = DEADZONE) -> float:
     # Rescaled, not a hard cutoff: the live [deadzone..1] range maps back
@@ -38,6 +51,12 @@ class GamepadReader:
     def __init__(self, pygame_module=_pygame):
         self._pygame = pygame_module
         self._joystick = None
+        # Per-reader, not module constants, because the operator sets this
+        # from the speed slider at run time. It starts at the cautious
+        # default, so a session that never touches the slider drives
+        # exactly as it did before the slider existed.
+        self.max_linear_speed = MAX_LINEAR_SPEED
+        self.max_angular_speed = MAX_ANGULAR_SPEED
         self._pygame.init()
         self._pygame.joystick.init()
         # pygame's SDL backend installs its own SIGINT/SIGTERM handlers as a
@@ -72,8 +91,16 @@ class GamepadReader:
         # pygame reports stick-forward and stick-left as negative axis
         # values; ROS convention (REP-103) is +x forward, +y left,
         # +angular_z counter-clockwise - hence the negation below.
-        linear_x = -raw_y * MAX_LINEAR_SPEED
-        linear_y = -raw_x * MAX_LINEAR_SPEED
-        angular_z = -raw_rot * MAX_ANGULAR_SPEED
+        linear_x = -raw_y * self.max_linear_speed
+        linear_y = -raw_x * self.max_linear_speed
+        angular_z = -raw_rot * self.max_angular_speed
 
         return (linear_x, linear_y, angular_z)
+
+    def set_max_linear_speed(self, speed: float) -> None:
+        """Top speed at full stick deflection, in m/s, clamped to the
+        settable range. The turning rate follows in proportion."""
+        speed = max(MIN_SETTABLE_LINEAR_SPEED,
+                    min(MAX_SETTABLE_LINEAR_SPEED, float(speed)))
+        self.max_linear_speed = speed
+        self.max_angular_speed = speed * ANGULAR_PER_LINEAR

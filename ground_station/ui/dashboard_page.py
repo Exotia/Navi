@@ -9,6 +9,7 @@ from ground_station.ui.map_row import MapRow
 from ground_station.ui.nav_row import NavRow
 from ground_station.ui.node_list_widget import NodeListWidget
 from ground_station.ui.site_card import SiteCard
+from ground_station.ui.speed_card import SpeedCard
 from ground_station.ui.video_panel import VideoPanel
 
 
@@ -119,10 +120,18 @@ class DashboardPage(QWidget):
         # but autonomy) an unbounded card stretched the wheels across the
         # whole window with the diagram marooned in the middle.
         self.drive_card.setMaximumWidth(260)
+        # Beside the wheels, because it is the other half of the same
+        # question: the wheels say which way, this says how fast. Shown in
+        # the two hand-driven views only (MainWindow._on_mode_changed) -
+        # in autonomy the speed is Nav2's, not a slider's.
+        self.speed_card = SpeedCard()
+        self.speed_card.setMaximumHeight(self.BOTTOM_CARD_HEIGHT)
+        self.speed_card.setMaximumWidth(320)
         bottom = QHBoxLayout()
         bottom.setSpacing(8)
         bottom.addWidget(self.waypoint_panel, stretch=1)
         bottom.addStretch()
+        bottom.addWidget(self.speed_card)
         bottom.addWidget(self.drive_card)
 
         left = QVBoxLayout()

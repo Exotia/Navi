@@ -1,6 +1,11 @@
 import signal
 
-from ground_station.gamepad_input import GamepadReader, MAX_LINEAR_SPEED, MAX_ANGULAR_SPEED
+import pytest
+
+from ground_station.gamepad_input import (GamepadReader, MAX_LINEAR_SPEED,
+                                          MAX_ANGULAR_SPEED, ANGULAR_PER_LINEAR,
+                                          MIN_SETTABLE_LINEAR_SPEED,
+                                          MAX_SETTABLE_LINEAR_SPEED)
 
 
 class FakeJoystick:
@@ -142,3 +147,72 @@ def test_the_deadzone_rescales_instead_of_stepping():
     stick._axis_values[1] = half_way
     linear_x, _, _ = reader.read_twist()
     assert abs(linear_x - 0.5 * MAX_LINEAR_SPEED) < 1e-9
+
+
+def _reader_with_full_forward_stick():
+    """A reader whose left stick is pushed fully forward (pygame reports
+    stick-forward as -1.0), everything else centred."""
+    fake_pygame = FakePygame()
+    reader = GamepadReader(pygame_module=fake_pygame)
+    fake_pygame.joystick.plug_in(0, FakeJoystick({0: 0.0, 1: -1.0, 2: 0.0, 3: -1.0}))
+    reader.poll()
+    return reader
+
+
+def test_a_fresh_reader_drives_at_the_cautious_default():
+    reader = _reader_with_full_forward_stick()
+
+    linear_x, _, angular_z = reader.read_twist()
+
+    assert linear_x == MAX_LINEAR_SPEED
+    assert angular_z == MAX_ANGULAR_SPEED
+
+
+def test_the_slider_raises_the_top_speed():
+    reader = _reader_with_full_forward_stick()
+
+    reader.set_max_linear_speed(0.30)
+
+    linear_x, _, _ = reader.read_twist()
+    assert linear_x == pytest.approx(0.30)
+
+
+def test_turning_rate_keeps_the_proportion_it_was_written_in():
+    # Raising the speed must not leave the rover turning at the crawl rate
+    # that was chosen to match 0.05 m/s.
+    reader = _reader_with_full_forward_stick()
+
+    reader.set_max_linear_speed(0.30)
+
+    _, _, angular_z = reader.read_twist()
+    assert angular_z == pytest.approx(0.30 * ANGULAR_PER_LINEAR)
+    assert angular_z == pytest.approx(0.60)
+
+
+def test_a_speed_above_the_drive_train_is_clamped_not_obeyed():
+    reader = _reader_with_full_forward_stick()
+
+    reader.set_max_linear_speed(99.0)
+
+    linear_x, _, _ = reader.read_twist()
+    assert linear_x == pytest.approx(MAX_SETTABLE_LINEAR_SPEED)
+
+
+def test_a_speed_below_the_floor_is_clamped_to_the_floor():
+    reader = _reader_with_full_forward_stick()
+
+    reader.set_max_linear_speed(0.0)
+
+    linear_x, _, _ = reader.read_twist()
+    assert linear_x == pytest.approx(MIN_SETTABLE_LINEAR_SPEED)
+
+
+def test_a_centred_stick_is_still_zero_at_the_highest_setting():
+    fake_pygame = FakePygame()
+    reader = GamepadReader(pygame_module=fake_pygame)
+    fake_pygame.joystick.plug_in(0, FakeJoystick({i: 0.0 for i in range(4)}))
+    reader.poll()
+
+    reader.set_max_linear_speed(MAX_SETTABLE_LINEAR_SPEED)
+
+    assert reader.read_twist() == (0.0, 0.0, 0.0)

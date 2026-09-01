@@ -102,7 +102,13 @@ controller_server:
       plugin: "nav2_controller::PoseProgressChecker"
       required_movement_radius: 0.25
       required_movement_angle: 0.20
-      movement_time_allowance: 45.0
+      # 60 s, raised from 45: in open ground the planner needs longer to
+      # find a way through than the checker was willing to sit still for.
+      # The controller keeps a stationary rover for as long as planning
+      # takes, and that stillness is indistinguishable from being stuck -
+      # so the allowance has to cover the worst planning pause, not the
+      # typical one, or a wide-open run aborts while it is still thinking.
+      movement_time_allowance: 60.0
     general_goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
