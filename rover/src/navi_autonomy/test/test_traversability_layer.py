@@ -794,3 +794,36 @@ def test_the_coarse_seed_is_half_resolution_and_never_freer_than_the_fine_one(no
         coarse.info.height, coarse.info.width)
     assert (fine_grid == LETHAL).any()
     assert (coarse_grid == LETHAL).any()
+
+
+def test_unseen_ground_is_affordable_to_the_global_planner_and_sacred_to_the_local_one(node):
+    # Live, an 11 m route through unseen ground lost to a 20 m loop through
+    # mapped-free ground, because unknown reaches the planner at
+    # near-maximum cost. The coarse seed prices it as merely costly - turn
+    # around and discover - while the fine seed keeps true unknown, because
+    # the last metres must never treat unseen ground as ordinary.
+    grid = np.zeros((10, 10), dtype=np.float32)
+    grid[6:, :] = np.nan
+    node._on_map(build_grid_map({'elevation': grid}, 0, 0, 0.05, 'map', Time()))
+
+    fine = seed_of(node)
+    coarse_msg = node._coarse_seed_publisher.messages[-1]
+    coarse = np.asarray(coarse_msg.data, dtype=np.int8).reshape(
+        coarse_msg.info.height, coarse_msg.info.width)
+
+    assert (fine == UNKNOWN).any()
+    assert (coarse == UNKNOWN).sum() == 0
+    assert (coarse == 25).any()
+
+
+def test_zero_unknown_plan_cost_keeps_unknown_unknown_everywhere(node):
+    node._unknown_plan_cost = 0.0
+    grid = np.zeros((10, 10), dtype=np.float32)
+    grid[6:, :] = np.nan
+    node._on_map(build_grid_map({'elevation': grid}, 0, 0, 0.05, 'map', Time()))
+
+    coarse_msg = node._coarse_seed_publisher.messages[-1]
+    coarse = np.asarray(coarse_msg.data, dtype=np.int8).reshape(
+        coarse_msg.info.height, coarse_msg.info.width)
+
+    assert (coarse == UNKNOWN).any()

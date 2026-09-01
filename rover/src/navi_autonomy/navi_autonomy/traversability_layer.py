@@ -175,6 +175,19 @@ class TraversabilityLayer(Node):
         # age_s layer arrives from the aggregator; a map without it (an
         # old publisher mid-deploy) decays nothing.
         self.declare_parameter('observation_decay_s', 45.0)
+        # What UNKNOWN costs the GLOBAL planner, on the coarse seed only.
+        # Unknown is passable (allow_unknown) but arrives at the planner as
+        # near-maximum cost, so a short route through unseen ground loses
+        # to a long loop through mapped-free ground - live, the rover drove
+        # from 11 m away to 20 m away rather than turn around and let the
+        # camera reveal the direct path the operator could see. 25 prices
+        # a metre of unseen ground at about a quarter of a lethal-adjacent
+        # one: worth exploring when meaningfully shorter, still worth
+        # avoiding when known ground costs nothing extra. The LOCAL seed
+        # keeps true unknown - the last metres must never treat unseen
+        # ground as ordinary. 0 disables. Decay makes this matter more:
+        # forgotten ground is unknown ground.
+        self.declare_parameter('unknown_plan_cost', 25)
         # 35 degrees by default, not the spec's 25 - see
         # traversability.SLOPE_LETHAL_DEG for the tipping arithmetic behind
         # it. Retunable like the step limit, and for the same reason: the
@@ -220,6 +233,8 @@ class TraversabilityLayer(Node):
             self.get_parameter('rover_heal_radius_m').value)
         self._observation_decay_s = float(
             self.get_parameter('observation_decay_s').value)
+        self._unknown_plan_cost = float(
+            self.get_parameter('unknown_plan_cost').value)
         self._slope_lethal_deg = float(
             self.get_parameter('slope_lethal_deg').value)
         self._slope_fit_radius_m = float(
@@ -318,6 +333,7 @@ class TraversabilityLayer(Node):
         'goal_heal_radius_m': '_goal_heal_radius_m',
         'rover_heal_radius_m': '_rover_heal_radius_m',
         'observation_decay_s': '_observation_decay_s',
+        'unknown_plan_cost': '_unknown_plan_cost',
         'startup_clear_radius_m': '_startup_clear_radius_m',
         'slope_lethal_deg': '_slope_lethal_deg',
         'slope_fit_radius_m': '_slope_fit_radius_m',
@@ -572,8 +588,11 @@ class TraversabilityLayer(Node):
         # dropped rather than padded (a half-cell of window edge, nothing
         # more), and the origin floors to the coarse lattice, at worst a
         # 0.05 m shift the 0.10 m planner cannot resolve anyway.
+        coarse = coarsen_cost(cost)
+        if self._unknown_plan_cost > 0.0:
+            coarse[coarse == UNKNOWN] = np.int8(round(self._unknown_plan_cost))
         self._coarse_seed_publisher.publish(build_occupancy_grid(
-            coarsen_cost(cost), origin_ix // 2, origin_iy // 2,
+            coarse, origin_ix // 2, origin_iy // 2,
             resolution * 2.0, self._frame_id, stamp))
         if self._traversability_subscribers() > 0:
             grid_map = build_grid_map(
