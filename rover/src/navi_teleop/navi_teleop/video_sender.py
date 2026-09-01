@@ -45,6 +45,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+from time import monotonic
 from pathlib import Path
 
 import rclpy
@@ -98,6 +99,15 @@ class VideoSender(Node):
         # known, so enabling it only records the request.
         self._pending: VideoRequest | None = None
         self._frame_bytes = 0
+        # The fps gate: 0 means "feed every frame" (the camera's own rate
+        # is the request's rate); set by _start_pipe_stream when the
+        # request asks for less than the camera delivers.
+        self._frame_period_s = 0.0
+        self._last_fed_t = None
+        # NOT self._clock: rclpy.node.Node already owns that name and its
+        # timers dereference it - the same trap goal_relay.py and
+        # mode_supervisor.py already document.
+        self._now = monotonic
         # Created only while a stream is wanted - see _subscribe_to_images.
         self._image_subscription = None
 
@@ -232,6 +242,18 @@ class VideoSender(Node):
                 return
         if self._state != 'streaming' or self._process is None:
             return
+        if self._frame_period_s > 0.0:
+            # The camera publishes at its own rate; the request's fps is a
+            # CEILING, honoured by dropping frames here rather than by
+            # asking the camera to slow down (its rate also gates the pose,
+            # which the controller needs at full speed). The pipeline's
+            # rawvideoparse is told the request's fps, so the fed rate must
+            # actually match it or every timestamp in the stream drifts.
+            now = self._now()
+            if (self._last_fed_t is not None
+                    and now - self._last_fed_t < self._frame_period_s):
+                return
+            self._last_fed_t = now
         if len(msg.data) != self._frame_bytes:
             # A torn frame would desynchronise every frame after it.
             self.get_logger().warn(
@@ -275,6 +297,11 @@ class VideoSender(Node):
             return
 
         self._frame_bytes = width * height * bytes_per_pixel(encoding)
+        # Slightly under the nominal period, so a camera delivering at
+        # exactly the requested rate is never half-dropped by scheduling
+        # jitter - the gate is a ceiling, not a metronome.
+        self._frame_period_s = (0.95 / float(request.fps)) if request.fps > 0 else 0.0
+        self._last_fed_t = None
         self.get_logger().info(
             f"streaming {width}x{height} to {request.host}:{request.port}")
         self._set_state('streaming', f"{request.host}:{request.port} {width}x{height}")

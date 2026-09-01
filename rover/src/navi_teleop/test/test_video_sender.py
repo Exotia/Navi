@@ -472,3 +472,43 @@ def test_the_v4l2_streaming_detail_names_the_frame_size_like_the_zed_path(sender
                                "width": 1344, "height": 376}))
     assert node._state == 'streaming'
     assert node._detail.endswith(" 672x376"), node._detail
+
+
+def test_the_requested_fps_is_a_ceiling_honoured_by_dropping_frames():
+    # The pipeline's rawvideoparse is told the request's fps, so the fed
+    # rate must actually match it - a 15 Hz camera poured into a pipeline
+    # declared at 7 would drift every timestamp in the stream.
+    node, launcher = make_node()
+    node._on_request(request())
+    node._on_image(image())                       # starts the stream
+    node._now = lambda: 100.0
+    node._last_fed_t = None
+    process = launcher.process
+    fed_before = len(process.written)
+
+    node._on_image(image())                       # t=100.0, fed
+    node._on_image(image())                       # same instant, dropped
+    node._now = lambda: 100.0 + 1.0 / 15.0
+    node._on_image(image())                       # one 15 Hz period on, fed
+
+    assert len(process.written) == fed_before + 2
+
+
+def test_a_camera_at_the_requested_rate_is_never_half_dropped():
+    # The gate is 0.95 of the period, so scheduling jitter on a camera
+    # delivering at exactly the requested rate cannot alias into dropping
+    # every second frame.
+    node, launcher = make_node()
+    node._on_request(request())
+    node._on_image(image())
+    process = launcher.process
+    fed_before = len(process.written)
+    t = [200.0]
+    node._now = lambda: t[0]
+    node._last_fed_t = None
+
+    for _ in range(10):
+        node._on_image(image())
+        t[0] += 1.0 / 15.0
+
+    assert len(process.written) == fed_before + 10

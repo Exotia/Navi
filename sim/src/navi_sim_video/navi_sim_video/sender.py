@@ -50,7 +50,10 @@ class SimVideoSender(Node):
         self.declare_parameter("port", 5601)
         self.declare_parameter("width", 672)
         self.declare_parameter("height", 376)
-        self.declare_parameter("fps", 30)
+        # Keep this equal to the chase camera's update_rate in
+        # asterope_sim.urdf.xacro: rawvideoparse is told this number and
+        # every timestamp in the stream drifts if the camera disagrees.
+        self.declare_parameter("fps", 7)
         self.declare_parameter("bitrate_kbps", 800)
 
         argv = build_send_pipeline(

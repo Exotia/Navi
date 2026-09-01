@@ -26,7 +26,14 @@
 
   <gazebo reference="chase_camera_link">
     <sensor type="camera" name="chase_camera">
-      <update_rate>30.0</update_rate>
+      <!-- 7, down from 30: this camera exists so an operator can watch an
+           autonomous run, and a 0.2 m/s rover does not change between
+           sevenths of a second. Every frame here is a full Gazebo render
+           plus an encode on the same laptop that runs the ground station -
+           at 30 it was the most expensive picture nobody needed. Keep it
+           equal to the sim_video_sender's fps parameter: the encoder's
+           rawvideoparse is told that number and drifts if they disagree. -->
+      <update_rate>7.0</update_rate>
       <camera>
         <horizontal_fov>1.2</horizontal_fov>
         <!-- 672x376 matches what the rover streams, so the ground station
