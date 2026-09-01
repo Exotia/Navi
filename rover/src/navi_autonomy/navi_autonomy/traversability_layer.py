@@ -257,6 +257,13 @@ class TraversabilityLayer(Node):
         if pending:
             self.get_logger().info(
                 "retuned: " + ", ".join(f"{a.lstrip('_')}={v}" for a, v in pending))
+            # Announced here rather than only on the /autonomy/tuning path,
+            # because this callback is where EVERY change arrives - a
+            # `ros2 param set` from a terminal on the rover included. The
+            # state topic is what the ground station's panel shows as the
+            # rover's own value, and a panel showing a number the rover
+            # stopped using is worse than a panel showing nothing.
+            self._publish_tuning_state()
         return SetParametersResult(successful=True)
 
     def _warn_about_tuning(self, reason: str, message: str) -> None:
@@ -316,8 +323,9 @@ class TraversabilityLayer(Node):
         # validated path that already exists (_on_set_parameters above),
         # and it is what keeps `ros2 param get` telling the truth about
         # what the node is actually using.
+        # The state announcement rides on _on_set_parameters, which every
+        # one of these lands in, so there is nothing to publish here.
         self.set_parameters(parameters)
-        self._publish_tuning_state()
 
     def _publish_tuning_state(self) -> None:
         """All six live values, latched so a ground station connecting

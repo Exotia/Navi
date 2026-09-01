@@ -474,3 +474,28 @@ def test_the_state_topic_is_republished_after_an_accepted_change(node):
     # Built from the node's own attributes, not from the message: every
     # other value in the same publish is what the node is actually using.
     assert payload['slope_lethal_deg'] == pytest.approx(node._slope_lethal_deg)
+
+
+def test_a_retune_from_a_terminal_is_announced_like_one_from_the_ground_station(node):
+    # `ros2 param set` on the rover reaches _on_set_parameters and nothing
+    # else, so if the state announcement lived only on the tuning topic the
+    # ground station's panel would keep showing a number the rover had
+    # stopped using - and that panel exists to be believed.
+    node._tuning_state_publisher.messages.clear()
+
+    node._on_set_parameters(
+        [Parameter('step_lethal_m', Parameter.Type.DOUBLE, 0.31)])
+
+    assert len(node._tuning_state_publisher.messages) == 1
+    published = json.loads(node._tuning_state_publisher.messages[-1].data)
+    assert published['step_lethal_m'] == pytest.approx(0.31)
+
+
+def test_a_refused_retune_announces_nothing(node):
+    node._tuning_state_publisher.messages.clear()
+
+    result = node._on_set_parameters(
+        [Parameter('step_lethal_m', Parameter.Type.DOUBLE, -1.0)])
+
+    assert result.successful is False
+    assert node._tuning_state_publisher.messages == []
