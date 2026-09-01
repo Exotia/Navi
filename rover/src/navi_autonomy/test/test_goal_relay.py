@@ -20,6 +20,7 @@ ActionClientNav2Goals and the fake server below.
 import json
 import math
 import os
+import pathlib
 
 os.environ.setdefault("ROS_DOMAIN_ID", "94")   # throwaway; never the rover's
 
@@ -603,3 +604,60 @@ def test_a_detour_result_arriving_after_an_abort_does_not_send_a_new_goal(graph_
     spin(executor, 0.5)
 
     assert len(server.received_goals) == sent_before
+
+
+def test_a_detour_that_outlasts_its_budget_is_abandoned_for_the_real_waypoint(graph_factory):
+    # Live, one tack ran 141 seconds before the operator took over. A detour
+    # is an optimisation, and an optimisation that outlasts the thing it
+    # optimises is a fault.
+    executor, relay, server, task, clock, statuses, summaries = graph_factory()
+    relay._glare_side = "left"
+    relay._rover_xy = (0.0, 0.0)
+    relay._glare_detour_timeout_s = 0.5
+    relay._on_mode_status(mode("autonomous"))
+    relay._on_nav_request(go())
+    spin(executor, 2.0)
+    detour_goal = server.received_goals[0]
+
+    relay._detour_started_at = relay._now() - 5.0
+    relay._tick()
+    spin(executor, 2.0)
+
+    assert len(server.received_goals) == 2
+    real = server.received_goals[-1]
+    assert real.pose.pose.position.x == pytest.approx(3.0)
+    assert real.pose.pose.position.y == pytest.approx(-1.5)
+    assert real.pose.pose.position.x != detour_goal.pose.pose.position.x
+
+
+def test_a_detour_within_its_budget_is_left_alone(graph_factory):
+    executor, relay, server, task, clock, statuses, summaries = graph_factory()
+    relay._glare_side = "left"
+    relay._rover_xy = (0.0, 0.0)
+    relay._on_mode_status(mode("autonomous"))
+    relay._on_nav_request(go())
+    spin(executor, 2.0)
+
+    relay._tick()
+    spin(executor, 0.5)
+
+    assert len(server.received_goals) == 1
+
+
+def test_a_detour_writes_its_progress_to_the_diary(graph_factory):
+    # The diary went silent for the whole 141 second tack, so the operator
+    # could not tell a moving rover from a stuck one.
+    executor, relay, server, task, clock, statuses, summaries = graph_factory()
+    # A ride has to be open before the diary accepts anything - it holds
+    # rides, not idle chatter.
+    relay._glare_side = "left"
+    relay._rover_xy = (0.0, 0.0)
+    relay._on_mode_status(mode("autonomous"))
+    relay._on_nav_request(go())
+    spin(executor, 2.0)
+
+    relay._on_detour_feedback(4.2, 0.0)
+
+    written = pathlib.Path(relay._runlog._path).read_text()
+    assert "detour_feedback" in written
+    assert "4.20 m to the detour point" in written

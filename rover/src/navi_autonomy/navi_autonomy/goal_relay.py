@@ -47,6 +47,9 @@ from navi_autonomy.nav2_goals import ActionClientNav2Goals
 from navi_autonomy.task_control import NaviRpcTaskControl
 
 TICK_HZ = 5.0
+# How often a detour's progress is written to the ride diary. The feedback
+# itself arrives far faster than anything an operator reads afterwards.
+DETOUR_LOG_PERIOD_S = 5.0
 STATUS_HZ = 2.0
 PLAN_HZ = 2.0
 
@@ -92,6 +95,12 @@ class GoalRelay(Node):
         self.declare_parameter("glare_detour_offset_m", 2.0)
         self.declare_parameter("glare_detour_along_fraction", 0.5)
         self.declare_parameter("glare_detour_max_per_leg", 4)
+        # A detour that cannot be reached must not cost the run. Live, one
+        # ran for 141 seconds before the operator gave up and took over: a
+        # tack is an optimisation, and an optimisation that outlasts the
+        # thing it optimises is a fault. When this expires the detour is
+        # abandoned and the real waypoint is driven at directly.
+        self.declare_parameter("glare_detour_timeout_s", 30.0)
 
         # NOT self._clock: rclpy.node.Node already owns that name (see
         # mode_supervisor.py's identical note).
@@ -124,6 +133,11 @@ class GoalRelay(Node):
         self._glare_side = None
         self._rover_xy = None            # (x, y) from /localization/pose, or None before the first one
         self._real_goal = None           # (index, x, y, yaw) of the waypoint currently in play
+        self._glare_detour_timeout_s = float(
+            self.get_parameter("glare_detour_timeout_s").value)
+        # When the detour currently in flight was dispatched, or None when
+        # the goal in flight is the real waypoint.
+        self._detour_started_at = None
 
         self._runlog = RunLog(str(self.get_parameter("run_log_path").value))
         # What was last written to the diary, so only CHANGES land there:
@@ -346,10 +360,12 @@ class GoalRelay(Node):
             f"({px:.2f}, {py:.2f}) [detour {self._planner.detours_taken}/"
             f"{self._glare_detour_max_per_leg}]")
         self._publish_active_goal(px, py)
+        self._detour_started_at = self._now()
         self._nav2.send_goal(px, py, None, self._on_detour_succeeded,
                              self._on_detour_failed, self._on_detour_feedback)
 
     def _send_real_goal(self):
+        self._detour_started_at = None
         index, x, y, yaw = self._real_goal
         yaw_txt = "free (+x)" if yaw is None else f"{yaw:.2f}"
         self._runlog.event(
@@ -396,14 +412,58 @@ class GoalRelay(Node):
         return self._real_goal is not None and self._run.state == rules.RUNNING
 
     def _on_detour_feedback(self, distance_remaining, eta_s):
-        # Deliberately not forwarded to nav_run: this is progress toward a
-        # detour point, not toward the real waypoint, and _run.on_feedback
-        # would report a wrong distance/eta on the status line if it were.
-        pass
+        """Not forwarded to nav_run - this is progress toward a detour
+        point, not toward the real waypoint, and _run.on_feedback would put
+        a wrong distance and eta on the status line.
+
+        It IS written to the ride diary, every few seconds. Without this the
+        diary went silent for the whole detour: the 141 second tack that
+        prompted the timeout above left no record at all of whether the
+        rover was moving, which is the one question an operator watching a
+        stationary rover actually has.
+        """
+        try:
+            started = self._detour_started_at
+            elapsed = 0.0 if started is None else self._now() - started
+            # RunLog's own throttle, not a second one kept here: feedback
+            # arrives far faster than anything read afterwards, and the
+            # diary already knows how to thin a tag.
+            self._runlog.event(
+                "detour_feedback",
+                f"{distance_remaining:.2f} m to the detour point, "
+                f"{elapsed:.0f}s of {self._glare_detour_timeout_s:.0f}s",
+                throttle_s=DETOUR_LOG_PERIOD_S)
+        except Exception as exc:                      # noqa: BLE001
+            self.get_logger().error(f"detour feedback callback failed: {exc!r}")
+
+    def _abandon_detour_if_stale(self) -> None:
+        """Give up on a detour that has outlasted its budget and drive at
+        the real waypoint instead.
+
+        Checked on the tick rather than on feedback, because a detour that
+        has stopped producing feedback at all is exactly the case this
+        exists to escape.
+        """
+        if self._detour_started_at is None or self._glare_detour_timeout_s <= 0.0:
+            return
+        if not self._leg_still_live():
+            return
+        if self._now() - self._detour_started_at < self._glare_detour_timeout_s:
+            return
+        self._runlog.event(
+            "detour_result",
+            f"ABANDONED after {self._glare_detour_timeout_s:.0f}s - "
+            "driving at the real waypoint")
+        # Cancel clears the stored callbacks, so the detour's own result
+        # reaches nobody and cannot re-enter _advance_toward_real_goal
+        # behind this.
+        self._nav2.cancel("detour timed out")
+        self._send_real_goal()
 
     # -- timers ---------------------------------------------------------------
     def _tick(self):
         try:
+            self._abandon_detour_if_stale()
             state = self._task.coordinator_state()
             if state != self._logged_coord:
                 self._logged_coord = state
