@@ -80,8 +80,19 @@ class ShaperConfig:
     icr_fidelity_tol_rad: float = 0.10
     #: Section 10 caps, as a backstop. The smoother and gamepad_input.py own
     #: these numbers; this is where a misconfigured one is caught.
-    backstop_max_vx: float = 0.2
-    backstop_max_wz: float = 0.2
+    #:
+    #: The drive train's own limits, not a policy: 0.5 m/s is what the
+    #: chassis takes, and 1.0 rad/s is the turning rate that matches it in
+    #: the proportion gamepad_input.py is written in. They used to be 0.2
+    #: and 0.2 - the speed the rover was being driven at during the first
+    #: careful sessions - which silently made the ground station's speed
+    #: slider do nothing above 0.2 m/s: the slider raised the command, this
+    #: scaled it straight back down, and the operator saw no change. A
+    #: backstop set to today's working speed cannot tell "misconfigured"
+    #: from "faster than yesterday". Nav2 is unaffected: its own controller
+    #: limits (nav2_rover.yaml) still cap autonomous driving at 0.2 m/s.
+    backstop_max_vx: float = 0.5
+    backstop_max_wz: float = 1.0
     #: A gap longer than this means the chassis has settled whatever it was
     #: doing; drop any hold rather than carrying a stale one across a dropout.
     max_dt_s: float = 1.0

@@ -263,3 +263,29 @@ def test_diagnostics_report_the_straight_line_bias():
     # diagnostic whose job is to say "this is not zero".
     assert out.straight_bias_rad_s == pytest.approx(0.00507, abs=1e-4)
     assert out.straight_bias_rad_s > 0.0
+
+
+def test_the_backstop_is_the_drive_trains_limit_not_todays_driving_speed():
+    # It was 0.2/0.2 - the speed being driven during the first careful
+    # sessions - which scaled the ground station's speed slider straight
+    # back down above 0.2 m/s, so the slider appeared to do nothing.
+    cfg = ShaperConfig()
+
+    assert cfg.backstop_max_vx == pytest.approx(0.5)
+    assert cfg.backstop_max_wz == pytest.approx(1.0)
+
+
+def test_a_command_at_the_sliders_ceiling_settles_there_unscaled():
+    # The shaper ramps toward a command, so the steady state - which is
+    # what the backstop acts on - takes more than one tick to reach.
+    out = settle(make(), (0.5, 0.0, 0.0))
+
+    assert out.vx == pytest.approx(0.5)
+    assert out.limited_by != "backstop"
+
+
+def test_a_command_past_the_drive_train_is_still_scaled_back():
+    out = settle(make(), (0.9, 0.0, 0.0))
+
+    assert out.vx == pytest.approx(0.5)
+    assert out.limited_by == "backstop"
