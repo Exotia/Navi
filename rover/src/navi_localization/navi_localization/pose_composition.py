@@ -95,6 +95,16 @@ def inverse(t: Transform) -> Transform:
     return Transform(x, y, z, *q_inv)
 
 
+def transform_point(t: Transform, p) -> tuple:
+    """Apply t to a point p = (x, y, z): rotate by t's quaternion, then add
+    t's translation. The point counterpart to compose(); landmark_geometry
+    uses this to walk a measured point camera -> base_footprint -> map
+    without duplicating the quaternion arithmetic."""
+    q = (t.qx, t.qy, t.qz, t.qw)
+    rx, ry, rz = _rotate(q, tuple(p))
+    return (t.x + rx, t.y + ry, t.z + rz)
+
+
 def footprint_pose_from_camera_pose(
         camera_in_map: Transform,
         camera_in_footprint: Transform = CAMERA_IN_BASE_FOOTPRINT) -> Transform:

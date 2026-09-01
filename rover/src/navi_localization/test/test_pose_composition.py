@@ -5,7 +5,8 @@ import pytest
 from navi_localization.pose_composition import (
     BASE_LINK_IN_BASE_FOOTPRINT, CAMERA_IN_BASE_FOOTPRINT, IDENTITY,
     STATIC_FRAMES, Transform, compose, footprint_pose_from_camera_pose,
-    footprint_twist_from_camera_twist, inverse, translation_distance, yaw_of)
+    footprint_twist_from_camera_twist, inverse, transform_point,
+    translation_distance, yaw_of)
 
 
 def quat_z(yaw):
@@ -132,6 +133,27 @@ def test_a_mount_offset_of_zero_changes_nothing():
         (1.0, 2.0, 3.0), (0.1, 0.2, 0.3), IDENTITY)
     assert linear == pytest.approx((1.0, 2.0, 3.0))
     assert angular == pytest.approx((0.1, 0.2, 0.3))
+
+
+def test_transform_point_rotates_then_translates():
+    # 90 deg yaw about z at (10, 5, 0): a point one metre along the frame's
+    # own +x lands on the parent's +y axis, offset by the translation.
+    t = Transform(10.0, 5.0, 0.0, *quat_z(math.pi / 2))
+    assert transform_point(t, (1.0, 0.0, 0.0)) == pytest.approx((10.0, 6.0, 0.0), abs=1e-9)
+
+
+def test_transform_point_with_identity_is_translation_only():
+    t = Transform(1.0, -2.0, 3.0, 0.0, 0.0, 0.0, 1.0)
+    assert transform_point(t, (0.5, 0.5, 0.5)) == pytest.approx((1.5, -1.5, 3.5))
+
+
+def test_transform_point_agrees_with_compose_on_the_origin():
+    # transform_point(t, (0,0,0)) is just where t's own origin sits, which
+    # is the same thing compose(t, IDENTITY) reports.
+    t = Transform(2.0, 3.0, 4.0, *quat_z(0.7))
+    composed = compose(t, IDENTITY)
+    assert transform_point(t, (0.0, 0.0, 0.0)) == pytest.approx(
+        (composed.x, composed.y, composed.z))
 
 
 def test_a_rotated_mount_rotates_the_twist_into_the_footprints_axes():
