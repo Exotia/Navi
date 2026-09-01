@@ -65,9 +65,20 @@ class AspectLabel(QLabel):
     shape of what the camera actually sends.
     """
 
+    # (u, v, width, height): a click, in SOURCE-frame pixels - the stream's
+    # own width/height, not the label's. See mousePressEvent below for why
+    # a raw event position cannot be used directly.
+    clicked = Signal(int, int, int, int)
+
     def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
         self._aspect = 16.0 / 9.0
+        # The dimensions of the frame currently painted (the receiver's
+        # own width/height), kept so a click can be rescaled from label
+        # pixels back to source pixels. None until a frame has actually
+        # been rendered.
+        self._source_width: int | None = None
+        self._source_height: int | None = None
 
     def set_aspect(self, width: int, height: int) -> None:
         if width > 0 and height > 0:
@@ -75,6 +86,12 @@ class AspectLabel(QLabel):
             if abs(aspect - self._aspect) > 1e-6:
                 self._aspect = aspect
                 self.updateGeometry()
+
+    def set_source_size(self, width: int, height: int) -> None:
+        """The stream's own dimensions, refreshed on every render - what
+        `mousePressEvent` rescales a click into."""
+        self._source_width = width
+        self._source_height = height
 
     @property
     def aspect(self) -> float:
@@ -85,6 +102,36 @@ class AspectLabel(QLabel):
 
     def heightForWidth(self, width: int) -> int:
         return int(round(max(1, width) / self._aspect))
+
+    def mousePressEvent(self, event) -> None:
+        """Turns a click into a SOURCE-frame pixel.
+
+        `_render_frame` scales the pixmap into this label with
+        Qt.KeepAspectRatio and centres it (AlignCenter), so the picture is
+        letterboxed inside the label - a raw event position is offset by
+        the bars and scaled by an unknown factor, and a probe built from it
+        would measure the wrong part of the world, quietly, with a
+        plausible-looking number. So: take the rendered pixmap's size,
+        subtract the letterbox origin, reject a click that landed in the
+        bars, then rescale by source/pixmap to land on the actual pixel
+        the operator pointed at.
+        """
+        pixmap = self.pixmap()
+        if (pixmap is not None and not pixmap.isNull()
+                and self._source_width is not None
+                and self._source_height is not None):
+            pw, ph = pixmap.width(), pixmap.height()
+            if pw > 0 and ph > 0:
+                origin_x = (self.width() - pw) / 2.0
+                origin_y = (self.height() - ph) / 2.0
+                pos = event.position()
+                x = pos.x() - origin_x
+                y = pos.y() - origin_y
+                if 0 <= x < pw and 0 <= y < ph:
+                    u = int(x * self._source_width / pw)
+                    v = int(y * self._source_height / ph)
+                    self.clicked.emit(u, v, self._source_width, self._source_height)
+        super().mousePressEvent(event)
 
 
 class VideoPanel(QWidget):
@@ -406,6 +453,7 @@ class VideoPanel(QWidget):
         # source that is not 16:9 (or a resolution change) reshapes the
         # card rather than growing bars inside it.
         self.image_label.set_aspect(self.receiver.width, self.receiver.height)
+        self.image_label.set_source_size(self.receiver.width, self.receiver.height)
         image = QImage(self._last_frame, self.receiver.width, self.receiver.height,
                        self.receiver.width * 3, QImage.Format_RGB888)
         pixmap = QPixmap.fromImage(image)

@@ -10,11 +10,15 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, Q
 
 from ground_station import theme
 from ground_station.gamepad_input import GamepadReader
+from ground_station.landmark_table import LandmarkTableError, load_landmark_table
 from ground_station.models import (NAV_ACTIVE_STATES, DriveCommandTracker,
-                                   NodeRegistry, is_stick_deflected,
+                                   NodeRegistry, Waypoint, is_stick_deflected,
                                    may_publish_manual_twist,
-                                   may_publish_takeover_twist, new_run_id)
+                                   may_publish_takeover_twist, new_probe_id,
+                                   new_run_id)
 from ground_station.ros_client import RosBridgeClient
+from ground_station.site_frame import (reexpress_at_lock_pose, site_to_map,
+                                       site_yaw_to_map_yaw)
 from ground_station.ui.dashboard_page import DashboardPage
 from ground_station.ui.drive_detail_page import DriveDetailPage
 from ground_station.ui.mission_timer import MissionTimer
@@ -108,6 +112,28 @@ class MainWindow(QMainWindow):
         # terminal exactly once with its reason - the status republishes at
         # 2 Hz, so printing on every message would scroll the reason away.
         self._last_nav_state: str | None = None
+
+        # The locked site->map transform, or None - the only two things
+        # _on_go_requested (§3.8) and the mid-run refusal (§3.10) need.
+        # Kept separately from site_card.transform/locked: the card is the
+        # operator's view of its own state, this is the window's copy of
+        # what is actually in effect for the wire.
+        self._site_transform = None
+        self._site_locked = False
+        # The last /localization/pose seen at the moment lock_changed
+        # delivered a transform (review round 3, §3.10) - what
+        # reexpress_at_lock_pose re-expresses the transform against when
+        # the SITE card says the camera was restarted with the rover
+        # unmoved since Lock.
+        self._site_lock_pose = None
+        # The last pixel the operator clicked in the camera view, as
+        # (u, v, width, height) in SOURCE-frame pixels - what a probe
+        # request is built from. None until the panel's own `clicked`
+        # signal has fired at least once.
+        self._last_video_click = None
+        # A per-probe counter so two requests issued in the same
+        # monotonic tick still mint distinct ids (see new_probe_id).
+        self._probe_counter = 0
 
         # Global button style, applied at the MainWindow level so every
         # QPushButton in the app (including ones on child widgets) gets the
@@ -228,10 +254,25 @@ class MainWindow(QMainWindow):
         self.link_button.setToolTip("Show or hide the rosbridge host and port.")
         self.link_button.toggled.connect(self._on_link_toggled)
 
+        self.site_button = QPushButton("Site ▸")
+        self.site_button.setCheckable(True)
+        self.site_button.setToolTip(
+            "Show or hide the site anchor: landmarks, the fit, and the lock.")
+        self.site_button.toggled.connect(self._on_site_toggled)
+
         self.nodes_button = QPushButton("Nodes ▸")
         self.nodes_button.setCheckable(True)
         self.nodes_button.setToolTip("Show or hide the system-node list.")
         self.nodes_button.toggled.connect(self._on_nodes_toggled)
+
+        # Visible only once a transform is locked, so a locked site frame
+        # is legible without opening the drawer - text set by
+        # _refresh_site_pill, empty (and neutrally styled) until then.
+        self.site_status_pill = QLabel("")
+        self.site_status_pill.setStyleSheet(self._header_pill_style(False))
+        self.site_status_pill.setTextFormat(Qt.TextFormat.PlainText)
+        self.site_status_pill.setToolTip(
+            "The locked site->map transform, if any, and its RMS residual.")
 
         # Header reading order, left to right: who am I, what is the rover
         # doing, can it see where it is | how do I reach it | STOP.
@@ -246,6 +287,7 @@ class MainWindow(QMainWindow):
         header_layout.addSpacing(14)
         header_layout.addWidget(self.rover_mode_pill)
         header_layout.addWidget(self.localization_label)
+        header_layout.addWidget(self.site_status_pill)
         header_layout.addStretch()
         header_layout.addWidget(self.mission_timer)
         header_layout.addSpacing(14)
@@ -259,6 +301,7 @@ class MainWindow(QMainWindow):
         link_layout.addWidget(self.connect_button)
         header_layout.addWidget(self.link_panel)
         header_layout.addWidget(self.link_button)
+        header_layout.addWidget(self.site_button)
         header_layout.addWidget(self.nodes_button)
         header_layout.addSpacing(16)
         header_layout.addWidget(self.stop_button)
@@ -306,6 +349,18 @@ class MainWindow(QMainWindow):
         nav_row.pause_requested.connect(lambda: self._send_nav_request("pause"))
         nav_row.resume_requested.connect(lambda: self._send_nav_request("resume"))
         nav_row.abort_requested.connect(lambda: self._send_nav_request("abort"))
+
+        site_card = self.dashboard_page.site_card
+        site_card.table_load_requested.connect(self._on_site_table_load_requested)
+        site_card.probe_requested.connect(self._on_probe_requested)
+        site_card.lock_changed.connect(self._on_site_lock_changed)
+        site_card.camera_restarted.connect(self._on_camera_restarted)
+
+        # The operator's last click in the camera view - not gated on a
+        # rosbridge connection, since it is purely local until a probe is
+        # actually sent.
+        self.dashboard_page.video_panel.image_label.clicked.connect(
+            self._on_video_clicked)
 
         # The gamepad publishes /manual_twist in every mode (see
         # _poll_gamepad), so the STOP button and the deadman/lease status
@@ -428,6 +483,8 @@ class MainWindow(QMainWindow):
         self.ros_client.signals.nav_status_received.connect(self._on_nav_status)
         self.ros_client.signals.nav_path_summary_received.connect(
             self._on_nav_path_summary)
+        self.ros_client.signals.probe_result_received.connect(self._on_probe_result)
+        self.ros_client.signals.sightings_received.connect(self._on_sightings)
 
         try:
             # Subscribe BEFORE connecting: roslibpy's Ros.run() raises
@@ -450,6 +507,8 @@ class MainWindow(QMainWindow):
             self.ros_client.subscribe_mode_status()
             self.ros_client.subscribe_nav_status()
             self.ros_client.subscribe_nav_path_summary()
+            self.ros_client.subscribe_probe_result()
+            self.ros_client.subscribe_landmark_sightings()
             self.ros_client.connect()
         except Exception as exc:
             print(f"ground_station: failed to connect to rosbridge: {exc}", file=sys.stderr)
@@ -752,6 +811,10 @@ class MainWindow(QMainWindow):
         self.dashboard_page.node_list.setVisible(shown)
         self.nodes_button.setText("Nodes ▾" if shown else "Nodes ▸")
 
+    def _on_site_toggled(self, shown: bool) -> None:
+        self.dashboard_page.site_card.setVisible(shown)
+        self.site_button.setText("Site ▾" if shown else "Site ▸")
+
     def _refresh_rover_mode_pill(self, state) -> None:
         """The header's rover-mode chip. The reason rides along with the
         mode: "MANUAL (localisation SEARCHING)" is the difference between
@@ -785,8 +848,17 @@ class MainWindow(QMainWindow):
         self.ros_client.send_mode_request("autonomous")
 
     def _on_go_requested(self, waypoints) -> None:
+        """§3.8: the one place in the entire codebase where a site
+        coordinate becomes a map coordinate. With no locked transform this
+        is byte-for-byte today's behaviour - there is a regression test
+        that says so."""
         if self.ros_client is None:
             return
+        if self._site_transform is not None and self._site_locked:
+            t = self._site_transform
+            waypoints = [Waypoint(*site_to_map(t, w.x, w.y),
+                                  None if w.yaw is None else site_yaw_to_map_yaw(t, w.yaw))
+                        for w in waypoints]
         self._nav_run_id = new_run_id(time())
         self.ros_client.send_nav_request("go", waypoints, self._nav_run_id)
 
@@ -818,6 +890,121 @@ class MainWindow(QMainWindow):
         if summary is None:
             return
         self.dashboard_page.nav_row.set_path_summary(summary)
+
+    # --- site anchor (site-anchor plan, Task 9) ---------------------------
+
+    def _on_site_table_load_requested(self, path: str) -> None:
+        """The SITE card's own file dialog only picks a path - it never
+        touches disk itself (D1: the loader is a stdlib-only sibling of
+        this window, not the card's job). A malformed table is reported to
+        the terminal and otherwise ignored: the card keeps whatever it had
+        before."""
+        try:
+            table = load_landmark_table(path)
+        except LandmarkTableError as exc:
+            print(f"ground_station: failed to load site table: {exc}", file=sys.stderr)
+            return
+        self.dashboard_page.site_card.set_table(table)
+
+    def _on_video_clicked(self, u: int, v: int, width: int, height: int) -> None:
+        """The camera panel's own click, in source-frame pixels
+        (video_panel.AspectLabel.clicked). Remembered, not sent - a probe
+        is only ever built at the moment the operator presses Probe."""
+        self._last_video_click = (u, v, width, height)
+
+    def _on_probe_requested(self, landmark_id: str, target: str) -> None:
+        """site_card.probe_requested: the operator picked a landmark and
+        pressed Probe. The card owns which landmark and which target; this
+        window owns the pixel, because that is where the camera view - and
+        its last click - actually lives."""
+        if self.ros_client is None:
+            return
+        if self._last_video_click is None:
+            self.dashboard_page.site_card.state_pill.setText(
+                "click the landmark in the camera view first")
+            return
+        u, v, width, height = self._last_video_click
+        self._probe_counter += 1
+        request_id = new_probe_id(monotonic(), self._probe_counter)
+        self.ros_client.send_probe_request(request_id, landmark_id, u, v, width, height,
+                                           target=target)
+
+    def _on_probe_result(self, result) -> None:
+        if result is None:
+            return
+        self.dashboard_page.site_card.apply_probe_result(result)
+
+    def _on_sightings(self, report) -> None:
+        if report is None:
+            return
+        self.dashboard_page.site_card.apply_sightings(report)
+
+    def _on_site_lock_changed(self, transform) -> None:
+        """site_card.lock_changed: a solved transform to lock, or None to
+        clear a lock. D2 forbids changing the transform under an active
+        run - a converted goal would move a rover already driving toward
+        it - so a lock/unlock while a run is active is refused: the card's
+        own button and state are put back where they were and nothing here
+        changes. Otherwise, this window's copy of the transform (what
+        _on_go_requested actually uses) is updated, the row's drawing
+        follows (NavRow.set_site_transform), the header pill reflects it,
+        and - review round 3, §3.10 - the pose in effect at this exact
+        moment is captured as the lock pose."""
+        site_card = self.dashboard_page.site_card
+        if self._last_nav_state in NAV_ACTIVE_STATES:
+            print("ground_station: refusing to change the site transform "
+                  "mid-run", file=sys.stderr)
+            site_card.locked = self._site_locked
+            site_card.lock_button.blockSignals(True)
+            site_card.lock_button.setChecked(self._site_locked)
+            site_card.lock_button.blockSignals(False)
+            return
+
+        self._site_transform = transform
+        self._site_locked = transform is not None
+        self._site_lock_pose = self._localization_pose if transform is not None else None
+        self.dashboard_page.nav_row.set_site_transform(transform)
+        self._refresh_site_pill()
+
+    def _on_camera_restarted(self) -> None:
+        """site_card.camera_restarted (§3.10, review round 3): the ZED
+        wrapper was just relaunched with the rover NOT moved since Lock.
+        The wrapper keeps no area memory, so the restart bears a brand new
+        map frame at the rover's pose at that moment - which, with the
+        rover unmoved, IS the lock pose captured in _on_site_lock_changed.
+        T1 owns the arithmetic (reexpress_at_lock_pose); this is the swap,
+        reflected back to the card exactly as the plan asks: transform
+        updated, state pill reads LOCKED (re-expressed)."""
+        if (not self._site_locked or self._site_transform is None
+                or self._site_lock_pose is None):
+            return
+        pose = self._site_lock_pose
+        new_transform = reexpress_at_lock_pose(
+            self._site_transform, pose["x"], pose["y"], pose["yaw"])
+        self._site_transform = new_transform
+
+        site_card = self.dashboard_page.site_card
+        site_card.transform = new_transform
+        site_card.state_pill.setText("LOCKED (re-expressed)")
+        site_card.state_pill.setStyleSheet(theme.pill_style(theme.OK, theme.BG))
+
+        self.dashboard_page.nav_row.set_site_transform(new_transform)
+        self._refresh_site_pill()
+
+    def _refresh_site_pill(self) -> None:
+        """The header's SITE chip: a locked transform is visible without
+        opening the drawer, and it is the only thing this pill ever shows -
+        an unlocked/no-table state says nothing here, because the SITE
+        drawer's own state_pill already covers that in detail."""
+        if self._site_locked and self._site_transform is not None:
+            text = f"SITE: LOCKED  RMS {self._site_transform.rms_m:.2f} m"
+            self._set_elided(self.site_status_pill, text, 220)
+            self.site_status_pill.setStyleSheet(self._header_pill_style(True))
+        else:
+            self.site_status_pill.setText("")
+            self.site_status_pill.setToolTip(
+                "The locked site->map transform, if any, and its RMS residual.")
+            self.site_status_pill.setStyleSheet(self._header_pill_style(False))
 
     def _on_stop_requested(self) -> None:
         """STOP does two different things, in this order.

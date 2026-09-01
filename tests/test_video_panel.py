@@ -1,3 +1,5 @@
+from PySide6.QtCore import QPoint, Qt
+
 from ground_station import theme
 from ground_station.ui.video_panel import VideoPanel, localization_marker
 
@@ -675,3 +677,66 @@ def test_a_receiver_that_fails_to_restart_at_the_new_size_reports_the_cause(qtbo
     assert panel._streaming is False
     assert panel.toggle_button.text() == "Start video"
     assert "gst-launch-1.0 not found" in panel._rover_detail
+
+
+def _rendered_panel(qtbot, label_size=(200, 200)):
+    """A panel with a 4x2 frame rendered and the label resized, matching
+    the existing letterbox tests above - so a click test starts from the
+    exact geometry (200x200 label, 200x100 pixmap, centred) those already
+    pin."""
+    receiver = FakeReceiver(frame=bytes([120]) * (4 * 2 * 3))
+    panel = VideoPanel(receiver=receiver)
+    qtbot.addWidget(panel)
+    panel.set_streaming(True)
+    panel._poll_frame(now=100.0)
+    panel.image_label.resize(*label_size)
+    panel._render_frame()
+    return panel
+
+
+def test_a_centre_click_on_a_letterboxed_render_returns_the_source_centre(qtbot):
+    panel = _rendered_panel(qtbot)
+    received = []
+    panel.image_label.clicked.connect(lambda *args: received.append(args))
+
+    qtbot.mouseClick(panel.image_label, Qt.MouseButton.LeftButton, pos=QPoint(100, 100))
+
+    # 200x100 pixmap centred in a 200x200 label: bars are 50px top/bottom.
+    # (100, 100) label-space is (100, 50) pixmap-space, which is the
+    # centre of the 4x2 source: (2, 1).
+    assert received == [(2, 1, 4, 2)]
+
+
+def test_a_click_in_the_letterbox_bar_emits_nothing(qtbot):
+    panel = _rendered_panel(qtbot)
+    received = []
+    panel.image_label.clicked.connect(lambda *args: received.append(args))
+
+    # y=10 is inside the top bar (bars occupy [0, 50) and [150, 200)).
+    qtbot.mouseClick(panel.image_label, Qt.MouseButton.LeftButton, pos=QPoint(100, 10))
+
+    assert received == []
+
+
+def test_a_click_at_a_known_offcentre_point_returns_the_ratio_derived_pixel(qtbot):
+    panel = _rendered_panel(qtbot)
+    received = []
+    panel.image_label.clicked.connect(lambda *args: received.append(args))
+
+    # (50, 60) label-space -> (50, 10) pixmap-space (bar is 50px).
+    # u = 50 * 4/200 = 1, v = 10 * 2/100 = 0.2 -> 0.
+    qtbot.mouseClick(panel.image_label, Qt.MouseButton.LeftButton, pos=QPoint(50, 60))
+
+    assert received == [(1, 0, 4, 2)]
+
+
+def test_a_click_before_any_frame_has_ever_rendered_emits_nothing(qtbot):
+    panel = VideoPanel(receiver=FakeReceiver())
+    qtbot.addWidget(panel)
+    panel.image_label.resize(200, 200)
+
+    received = []
+    panel.image_label.clicked.connect(lambda *args: received.append(args))
+    qtbot.mouseClick(panel.image_label, Qt.MouseButton.LeftButton, pos=QPoint(100, 100))
+
+    assert received == []

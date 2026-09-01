@@ -1,13 +1,19 @@
 import json
+from pathlib import Path
 from time import monotonic
 
 from ground_station import theme
-from ground_station.models import Waypoint, parse_path_summary
+from ground_station.landmark_table import load_landmark_table
+from ground_station.models import Waypoint, new_run_id, parse_path_summary, parse_sightings
 from ground_station.ros_client import RosBridgeClient
+from ground_station.site_frame import (SiteTransform, reexpress_at_lock_pose,
+                                       site_to_map, site_yaw_to_map_yaw)
 from ground_station.ui import main_window
 from ground_station.ui.main_window import MainWindow
 from ground_station.video_receiver import VideoReceiver
 from tests.test_video_panel import FakeReceiver
+
+SITE_EXAMPLE_PATH = Path(__file__).resolve().parent.parent / "docs" / "site" / "landmarks.example.json"
 
 
 class FakeTopic:
@@ -979,6 +985,7 @@ def test_a_timed_out_first_connect_still_registers_every_subscription(qtbot):
         "/manual_twist", "/video_status", "/localization/status",
         "/localization/pose", "/localization/map_status", "/drive_status",
         "/mode_status", "/nav_status", "/nav_path_summary",
+        "/site/probe_result", "/site/landmark_sightings",
     }
     client = window.ros_client
     assert client._manual_twist_topic is not None
@@ -1370,3 +1377,207 @@ def test_the_link_controls_get_out_of_the_way_once_the_link_is_up(qtbot):
     ros = FakeRos.instances[-1]
     ros.trigger_event("close", None)
     assert window.link_panel.isVisibleTo(window)      # back the moment it drops
+
+
+# --- Task 9: site anchor - header button, probe round-trip, Go conversion --
+
+def _lock(window, transform):
+    """Locks `transform` on the window the way the SITE card does just
+    before it emits lock_changed (see SiteCard._on_lock_toggled): its own
+    transform/locked flip first, then the signal. Going through the real
+    signal - not poking window._site_transform directly - exercises
+    MainWindow._on_site_lock_changed exactly as production wiring does."""
+    window.dashboard_page.site_card.transform = transform
+    window.dashboard_page.site_card.locked = True
+    window.dashboard_page.site_card.lock_changed.emit(transform)
+
+
+def test_go_with_no_site_transform_matches_todays_json_exactly(qtbot, monkeypatch):
+    # The regression, and the most important test in this plan: with no
+    # transform, a Go must be byte-for-byte what it was before this task -
+    # written so it would fail if a single coordinate moved.
+    monkeypatch.setattr(main_window, "time", lambda: 1234.5)
+    window = connected_window(qtbot)
+    window.dashboard_page.nav_row.go_requested.emit(
+        [Waypoint(3.0, -1.5, 0.4), Waypoint(1.0, 2.0, None)])
+    request = published(window, "/nav_request")[-1]
+    assert request == {
+        "action": "go",
+        "run_id": new_run_id(1234.5),
+        "frame_id": "map",
+        "waypoints": [
+            {"x": 3.0, "y": -1.5, "yaw": 0.4},
+            {"x": 1.0, "y": 2.0, "yaw": None},
+        ],
+    }
+
+
+def test_go_with_a_locked_transform_sends_converted_coordinates(qtbot):
+    window = connected_window(qtbot)
+    transform = SiteTransform(x=10.0, y=-4.0, yaw=0.3, rms_m=0.02,
+                              max_residual_m=0.03, worst_id=None, n_points=2,
+                              scale_hint=1.0, ids=("51", "52"))
+    _lock(window, transform)
+
+    window.dashboard_page.nav_row.go_requested.emit([Waypoint(3.0, -1.5, 0.4)])
+    request = published(window, "/nav_request")[-1]
+
+    expected_x, expected_y = site_to_map(transform, 3.0, -1.5)
+    expected_yaw = site_yaw_to_map_yaw(transform, 0.4)
+    assert request["waypoints"] == [
+        {"x": expected_x, "y": expected_y, "yaw": expected_yaw}]
+
+
+def test_go_with_a_locked_transform_and_no_yaw_still_sends_null(qtbot):
+    window = connected_window(qtbot)
+    transform = SiteTransform(x=1.0, y=2.0, yaw=0.1, rms_m=0.0,
+                              max_residual_m=0.0, worst_id=None, n_points=2,
+                              scale_hint=1.0, ids=("a", "b"))
+    _lock(window, transform)
+
+    window.dashboard_page.nav_row.go_requested.emit([Waypoint(0.0, 0.0, None)])
+    request = published(window, "/nav_request")[-1]
+    assert request["waypoints"][0]["yaw"] is None
+
+
+def test_unlocking_restores_the_no_transform_behaviour(qtbot):
+    window = connected_window(qtbot)
+    transform = SiteTransform(x=10.0, y=-4.0, yaw=0.3, rms_m=0.02,
+                              max_residual_m=0.03, worst_id=None, n_points=2,
+                              scale_hint=1.0, ids=("51", "52"))
+    _lock(window, transform)
+
+    window.dashboard_page.site_card.locked = False
+    window.dashboard_page.site_card.lock_changed.emit(None)
+
+    window.dashboard_page.nav_row.go_requested.emit([Waypoint(3.0, -1.5, 0.4)])
+    request = published(window, "/nav_request")[-1]
+    assert request["waypoints"] == [{"x": 3.0, "y": -1.5, "yaw": 0.4}]
+
+
+def test_site_button_toggles_the_site_card(qtbot):
+    window, _ = make_window(qtbot)
+    card = window.dashboard_page.site_card
+    assert not card.isVisibleTo(window)
+    window.site_button.click()
+    assert card.isVisibleTo(window)
+    assert "▾" in window.site_button.text()
+    window.site_button.click()
+    assert not card.isVisibleTo(window)
+
+
+def test_connecting_subscribes_to_site_topics_and_routes_sightings(qtbot):
+    window = connected_window(qtbot)
+    assert any(t.name == "/site/probe_result" for t in FakeTopic.instances)
+    assert any(t.name == "/site/landmark_sightings" for t in FakeTopic.instances)
+
+    table = load_landmark_table(SITE_EXAMPLE_PATH)
+    window.dashboard_page.site_card.set_table(table)
+
+    report = parse_sightings(json.dumps({
+        "phase": "measuring", "dictionary": "DICT_5X5_100",
+        "detector_ok": True, "error": None,
+        "sightings": [{"id": "51", "x": 1.0, "y": 2.0, "z": 0.4,
+                       "n": 5, "spread_m": 0.02, "range_m": 3.0,
+                       "last_seen_s": 12.0, "quality": "good"}],
+    }))
+    window.ros_client.signals.sightings_received.emit(report)
+
+    assert window.dashboard_page.site_card.state_pill.text() == "1 OF 3 MEASURED"
+
+
+def test_probe_requested_with_no_click_recorded_sends_nothing(qtbot):
+    window = connected_window(qtbot)
+    window.dashboard_page.site_card.probe_requested.emit("51", "pole")
+    assert published(window, "/site/probe_request") == []
+
+
+def test_probe_requested_with_a_recorded_click_sends_the_pixel(qtbot):
+    window = connected_window(qtbot)
+    window.dashboard_page.video_panel.image_label.clicked.emit(120, 80, 640, 360)
+    window.dashboard_page.site_card.probe_requested.emit("51", "pole")
+
+    requests = published(window, "/site/probe_request")
+    assert len(requests) == 1
+    request = requests[0]
+    assert request["label"] == "51"
+    assert request["u"] == 120 and request["v"] == 80
+    assert request["width"] == 640 and request["height"] == 360
+    assert request["target"] == "pole"
+
+
+def test_a_lock_change_while_a_run_is_active_is_refused(qtbot):
+    window = connected_window(qtbot)
+    _nav_status(window, state="running", run_id="gs-7")
+
+    transform = SiteTransform(x=10.0, y=-4.0, yaw=0.3, rms_m=0.02,
+                              max_residual_m=0.03, worst_id=None, n_points=2,
+                              scale_hint=1.0, ids=("51", "52"))
+    _lock(window, transform)
+
+    assert window._site_transform is None
+    assert not window.dashboard_page.site_card.lock_button.isChecked()
+
+    window.dashboard_page.nav_row.go_requested.emit([Waypoint(3.0, -1.5, 0.4)])
+    request = published(window, "/nav_request")[-1]
+    assert request["waypoints"] == [{"x": 3.0, "y": -1.5, "yaw": 0.4}]
+
+
+def test_the_header_still_has_stop_with_the_site_button_added(qtbot):
+    # The standing assertion this repo makes on every header change.
+    window, _ = make_window(qtbot)
+    assert window.stop_button.isEnabled()
+    assert window.stop_button.isVisibleTo(window)
+
+
+def test_table_load_requested_loads_the_file_into_the_card(qtbot):
+    window, _ = make_window(qtbot)
+    window.dashboard_page.site_card.table_load_requested.emit(str(SITE_EXAMPLE_PATH))
+    assert window.dashboard_page.site_card.table is not None
+    assert window.dashboard_page.site_card.table.site_name.startswith("EXAMPLE")
+
+
+def test_table_load_requested_with_a_bad_path_does_not_crash(qtbot, tmp_path, capsys):
+    window, _ = make_window(qtbot)
+    bad = tmp_path / "not-json.json"
+    bad.write_text("not json")
+    window.dashboard_page.site_card.table_load_requested.emit(str(bad))
+    assert window.dashboard_page.site_card.table is None
+    assert "failed to load" in capsys.readouterr().err
+
+
+def test_camera_restarted_reexpresses_the_locked_transform_at_the_lock_pose(qtbot):
+    window = connected_window(qtbot)
+    transform = SiteTransform(x=1.0, y=2.0, yaw=0.2, rms_m=0.05,
+                              max_residual_m=0.06, worst_id=None, n_points=2,
+                              scale_hint=1.0, ids=("51", "52"))
+    # A pose in effect at the moment of Lock - captured by
+    # _on_site_lock_changed before camera_restarted ever fires.
+    window.ros_client.signals.localization_pose_received.emit(
+        {"x": 0.5, "y": -0.3, "yaw": 0.1})
+    _lock(window, transform)
+
+    window.dashboard_page.site_card.camera_restarted.emit()
+
+    expected = reexpress_at_lock_pose(transform, 0.5, -0.3, 0.1)
+    assert window._site_transform == expected
+    assert window.dashboard_page.site_card.transform == expected
+    assert "re-expressed" in window.dashboard_page.site_card.state_pill.text().lower()
+
+    window.dashboard_page.nav_row.go_requested.emit([Waypoint(0.0, 0.0, None)])
+    request = published(window, "/nav_request")[-1]
+    expected_x, expected_y = site_to_map(expected, 0.0, 0.0)
+    assert request["waypoints"][0]["x"] == expected_x
+    assert request["waypoints"][0]["y"] == expected_y
+
+
+def test_camera_restarted_without_a_captured_lock_pose_does_nothing(qtbot):
+    window = connected_window(qtbot)
+    transform = SiteTransform(x=1.0, y=2.0, yaw=0.2, rms_m=0.05,
+                              max_residual_m=0.06, worst_id=None, n_points=2,
+                              scale_hint=1.0, ids=("51", "52"))
+    _lock(window, transform)
+
+    window.dashboard_page.site_card.camera_restarted.emit()
+
+    assert window._site_transform is transform
