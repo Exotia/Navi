@@ -173,3 +173,30 @@ def test_a_non_finite_twist_is_dropped_not_shaped(graph):
     send(float("nan"), 0.0, 0.0)
     send(0.0, 0.0, float("inf"))
     assert len(received) == before              # nothing reached /chassis_twist
+
+
+def test_the_feasibility_diagnostic_costs_nothing_when_nobody_is_looking(graph):
+    # Nothing on the rover or ground station subscribes to /ik_feasibility;
+    # it exists for a human with `ros2 topic echo`. The gate keeps it
+    # discoverable while sparing the serialisation when nobody looks.
+    node = graph[0]
+    recorded = []
+    node._status_pub = type("Recorder", (), {
+        "get_subscription_count": lambda self: 0,
+        "publish": lambda self, m: recorded.append(m)})()
+
+    node._publish_status()
+
+    assert recorded == []
+
+
+def test_the_feasibility_diagnostic_returns_the_moment_someone_subscribes(graph):
+    node = graph[0]
+    recorded = []
+    node._status_pub = type("Recorder", (), {
+        "get_subscription_count": lambda self: 1,
+        "publish": lambda self, m: recorded.append(m)})()
+
+    node._publish_status()
+
+    assert len(recorded) == 1

@@ -127,6 +127,16 @@ class TwistShaperNode(Node):
             self.get_logger().error(f"shaper status publish failed: {exc!r}")
 
     def _publish_status_inner(self):
+        # Nothing on the rover or the ground station subscribes to this
+        # topic today (audited 2026-09-01) - it exists for a human with
+        # `ros2 topic echo` chasing a feasibility question. Building and
+        # serialising the JSON for nobody, at the status rate, forever, is
+        # the kind of small waste a tight Orin budget is made of, so the
+        # same count_subscribers gate the traversability view uses applies
+        # here: the topic stays discoverable and springs to life the moment
+        # someone actually looks.
+        if self._status_pub.get_subscription_count() == 0:
+            return
         r = self._last_result
         payload = {
             "gain": 1.0 if r is None else round(r.gain, 6),

@@ -29,7 +29,7 @@
             depth_mode: 'NEURAL'           # calibrated 2026-08-29, see the spec's table; NEURAL at 30 fps drops frames on this Orin
             min_depth: 0.3
             max_depth: 10.0
-            point_cloud_freq: 5.0         # nobody consumes it in sub-project 1; kept cheap, not off, so sub-project 3 can turn it up
+            point_cloud_freq: 1.0         # nobody consumes the live cloud at all - the elevation mapper reads mapping/fused_cloud instead - and the wrapper gates it on subscribers anyway; 1 Hz is the debugging floor, not a budget
         pos_tracking:
             pos_tracking_enabled: true
             pos_tracking_mode: 'GEN_1'
@@ -42,8 +42,19 @@
             two_d_mode: false
             floor_alignment: false
         sensors:
-            publish_imu_tf: true
-            sensors_pub_rate: 100.0
+            # False: nothing on this rover or the ground station subscribes
+            # to any IMU topic (audited 2026-09-01), and the IMU tf was
+            # being broadcast onto /tf at the sensor rate - traffic every
+            # tf listener in the Nav2 stack has to receive and filter, paid
+            # a hundred times a second for a transform nobody looked up.
+            # The SDK's own IMU fusion (pos_tracking.imu_fusion) is
+            # internal and does not ride on this publisher.
+            publish_imu_tf: false
+            # 25, down from 100: the topics are subscriber-gated in the
+            # wrapper so today this changes nothing, but the first
+            # diagnostic tool that does subscribe should cost a quarter of
+            # what it would have.
+            sensors_pub_rate: 25.0
         mapping:
             # Sub-project 3. The wrapper only spends GPU time on this while
             # elevation_mapper is subscribed to mapping/fused_cloud
