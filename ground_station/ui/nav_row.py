@@ -16,6 +16,7 @@ from ground_station import theme
 from ground_station.models import (AUTONOMOUS_MODE, NAV_ACTIVE_STATES,
                                    Waypoint, WaypointList,
                                    parse_waypoint_text)
+from ground_station.site_frame import map_to_site, site_to_map
 from ground_station.ui.nav_map_view import NavMapView
 
 
@@ -40,6 +41,10 @@ class NavRow(QWidget):
         self._mode_state = None
         self._clock = clock
         self.waypoints = WaypointList()
+        # The locked site->map transform, or None. Display only - see
+        # set_site_transform and append_world_point below; the waypoint LIST
+        # never holds anything but what the operator typed.
+        self._site_transform = None
         self.confirm_autonomous = self._confirm_autonomous_dialog
         # No confirm_abort: Abort is a panic button. Handing the rover TO
         # autonomy is the decision worth a dialog; taking it back is not,
@@ -151,9 +156,9 @@ class NavRow(QWidget):
 
         editor = QVBoxLayout()
         editor.setSpacing(6)
-        editor_title = QLabel("WAYPOINTS")
-        editor_title.setStyleSheet(theme.section_title_style())
-        editor.addWidget(editor_title)
+        self.editor_title = QLabel("WAYPOINTS")
+        self.editor_title.setStyleSheet(theme.section_title_style())
+        editor.addWidget(self.editor_title)
         self.click_hint = QLabel("click the map to add")
         self.click_hint.setStyleSheet(
             f"color: {theme.TEXT_DIM}; font-size: {theme.FONT_SIZE_SMALL}px; "
@@ -262,21 +267,48 @@ class NavRow(QWidget):
 
     def append_world_point(self, x: float, y: float) -> None:
         """The map view's entry point: a click on the canvas appends a
-        waypoint exactly as typing coordinates and pressing Add would."""
+        waypoint exactly as typing coordinates and pressing Add would -
+        which means it has to arrive in the same frame the operator types
+        in. The canvas draws the map frame, so with a site transform locked
+        the click is converted BACK to site here. §3.9: the list always
+        holds the operator's frame."""
+        if self._site_transform is not None:
+            x, y = map_to_site(self._site_transform, x, y)
         self.waypoints.add(Waypoint(x, y))
+        self.refresh_waypoints()
+
+    def set_site_transform(self, transform) -> None:
+        """A locked site->map transform, or None. The waypoint LIST stays in
+        the numbers the operator typed; only the map drawing and the labels
+        change, because the canvas draws the map frame and always will. The
+        conversion that reaches the rover happens once, in
+        MainWindow._on_go_requested."""
+        self._site_transform = transform
         self.refresh_waypoints()
 
     def refresh_waypoints(self) -> None:
         selected = self.waypoint_list.currentRow()
         self.waypoint_list.clear()
+        # The row for drawing (converted, below) and the window for the
+        # wire (§3.8, unconverted) are the transform's only two consumers -
+        # deliberate, and why both are pinned by tests.
+        site_marker = " (site)" if self._site_transform is not None else ""
+        self.editor_title.setText("WAYPOINTS" + site_marker)
         for i, w in enumerate(self.waypoints.items):
             text = f"{i + 1}. x {w.x:.2f}  y {w.y:.2f}"
             if w.yaw is not None:
                 text += f"  yaw {w.yaw:.2f}"
+            text += site_marker
             self.waypoint_list.addItem(text)
         if 0 <= selected < self.waypoint_list.count():
             self.waypoint_list.setCurrentRow(selected)
-        self.map_view.set_waypoints(self.waypoints.items)
+        if self._site_transform is not None:
+            t = self._site_transform
+            drawn = [Waypoint(*site_to_map(t, w.x, w.y), w.yaw)
+                     for w in self.waypoints.items]
+        else:
+            drawn = self.waypoints.items
+        self.map_view.set_waypoints(drawn)
         self.waypoints_changed.emit(self.waypoints.items)
         self._refresh_controls()
 

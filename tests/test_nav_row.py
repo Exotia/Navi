@@ -1,6 +1,18 @@
+import math
+
+import pytest
+
 from ground_station import theme
 from ground_station.models import ModeState, NavStatus, Waypoint
+from ground_station.site_frame import SiteTransform, map_to_site, site_to_map
 from ground_station.ui.nav_row import NavRow
+
+
+def transform(**over):
+    base = dict(x=10.0, y=5.0, yaw=math.pi / 2, rms_m=0.01, max_residual_m=0.02,
+                worst_id=None, n_points=2, scale_hint=1.0, ids=("51", "52"))
+    base.update(over)
+    return SiteTransform(**base)
 
 
 def nav(**over):
@@ -179,6 +191,92 @@ def test_the_map_can_be_zoomed_and_unfollowed_from_the_row(qtbot):
     row.follow_button.click()
     row.set_pose({"x": 9.0, "y": 0.0, "yaw": 0.0})
     assert row.map_view.transform.centre_x == 5.0
+
+
+# -- the site transform ------------------------------------------------------
+
+def test_with_no_transform_refresh_waypoints_is_unchanged_and_has_no_site_marker(qtbot):
+    # The regression assertion: with no transform locked, this is exactly
+    # today's behaviour.
+    row = armed_row(qtbot)
+    row.waypoints.add(Waypoint(3.0, -1.5))
+    row.refresh_waypoints()
+    assert row.map_view.waypoints == row.waypoints.items
+    assert "site" not in row.editor_title.text().lower()
+    assert "site" not in row.waypoint_list.item(0).text().lower()
+
+
+def test_a_locked_transform_converts_the_map_view_waypoints(qtbot):
+    row = armed_row(qtbot)
+    t = transform()
+    row.set_site_transform(t)
+    row.waypoints.add(Waypoint(3.0, -1.5))
+    row.refresh_waypoints()
+    expected_x, expected_y = site_to_map(t, 3.0, -1.5)
+    drawn = row.map_view.waypoints[0]
+    assert drawn.x == pytest.approx(expected_x)
+    assert drawn.y == pytest.approx(expected_y)
+
+
+def test_go_requested_still_carries_the_site_numbers_under_a_locked_transform(qtbot):
+    row = armed_row(qtbot)
+    row.set_site_transform(transform())
+    row.waypoints.add(Waypoint(3.0, -1.5))
+    row.refresh_waypoints()
+    sent = []
+    row.go_requested.connect(sent.append)
+    row.go_button.click()
+    assert sent == [[Waypoint(3.0, -1.5, None)]]
+
+
+def test_set_site_transform_none_restores_todays_behaviour_exactly(qtbot):
+    row = armed_row(qtbot)
+    row.set_site_transform(transform())
+    row.set_site_transform(None)
+    row.waypoints.add(Waypoint(3.0, -1.5))
+    row.refresh_waypoints()
+    assert row.map_view.waypoints == row.waypoints.items
+    assert "site" not in row.editor_title.text().lower()
+    assert "site" not in row.waypoint_list.item(0).text().lower()
+
+
+def test_the_site_marker_appears_only_when_a_transform_is_locked(qtbot):
+    row = armed_row(qtbot)
+    assert "site" not in row.editor_title.text().lower()
+    row.set_site_transform(transform())
+    assert "site" in row.editor_title.text().lower()
+    row.waypoints.add(Waypoint(1.0, 1.0))
+    row.refresh_waypoints()
+    assert "site" in row.waypoint_list.item(0).text().lower()
+    row.set_site_transform(None)
+    assert "site" not in row.editor_title.text().lower()
+
+
+def test_a_canvas_click_round_trips_through_the_locked_transform(qtbot):
+    # §3.9: a click on the plan canvas arrives in map frame and must be
+    # converted BACK to site here, or the wire conversion at Go would apply
+    # the transform a second time and the waypoint would land somewhere the
+    # operator never pointed at.
+    row = armed_row(qtbot)
+    t = transform()
+    row.set_site_transform(t)
+    mx, my = 4.0, 2.0
+    row.map_view.point_clicked.emit(mx, my)
+    expected_x, expected_y = map_to_site(t, mx, my)
+    stored = row.waypoints.items[0]
+    assert stored.x == pytest.approx(expected_x)
+    assert stored.y == pytest.approx(expected_y)
+    # A click lands where it was clicked: converting the stored site point
+    # back to map through the same transform returns the original click.
+    drawn = row.map_view.waypoints[0]
+    assert drawn.x == pytest.approx(mx, abs=1e-9)
+    assert drawn.y == pytest.approx(my, abs=1e-9)
+
+
+def test_a_canvas_click_with_no_transform_appends_verbatim(qtbot):
+    row = armed_row(qtbot)
+    row.map_view.point_clicked.emit(4.0, 2.0)
+    assert row.waypoints.items == [Waypoint(4.0, 2.0, None)]
 
 
 def test_resume_is_lit_only_while_the_rover_is_waiting_on_it(qtbot):
