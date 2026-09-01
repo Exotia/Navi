@@ -1,0 +1,17 @@
+{
+  "schema": "navi.site_landmarks/1",
+  "site_name": "EXAMPLE — replace before the run",
+  "frame": "site",
+  "units": "m",
+  "marker": {
+    "dictionary": "DICT_5X5_100",
+    "edge_m": 0.150,
+    "face_offset_m": 0.125,
+    "centre_height_m": 0.417
+  },
+  "landmarks": [
+    {"id": "51", "x": 12.40, "y": 3.10, "note": "pole by the north berm"},
+    {"id": "52", "x": 18.05, "y": -2.20},
+    {"id": "53", "x": 9.70, "y": -6.45}
+  ]
+}
