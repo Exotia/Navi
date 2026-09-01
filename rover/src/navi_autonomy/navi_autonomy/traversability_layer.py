@@ -52,9 +52,9 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from navi_autonomy.grid_map_io import (
     ELEVATION_LAYER, build_grid_map, build_occupancy_grid, layer_from_message)
 from navi_autonomy.tile_aggregator import MAP_TOPIC, POSE_TOPIC, latched_qos
-from navi_autonomy.traversability import (STEP_LETHAL_M, clear_startup_patch,
-                                          heal_goal_patch, seed_from_elevation,
-                                          stamp_wheel_trail)
+from navi_autonomy.traversability import (SLOPE_LETHAL_DEG, STEP_LETHAL_M,
+                                          clear_startup_patch, heal_goal_patch,
+                                          seed_from_elevation, stamp_wheel_trail)
 from navi_localization.elevation_grid import RESOLUTION
 
 TRAVERSABILITY_TOPIC = '/autonomy/traversability'
@@ -113,6 +113,12 @@ class TraversabilityLayer(Node):
         # by both planners, so the run ends before it starts. 0 disables.
         # See traversability.heal_goal_patch for the trade this accepts.
         self.declare_parameter('goal_heal_radius_m', GOAL_HEAL_RADIUS_M)
+        # 35 degrees by default, not the spec's 25 - see
+        # traversability.SLOPE_LETHAL_DEG for the tipping arithmetic behind
+        # it. Retunable like the step limit, and for the same reason: the
+        # yard decides, not the desk. Degrees on the wire because that is
+        # what an operator reads off a slope, radians everywhere inside.
+        self.declare_parameter('slope_lethal_deg', SLOPE_LETHAL_DEG)
         self.declare_parameter('active_goal_topic', ACTIVE_GOAL_TOPIC)
 
         self._frame_id = str(self.get_parameter('frame_id').value)
@@ -124,6 +130,8 @@ class TraversabilityLayer(Node):
         self._floating_gap_m = float(self.get_parameter('floating_gap_m').value)
         self._goal_heal_radius_m = float(
             self.get_parameter('goal_heal_radius_m').value)
+        self._slope_lethal_deg = float(
+            self.get_parameter('slope_lethal_deg').value)
         # (x, y) metres of the goal currently being driven to, or None. Kept
         # in metres, converted per tick like the startup patch, because the
         # rolling window's origin moves under it.
@@ -182,6 +190,7 @@ class TraversabilityLayer(Node):
         'wheel_trail_radius_m': '_wheel_trail_radius_m',
         'goal_heal_radius_m': '_goal_heal_radius_m',
         'startup_clear_radius_m': '_startup_clear_radius_m',
+        'slope_lethal_deg': '_slope_lethal_deg',
     }
 
     def _on_set_parameters(self, parameters) -> SetParametersResult:
@@ -244,9 +253,11 @@ class TraversabilityLayer(Node):
         origin_ix = int(round(float(message.info.pose.position.x) / resolution - n_x / 2.0))
         origin_iy = int(round(float(message.info.pose.position.y) / resolution - n_y / 2.0))
 
-        layers, cost = seed_from_elevation(elevation, resolution,
-                                           step_lethal_m=self._step_lethal_m,
-                                           floating_gap_m=self._floating_gap_m)
+        layers, cost = seed_from_elevation(
+            elevation, resolution,
+            step_lethal_m=self._step_lethal_m,
+            floating_gap_m=self._floating_gap_m,
+            slope_lethal_rad=math.radians(self._slope_lethal_deg))
         if self._startup_pose is not None:
             # The stored pose is metres; the seed's cells are indexed from
             # this tick's origin, which moves as the rolling window

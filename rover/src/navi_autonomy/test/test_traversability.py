@@ -38,8 +38,11 @@ def test_the_thresholds_are_the_numbers_the_chassis_justifies():
     # belly clearance and the wall this must never pass.
     assert STEP_LETHAL_M == 0.25
     assert STEP_LETHAL_M < 0.282
-    assert SLOPE_LETHAL_DEG == 25.0
-    assert SLOPE_LETHAL_RAD == pytest.approx(math.radians(25.0))
+    # 35 degrees, against a chassis that tips at about 47 sideways
+    # (half-track 0.444 m over a centre 0.409 m up).
+    assert SLOPE_LETHAL_DEG == 35.0
+    assert SLOPE_LETHAL_DEG < 47.0
+    assert SLOPE_LETHAL_RAD == pytest.approx(math.radians(35.0))
 
 
 # -- the acceptance criterion of this sub-project ------------------------
@@ -125,9 +128,9 @@ def test_slope_of_flat_ground_is_zero():
         == pytest.approx(0.0)
 
 
-def test_a_30_degree_plane_is_over_the_slope_threshold_and_25_is_not_under_it():
-    assert slope_layer(plane(30.0))[10, 10] > SLOPE_LETHAL_RAD
-    assert slope_layer(plane(20.0))[10, 10] < SLOPE_LETHAL_RAD
+def test_a_40_degree_plane_is_over_the_slope_threshold_and_30_is_under_it():
+    assert slope_layer(plane(40.0))[10, 10] > SLOPE_LETHAL_RAD
+    assert slope_layer(plane(30.0))[10, 10] < SLOPE_LETHAL_RAD
 
 
 # -- roughness -----------------------------------------------------------
@@ -208,10 +211,27 @@ def test_a_lethal_step_beats_an_incomplete_neighbourhood():
 
 
 def test_slope_scales_below_the_threshold_and_is_lethal_above_it():
-    _, cost_20 = seed_from_elevation(plane(20.0))
-    _, cost_30 = seed_from_elevation(plane(30.0))
-    assert cost_20[10, 10] == 79           # round(99 * 20/25)
-    assert cost_30[10, 10] == LETHAL
+    _, cost_28 = seed_from_elevation(plane(28.0))
+    _, cost_40 = seed_from_elevation(plane(40.0))
+    assert cost_28[10, 10] == 79           # round(99 * 28/35)
+    assert cost_40[10, 10] == LETHAL
+
+
+def test_a_thirty_degree_slope_is_climbed_now_and_used_to_be_refused():
+    # The whole point of raising the threshold: this is the slope the rover
+    # would have walled itself off from at 25 degrees.
+    _, cost = seed_from_elevation(plane(30.0))
+
+    assert cost[10, 10] != LETHAL
+
+
+def test_the_slope_threshold_can_be_overridden_per_call():
+    # What the layer node's live retune rides on: a caller may pass a
+    # different ceiling without touching the module constant.
+    _, cost = seed_from_elevation(plane(30.0),
+                                  slope_lethal_rad=math.radians(25.0))
+
+    assert cost[10, 10] == LETHAL
 
 
 def test_the_scaled_band_takes_the_worst_indicator_not_their_average():

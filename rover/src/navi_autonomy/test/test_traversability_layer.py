@@ -362,3 +362,14 @@ def test_a_topic_name_is_not_treated_as_a_live_parameter(node):
         [Parameter('map_topic', Parameter.Type.STRING, '/somewhere/else')])
 
     assert result.successful is True
+
+
+def test_the_slope_ceiling_can_be_lowered_while_the_node_runs(node):
+    # Degrees on the wire, radians inside: an operator reads a slope off the
+    # ground in degrees, and a retune that silently wanted radians would let
+    # a 35 become a wall at 2 degrees.
+    result = node._on_set_parameters(
+        [Parameter('slope_lethal_deg', Parameter.Type.DOUBLE, 20.0)])
+
+    assert result.successful is True
+    assert node._slope_lethal_deg == pytest.approx(20.0)

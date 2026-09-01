@@ -55,7 +55,20 @@ from navi_localization.elevation_grid import RESOLUTION
 # different courage.
 STEP_LETHAL_M = 0.25
 
-SLOPE_LETHAL_DEG = 25.0
+# 35 degrees, raised from the spec's 25 on the operator's judgement. The
+# chassis has the static margin for it: half the track is 0.444 m
+# (HPARAMS) and the body's centre sits about 0.409 m up, so the rover tips
+# at roughly atan(0.444 / 0.409) = 47 degrees sideways and 48 fore-and-aft.
+# 35 keeps about 12 degrees of that in hand for the dynamics a static sum
+# does not cover - a wheel dropping into a rut mid-traverse, braking on the
+# fall line, the load shifting.
+#
+# What ends a climb before tipping does is traction: on loose regolith the
+# wheels slip long before the rover leans over. That failure is recoverable
+# and visible - the rover stops making progress and the run's own progress
+# checker says so - which is why the threshold is set from the geometry
+# that is NOT recoverable.
+SLOPE_LETHAL_DEG = 35.0
 SLOPE_LETHAL_RAD = math.radians(SLOPE_LETHAL_DEG)
 
 # Roughness is never lethal on its own; the spec only asks for it to be
@@ -221,7 +234,8 @@ MAX_SCALED_COST = 99
 
 
 def costmap_seed(slope, step, roughness, valid,
-                 step_lethal_m: float = STEP_LETHAL_M) -> np.ndarray:
+                 step_lethal_m: float = STEP_LETHAL_M,
+                 slope_lethal_rad: float = SLOPE_LETHAL_RAD) -> np.ndarray:
     """The four layers as one int8 cost grid for /autonomy/costmap_seed.
 
         s = clip(slope     / SLOPE_LETHAL_RAD, 0, 1)
@@ -248,12 +262,13 @@ def costmap_seed(slope, step, roughness, valid,
     # operator can see is flat. Raising it at night trades hole-margin for
     # not walling off the whole yard; the spec value stays the default.
     worst = np.maximum(
-        np.maximum(np.clip(slope / SLOPE_LETHAL_RAD, 0.0, 1.0),
+        np.maximum(np.clip(slope / float(slope_lethal_rad), 0.0, 1.0),
                    np.clip(step / float(step_lethal_m), 0.0, 1.0)),
         np.clip(roughness / ROUGHNESS_REF_M, 0.0, 1.0))
     cost = np.rint(MAX_SCALED_COST * worst).astype(np.int8)
     cost[valid < 0.5] = UNKNOWN
-    cost[(step >= float(step_lethal_m)) | (slope >= SLOPE_LETHAL_RAD)] = LETHAL
+    cost[(step >= float(step_lethal_m))
+         | (slope >= float(slope_lethal_rad))] = LETHAL
     return cost
 
 
@@ -390,7 +405,8 @@ def heal_goal_patch(cost: np.ndarray, centre_cell, radius_cells: int) -> np.ndar
 
 def seed_from_elevation(elevation, resolution: float = RESOLUTION,
                         step_lethal_m: float = STEP_LETHAL_M,
-                        floating_gap_m: float = 0.0) -> tuple:
+                        floating_gap_m: float = 0.0,
+                        slope_lethal_rad: float = SLOPE_LETHAL_RAD) -> tuple:
     """(the four layers, the int8 cost grid) - the whole derive in one call.
     floating_gap_m > 0 first drops cells hanging in the air with no
     connection to the floor (see mask_floating_cells)."""
@@ -399,5 +415,6 @@ def seed_from_elevation(elevation, resolution: float = RESOLUTION,
     layers = derive(elevation, resolution)
     cost = costmap_seed(layers['slope'], layers['step'],
                         layers['roughness'], layers['valid'],
-                        step_lethal_m=step_lethal_m)
+                        step_lethal_m=step_lethal_m,
+                        slope_lethal_rad=slope_lethal_rad)
     return layers, cost
