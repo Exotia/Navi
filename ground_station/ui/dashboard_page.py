@@ -8,6 +8,7 @@ from ground_station.ui.drive_row import DriveRow
 from ground_station.ui.map_row import MapRow
 from ground_station.ui.nav_row import NavRow
 from ground_station.ui.node_list_widget import NodeListWidget
+from ground_station.ui.site_card import SiteCard
 from ground_station.ui.video_panel import VideoPanel
 
 
@@ -32,6 +33,13 @@ class DashboardPage(QWidget):
         # read a few times a session should not hold a fixed column of
         # width away from the map and the camera in every view.
         self.node_list.setVisible(False)
+        self.site_card = SiteCard()
+        # A second right-hand drawer, a twin of node_list: anchoring is a
+        # once-per-mission job like reading the node list, and hidden it
+        # costs the camera and the plan grid exactly nothing. The header
+        # toggle that shows it is wired later (T9) - this page only
+        # constructs it and keeps it out of the way until then.
+        self.site_card.setVisible(False)
         self.video_panel = VideoPanel(receiver=video_receiver)
         self.map_row = MapRow()
         self.map_row.setVisible(False)
@@ -129,6 +137,7 @@ class DashboardPage(QWidget):
         layout.setSpacing(8)
         layout.addLayout(left, stretch=3)
         layout.addWidget(self.node_list)
+        layout.addWidget(self.site_card)
 
     def _on_mode_toggled(self, checked: bool) -> None:
         if not checked:
