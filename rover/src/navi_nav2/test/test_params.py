@@ -236,7 +236,11 @@ def test_the_arrival_guard_is_looser_than_the_goal_checker_but_still_tight():
     xy = node('controller_server')['general_goal_checker']['xy_goal_tolerance']
     guard = node('bt_navigator')['goal_reached_tol']
     assert xy == 0.25
-    assert guard == 0.50
+    # 1.0: below the shortest leg an operator drives (1.5 m), so a lied-to
+    # controller cannot call the start line an arrival, and above the Smac
+    # shifts the goal-heal disc leaves likely - see the yaml comment for
+    # the full tug-of-war.
+    assert guard == 1.0
     assert xy < guard <= 1.0
 
 
@@ -269,3 +273,24 @@ def test_a_single_costmap_clear_is_not_the_last_word_for_either_planner_or_contr
             or 'number_of_retries="3" name="ComputePathThroughPoses"' in text)
     assert 'number_of_retries="3" name="FollowPath"' in text
     assert 'number_of_retries="1"' not in text
+
+
+@pytest.mark.parametrize('tree', ['navigate_to_pose_no_reverse.xml',
+                                  'navigate_through_poses_no_reverse.xml'])
+def test_nothing_on_this_rover_looks_backwards_in_any_tree(tree):
+    # The to-pose tree dropped BackUp long ago; the through-poses sibling
+    # kept a blind 0.30 m reverse that nothing currently reaches - latent,
+    # until the first person wires up navigate_through_poses.
+    assert '<BackUp' not in _tree_text(tree)
+
+
+def test_the_arrival_guard_admits_the_smac_shifts_the_heal_leaves_likely():
+    # Smac may shift an obstructed goal to the nearest standable pose. The
+    # guard cannot admit the full 2.5 m allowance without also admitting a
+    # false arrival on any leg shorter than that, so the deal is: the goal
+    # heal keeps real shifts small, and the guard admits everything up to
+    # the heal's own radius territory.
+    bt = node('bt_navigator')
+    smac = node('planner_server')['SmacBased']
+    assert bt['goal_reached_tol'] == 1.0
+    assert bt['goal_reached_tol'] < smac['tolerance']

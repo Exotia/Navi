@@ -28,7 +28,7 @@
                  pose are an obstacle!" - live, a night waypoint inside a
                  phantom lethal splash), SmacBased retries the same goal
                  with its tolerance: it plans to the nearest valid pose
-                 within 0.5 m instead of aborting the run over centimetres.
+                 within 2.5 m instead of aborting the run over centimetres.
                  Holes stay lethal to DRIVE over either way - this only
                  stops a bad goal cell from ending the mission. -->
             <Fallback name="PlanOrNearest">

@@ -1681,6 +1681,9 @@ _FULL_TUNING_STATE = {
     "step_lethal_m": 0.25, "slope_lethal_deg": 35.0, "floating_gap_m": 0.35,
     "wheel_trail_radius_m": 0.40, "goal_heal_radius_m": 1.4,
     "startup_clear_radius_m": 0.90,
+    "climb_lethal_m": 0.25,
+    "drop_lethal_m": 0.14,
+    "relative_radius_m": 3.0,
 }
 
 

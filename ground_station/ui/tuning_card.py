@@ -46,6 +46,20 @@ _ROWS = (
      "terrain is still reachable."),
     ("startup_clear_radius_m", "Startup clear radius", "m", 2, 0.1, 0.0, 5.0,
      "Disc of unknown ground cleared at the rover's first pose."),
+    ("climb_lethal_m", "Climb (from rover)", "m", 3, 0.01, 0.0, 1.0,
+     "How far above the rover's OWN ground a nearby cell may sit and "
+     "still be mountable - what catches a staircase of small steps that "
+     "no single step gives away. The 0.282 m belly ceiling applies here "
+     "exactly as it does to Step."),
+    ("drop_lethal_m", "Drop (from rover)", "m", 3, 0.01, 0.0, 1.0,
+     "How far BELOW the rover's ground a nearby cell may fall. Tighter "
+     "than the climb on purpose: a wheel climbs a rock it would fall "
+     "into."),
+    ("relative_radius_m", "Rover-relative radius", "m", 2, 0.1, 0.0, 10.0,
+     "How far around the rover the two limits above are judged. Keep it "
+     "small: applied to the whole map, a gentle 5 degree yard rises past "
+     "the climb limit within a few metres and the rover walls itself "
+     "in. 0 disables the test."),
 )
 
 # Shown in a row's rover column until the rover has reported at all. Never
@@ -172,7 +186,7 @@ class TuningCard(QWidget):
         layout.addStretch()
 
     def set_tuning_state(self, values: dict | None) -> None:
-        """The rover's own account of the six values, from
+        """The rover's own account of the tunable values, from
         /autonomy/tuning_state. ``None`` means the message either has not
         arrived yet or would not parse - both read the same to the
         operator: nothing trustworthy to show, so the card is left as it
@@ -191,6 +205,15 @@ class TuningCard(QWidget):
 
         self.status_label.setVisible(False)
         for key, row in self.rows.items():
+            # A rover value past the editor's range would be silently
+            # clamped on seeding, and the clamped number would then read as
+            # an operator change on the next Apply - a phantom request the
+            # operator never made. The rover's own value is the one thing
+            # this card must never argue with, so the range yields to it.
+            if values[key] > row.editor.maximum():
+                row.editor.setMaximum(values[key])
+            if values[key] < row.editor.minimum():
+                row.editor.setMinimum(values[key])
             row.rover_label.setText(row.rover_text(values[key]))
             row.editor.setEnabled(True)
             if first_report:

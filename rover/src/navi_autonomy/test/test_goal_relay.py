@@ -442,10 +442,14 @@ def test_the_active_goal_is_announced_for_the_traversability_layer(graph_factory
     relay._on_nav_request(go())
     spin(executor, 2.0)
 
-    assert len(published) == 1
-    assert published[0].pose.position.x == pytest.approx(3.0)
-    assert published[0].pose.position.y == pytest.approx(-1.5)
-    assert published[0].header.frame_id == "map"
+    # Announced at dispatch and again when the real goal is sent - the
+    # count is not the contract, the CONTENT is: every announcement is the
+    # operator's point, never anything a machine invented.
+    assert published
+    for announced in published:
+        assert announced.header.frame_id == "map"
+        assert announced.pose.position.x == pytest.approx(3.0)
+        assert announced.pose.position.y == pytest.approx(-1.5)
     assert published[0].pose.position.x == pytest.approx(
         server.received_goals[0].pose.pose.position.x)
 
@@ -661,3 +665,69 @@ def test_a_detour_writes_its_progress_to_the_diary(graph_factory):
     written = pathlib.Path(relay._runlog._path).read_text()
     assert "detour_feedback" in written
     assert "4.20 m to the detour point" in written
+
+
+def test_the_heal_disc_follows_the_operators_point_not_the_detour(graph_factory):
+    # heal_goal_patch erases measured LETHAL, and its licence is that a
+    # human placed the point and can see the ground they are vouching for.
+    # A machine-picked tack point carries no such vouching.
+    executor, relay, server, task, clock, statuses, summaries = graph_factory()
+    published = []
+    relay._active_goal_pub = type(
+        "Recorder", (), {"publish": lambda self, m: published.append(m)})()
+    relay._glare_side = "left"
+    relay._rover_xy = (0.0, 0.0)
+
+    relay._on_mode_status(mode("autonomous"))
+    relay._on_nav_request(go())
+    spin(executor, 2.0)
+
+    assert len(server.received_goals) == 1        # the detour went to Nav2
+    detour = server.received_goals[0]
+    assert len(published) == 1                    # but the heal follows the waypoint
+    assert published[0].pose.position.x == pytest.approx(3.0)
+    assert published[0].pose.position.y == pytest.approx(-1.5)
+    assert published[0].pose.position.x != detour.pose.pose.position.x
+
+
+def test_a_resume_of_the_same_waypoint_does_not_refill_the_detour_budget(graph_factory):
+    executor, relay, server, task, clock, statuses, summaries = graph_factory()
+    relay._glare_side = "left"
+    relay._rover_xy = (0.0, 0.0)
+    relay._planner.begin_leg()
+    for _ in range(relay._glare_detour_max_per_leg):
+        relay._planner.next_target((0.0, 0.0), (3.0, -1.5), "left")
+    spent = relay._planner.detours_taken
+    relay._current_leg_index = 0
+
+    relay._dispatch(rules.SEND_GOAL, (0, 3.0, -1.5, None))
+    spin(executor, 2.0)
+
+    # The budget stayed spent, so the re-dispatch drove at the real goal.
+    assert relay._planner.detours_taken == spent
+    assert server.received_goals[-1].pose.pose.position.x == pytest.approx(3.0)
+
+
+def test_cancelling_a_goal_retracts_the_heal_disc(graph_factory):
+    executor, relay, server, task, clock, statuses, summaries = graph_factory()
+    published = []
+    relay._active_goal_pub = type(
+        "Recorder", (), {"publish": lambda self, m: published.append(m)})()
+
+    relay._dispatch(rules.CANCEL_GOAL, "operator abort")
+
+    assert published, "a cancel must retract the heal disc"
+    assert published[-1].header.frame_id == ""
+    assert relay._current_leg_index is None
+
+
+def test_a_nan_pose_does_not_become_detour_geometry(graph_factory):
+    executor, relay, server, task, clock, statuses, summaries = graph_factory()
+    relay._rover_xy = (1.0, 2.0)
+
+    bad = Odometry()
+    bad.pose.pose.position.x = float("nan")
+    bad.pose.pose.position.y = 0.0
+    relay._on_pose(bad)
+
+    assert relay._rover_xy == (1.0, 2.0)

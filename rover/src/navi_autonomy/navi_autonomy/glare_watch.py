@@ -41,7 +41,7 @@ HEARTBEAT_S = 5.0
 # that have no reason to stay coupled just because they happen to agree
 # today.
 _IMAGE_CHANNELS = {
-    'bgra8': 4, 'bgr8': 3, 'rgb8': 3, 'rgba8': 4, 'mono8': 1,
+    'bgra8': 4, 'bgr8': 3, 'rgb8': 3, 'rgba8': 4, 'mono8': 1, '8UC1': 1,
 }
 
 

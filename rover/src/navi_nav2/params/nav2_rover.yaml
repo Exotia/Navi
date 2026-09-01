@@ -31,11 +31,20 @@ bt_navigator:
     wait_for_service_timeout: 1000
     transform_tolerance: 0.5
     # Read by the GoalReached condition that re-checks FollowPath's success
-    # in the map frame (see navigate_to_pose_no_reverse.xml): looser than
-    # general_goal_checker's 0.25 so a genuine arrival never flaps on frame
-    # disagreement, tight enough that a tf-glitch "success" 12 m out - the
-    # instant point-turn arrival seen live - can never pass.
-    goal_reached_tol: 0.50
+    # in the map frame (see navigate_to_pose_no_reverse.xml). 1.0 is a
+    # compromise between two failure modes that pull in opposite
+    # directions, and both are real. Pull it DOWN: this guard is what
+    # stops a controller lied to by a bad map->odom transform from calling
+    # the start line an arrival, so it must sit below the shortest leg an
+    # operator actually drives (1.5 m in the current missions). Pull it
+    # UP: Smac is allowed to shift an obstructed goal up to 2.5 m to the
+    # nearest standable pose, and an arrival there is correct and final -
+    # at 0.50 the guard called it a failure and churned the recovery loop
+    # against ground the rover was already standing on. 1.0 accepts every
+    # Smac shift the goal-heal disc (1.4 m of forced-free goal area)
+    # leaves likely, protects every leg longer than a metre, and the churn
+    # survives only for the rare shift in (1.0, 2.5].
+    goal_reached_tol: 1.0
     # Both are rewritten to this package's share directory by the launch
     # file (nav2_common.launch.RewrittenYaml); the value here is a marker
     # so the rewrite has a key to land on.

@@ -358,9 +358,14 @@ class TraversabilityLayer(Node):
         # validated path that already exists (_on_set_parameters above),
         # and it is what keeps `ros2 param get` telling the truth about
         # what the node is actually using.
-        # The state announcement rides on _on_set_parameters, which every
-        # one of these lands in, so there is nothing to publish here.
-        self.set_parameters(parameters)
+        # Atomically, not one at a time: set_parameters() runs the
+        # validation callback once PER PARAMETER, so a six-key Apply from
+        # the ground station would publish six tuning states, the first
+        # five of them half-applied. The atomic form hands the callback the
+        # whole batch once, which is also what its all-or-nothing
+        # validation was written for. The state announcement rides on that
+        # callback, so there is nothing to publish here.
+        self.set_parameters_atomically(parameters)
 
     def _publish_tuning_state(self) -> None:
         """All six live values, latched so a ground station connecting
@@ -378,7 +383,16 @@ class TraversabilityLayer(Node):
     def _on_active_goal(self, message: PoseStamped) -> None:
         """The goal the rover is driving to now. Replaced, never
         accumulated: healing follows the current goal, so a waypoint list
-        does not leave a trail of cleared discs behind it."""
+        does not leave a trail of cleared discs behind it.
+
+        An empty frame_id is the wire's retraction: the run ended or was
+        cancelled, and without honouring it the LAST goal's disc would be
+        healed on every tick forever - forced-free ground outliving the
+        mission that vouched for it, on a latched topic that replays to
+        every restart of this node."""
+        if not message.header.frame_id:
+            self._active_goal = None
+            return
         self._active_goal = (float(message.pose.position.x),
                              float(message.pose.position.y))
 

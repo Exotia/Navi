@@ -585,3 +585,22 @@ def test_a_refused_retune_announces_nothing(node):
 
     assert result.successful is False
     assert node._tuning_state_publisher.messages == []
+
+
+def test_an_empty_frame_id_retracts_the_heal_disc(node):
+    # Without the retraction the LAST goal's disc is healed on every tick
+    # forever - forced-free ground outliving the mission that vouched for
+    # it, on a latched topic that replays into every restart of this node.
+    message, lo = pit_map()
+    goal_x = (lo - 1 + -12) * 0.05
+    goal_y = (lo - 1 + -12) * 0.05
+    node._on_active_goal(goal_at(goal_x, goal_y))
+    node._on_map(message)
+    assert seed_of(node)[lo - 1, lo - 1] == 0
+
+    cleared = PoseStamped()
+    cleared.header.frame_id = ""
+    node._on_active_goal(cleared)
+    node._on_map(message)
+
+    assert seed_of(node)[lo - 1, lo - 1] == LETHAL

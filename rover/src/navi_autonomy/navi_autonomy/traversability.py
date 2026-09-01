@@ -20,6 +20,7 @@ frontier is Nav2 refusing unknown space and the forward-looking collision
 monitor, not a guess made here.
 """
 
+import functools
 import math
 import warnings
 
@@ -372,9 +373,16 @@ def costmap_seed(slope, step, roughness, valid,
     return cost
 
 
+@functools.lru_cache(maxsize=8)
 def _disc_offsets(radius_cells: int) -> np.ndarray:
     """(dy, dx) integer offsets of every cell within `radius_cells` of (0, 0),
-    on a Euclidean disc. Computed once per `clear_startup_patch` call."""
+    on a Euclidean disc.
+
+    Cached: the rover-relative test rebuilds a 3 m disc (a 121 x 121 mgrid)
+    on every 1 Hz map tick otherwise, for a radius that only changes when an
+    operator retunes it. The cache hands back the SAME array each time, so
+    callers must treat it as read-only - every current caller derives new
+    arrays from it and writes to none of it."""
     r = int(radius_cells)
     if r < 0:
         raise ValueError(f"radius_cells must be >= 0, got {radius_cells}")

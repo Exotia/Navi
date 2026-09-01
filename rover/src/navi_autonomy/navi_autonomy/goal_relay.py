@@ -133,6 +133,9 @@ class GoalRelay(Node):
         self._glare_side = None
         self._rover_xy = None            # (x, y) from /localization/pose, or None before the first one
         self._real_goal = None           # (index, x, y, yaw) of the waypoint currently in play
+        # Which waypoint index the detour budget was last reset for - a
+        # Resume re-dispatches the same index and must not refill it.
+        self._current_leg_index = None
         self._glare_detour_timeout_s = float(
             self.get_parameter("glare_detour_timeout_s").value)
         # When the detour currently in flight was dispatched, or None when
@@ -287,7 +290,14 @@ class GoalRelay(Node):
     def _on_pose(self, msg: Odometry) -> None:
         try:
             p = msg.pose.pose.position
-            self._rover_xy = (float(p.x), float(p.y))
+            x, y = float(p.x), float(p.y)
+            if not (math.isfinite(x) and math.isfinite(y)):
+                # A NaN pose is most likely exactly when tracking degrades,
+                # which is exactly when the detour geometry would read it -
+                # and a NaN rover_xy makes a NaN detour goal that Nav2 has
+                # no guard against. Keep the last finite pose instead.
+                return
+            self._rover_xy = (x, y)
         except Exception as exc:
             self.get_logger().error(f"pose callback failed: {exc!r}")
 
@@ -304,6 +314,14 @@ class GoalRelay(Node):
         goal.pose.position.x = float(x)
         goal.pose.position.y = float(y)
         goal.pose.orientation.w = 1.0
+        self._active_goal_pub.publish(goal)
+
+    def _publish_active_goal_cleared(self) -> None:
+        """Retract the heal disc: an empty frame_id is the wire's 'no active
+        goal', and the layer stops healing on it."""
+        goal = PoseStamped()
+        goal.header.frame_id = ""
+        goal.header.stamp = self.get_clock().now().to_msg()
         self._active_goal_pub.publish(goal)
 
     # -- Nav2 goal callbacks, wired when a SEND_GOAL action is dispatched ----
@@ -359,7 +377,6 @@ class GoalRelay(Node):
             f"the {self._glare_side} half of the frame - steering to "
             f"({px:.2f}, {py:.2f}) [detour {self._planner.detours_taken}/"
             f"{self._glare_detour_max_per_leg}]")
-        self._publish_active_goal(px, py)
         self._detour_started_at = self._now()
         self._nav2.send_goal(px, py, None, self._on_detour_succeeded,
                              self._on_detour_failed, self._on_detour_feedback)
@@ -539,16 +556,33 @@ class GoalRelay(Node):
         elif action == rules.SEND_GOAL:
             index, x, y, yaw = payload
             yaw = self._resolve_yaw(index, x, y, yaw)
-            # A new real waypoint: reset the detour counter for it (spec
-            # section on DetourPlanner - "a leg" is one real waypoint) and
-            # let the planner decide whether the first Nav2 goal is this
-            # point or a tack away from the glare.
             self._real_goal = (index, x, y, yaw)
-            self._planner.begin_leg()
+            # The heal disc follows the OPERATOR'S point, never a detour:
+            # heal_goal_patch erases measured LETHAL, and its whole licence
+            # is that a human placed the waypoint and can see the ground
+            # they are vouching for. A machine-picked tack point carries no
+            # such vouching, so it gets no disc - published here, once per
+            # dispatch, whether or not a detour is driven first.
+            self._publish_active_goal(x, y)
+            # The detour budget belongs to the leg, and a leg is a waypoint
+            # index: a Resume re-dispatches the SAME index, and refilling
+            # the budget there would let glare stretch one leg's four
+            # detours into four per pause - the unbounded tacking the cap
+            # exists to prevent.
+            if index != self._current_leg_index:
+                self._current_leg_index = index
+                self._planner.begin_leg()
             self._advance_toward_real_goal()
         elif action == rules.CANCEL_GOAL:
             self._runlog.event("goal_cancelled", str(payload))
             self._nav2.cancel(payload)
+            # The run is over or superseded: retract the heal disc, or the
+            # last goal's 1.4 m of forced-free ground outlives the mission
+            # it belonged to. Also forget the leg, so the next run's first
+            # waypoint - which may reuse index 0 - gets a fresh budget.
+            self._publish_active_goal_cleared()
+            self._current_leg_index = None
+            self._detour_started_at = None
         elif action == rules.PAUSE_TASK:
             self._runlog.event("coordinator_pause")
             self._task.pause()
@@ -564,6 +598,10 @@ class GoalRelay(Node):
         elif action == rules.NOTIFY_DESTINATION:
             self._runlog.event("destination_reached")
             self._task.notify_destination_reached()
+            # Same retraction as CANCEL_GOAL, on the happy path: the mission
+            # is complete and no cell owes the finished run anything.
+            self._publish_active_goal_cleared()
+            self._current_leg_index = None
         else:
             self.get_logger().warn(f"unknown goal_relay action: {action!r}")
 

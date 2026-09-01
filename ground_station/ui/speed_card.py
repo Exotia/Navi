@@ -116,9 +116,12 @@ class SpeedCard(QWidget):
         return self.slider.value() / CM_PER_M
 
     def set_speed(self, speed_m_s: float) -> None:
-        """Move the slider without pretending the operator did it: the
-        signal still fires, because whoever set this wants the reader to
-        follow, but the value is snapped to the slider's own range first."""
+        """Move the slider without pretending the operator did it. The
+        value is snapped to the slider's own range first, and the signal
+        fires only when the value actually CHANGES - Qt suppresses
+        valueChanged for a no-op set, so a caller re-asserting the current
+        speed produces no wire traffic, which is the behaviour a latched
+        consumer wants anyway."""
         self.slider.setValue(_to_cm(speed_m_s))
 
     def _on_slider_moved(self, _value: int) -> None:
