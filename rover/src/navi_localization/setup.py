@@ -26,6 +26,8 @@ setup(
         'console_scripts': [
             'localization_status = navi_localization.localization_status:main',
             'elevation_mapper = navi_localization.elevation_mapper:main',
+            'site_anchor = navi_localization.site_anchor:main',
+            'site_probe = navi_localization.site_probe:main',
         ],
     },
 )
