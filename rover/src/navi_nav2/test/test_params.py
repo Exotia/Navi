@@ -32,9 +32,13 @@ def costmap(which):
 # -- the speed caps (spec section 10) ---------------------------------------
 
 def test_the_velocity_smoother_carries_the_manual_cap():
+    # Linear still matches the manual cap. Angular does not any more: how
+    # fast the rover DRIVES and how fast it PIVOTS are separate decisions,
+    # and a 0.2 rad/s pivot made a half turn take 15.7 s, which the
+    # operator read as the rover planning a route and then doing nothing.
     smoother = node('velocity_smoother')
-    assert smoother['max_velocity'] == [0.2, 0.0, 0.2]
-    assert smoother['min_velocity'] == [-0.15, 0.0, -0.2]
+    assert smoother['max_velocity'] == [0.2, 0.0, 0.5]
+    assert smoother['min_velocity'] == [-0.15, 0.0, -0.5]
 
 
 def test_vy_is_pinned_to_zero_at_the_smoother():
@@ -54,8 +58,13 @@ def test_the_angular_acceleration_limit_is_the_one_the_spec_names():
 def test_the_controller_never_asks_for_more_than_the_smoother_passes():
     follow = node('controller_server')['FollowPath']
     smoother = node('velocity_smoother')
-    assert follow['desired_linear_vel'] == smoother["max_velocity"][0] == 0.2
-    assert follow['rotate_to_heading_angular_vel'] == smoother['max_velocity'][2] == 0.2
+    # The invariant is the relationship, not the numbers: a controller that
+    # asks for more than the smoother passes gets silently slowed, which is
+    # exactly how a raised rotation speed can look like no change at all.
+    assert follow['desired_linear_vel'] <= smoother["max_velocity"][0]
+    assert follow['rotate_to_heading_angular_vel'] <= smoother['max_velocity'][2]
+    assert follow['desired_linear_vel'] == 0.2
+    assert follow['rotate_to_heading_angular_vel'] == 0.5
 
 
 # -- no reversing (spec section 5) ------------------------------------------

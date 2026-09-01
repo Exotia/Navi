@@ -17,10 +17,33 @@ from navi_autonomy.glare import (
 
 # -- saturated_fractions -----------------------------------------------------
 
-def test_the_thresholds_are_the_spec_numbers():
+def test_the_thresholds_are_blunt_enough_that_ordinary_brightness_is_not_sun():
+    # Raised after a live run tacked with no strong sun in the sky: 2 per
+    # cent of a half frame is a wet stone or a painted line, and a detour
+    # costs minutes of mission clock.
     assert SATURATION_LEVEL == 250
-    assert GLARE_FRACTION == 0.02
-    assert GLARE_MARGIN == 1.5
+    assert GLARE_FRACTION == 0.20
+    assert GLARE_MARGIN == 3.0
+
+
+def test_a_thumbnail_of_white_is_not_a_sun():
+    # The exact case that misfired: a small bright patch on one side only.
+    image = np.zeros((100, 100, 3), dtype=np.uint8)
+    image[:10, :10] = 255                       # 1 per cent of the left half
+
+    left, right = saturated_fractions(image)
+
+    assert left == pytest.approx(0.02)
+    assert glare_side(left, right) is None
+
+
+def test_a_sun_that_whites_out_a_third_of_one_half_is_still_a_sun():
+    image = np.zeros((100, 100, 3), dtype=np.uint8)
+    image[:60, :30] = 255                       # 36 per cent of the left half
+
+    left, right = saturated_fractions(image)
+
+    assert glare_side(left, right) == 'left'
 
 
 def test_a_colour_image_where_a_pixel_is_saturated_in_one_channel_only_does_not_count_as_saturated():

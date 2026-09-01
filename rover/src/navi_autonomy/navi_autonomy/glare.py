@@ -21,12 +21,26 @@ SATURATION_LEVEL = 250
 
 #: A half of the frame is "glaring" when at least this fraction of its
 #: pixels are saturated.
-GLARE_FRACTION = 0.02
+#:
+#: 0.20, raised from 0.02. Two per cent of a half frame is roughly a
+#: thumbnail of white - a wet stone, a painted line, a window across the
+#: yard - and on 2026-09-01 it sent the rover tacking on a run the operator
+#: says had no strong sun at all. The sun that actually breaks the ZED's
+#: tracking is not subtle: it whites out a large part of the frame, and a
+#: fifth of one half is a deliberately blunt statement of "large". A
+#: detour costs minutes of mission clock, so this threshold should be
+#: reached only when the alternative is losing localisation.
+GLARE_FRACTION = 0.20
 
 #: One half must have at least this many times the other's saturated
 #: fraction before a side is named. Prevents a uniformly bright sky from
 #: being read as a direction.
-GLARE_MARGIN = 1.5
+#:
+#: 3.0, raised from 1.5. At 1.5 a half only half again as bright as the
+#: other named a side, which is well inside what ordinary scene brightness
+#: varies by across a frame. Steering the rover on that is steering on
+#: noise; three times is a real asymmetry.
+GLARE_MARGIN = 3.0
 
 # Below this separation, rover_xy and goal_xy no longer define a direction
 # worth trusting: the rover->goal unit vector's error blows up as the

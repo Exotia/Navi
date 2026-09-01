@@ -128,7 +128,18 @@ controller_server:
       rotate_to_goal_heading: false
       simulate_ahead_time: 1.0
       # -- shared by shim and RPP (one key, both read it)
-      rotate_to_heading_angular_vel: 0.2
+      # 0.5, raised from 0.2. This is what the operator kept seeing as "it
+      # planned a correct route and then nothing happened": at 0.2 rad/s a
+      # half turn takes 15.7 s, and the shim turns in place BEFORE it
+      # pursues, so the plan is drawn, the rover is working, and the
+      # distance-to-goal readout does not move for a quarter of a minute.
+      # The ride diary of 2026-09-01 shows exactly that - waypoint 2 sat at
+      # 11.30 m for thirteen seconds, then closed steadily to the goal, and
+      # waypoint 2 was directly behind the rover. At 0.5 the same turn is
+      # 6.3 s. The chassis takes it: the shaper's backstop allows 1.0 rad/s
+      # and its feasibility clamp still slows any turn the steering cannot
+      # actually execute, so this raises the ceiling, not the demand.
+      rotate_to_heading_angular_vel: 0.5
       # 2.0, not 0.5: the shim clamps each cycle to MEASURED odom speed
       # +- accel*dt. At 0.5 that is a 0.05 rad/s step gated on a chassis
       # that cannot execute 0.05 (below its deadband) and a bursty odom -
@@ -208,8 +219,13 @@ velocity_smoother:
     feedback: "OPEN_LOOP"
     # Spec section 10.  The y band is zero in both directions: this is
     # where vy is pinned for the whole stack.
-    max_velocity: [0.2, 0.0, 0.2]
-    min_velocity: [-0.15, 0.0, -0.2]
+    # The angular ceiling rises with the shim's rotate_to_heading_angular_vel
+    # above: leaving it at 0.2 here would smooth a 0.5 rad/s turn command
+    # straight back down to 0.2 and the half turn would still take 15.7 s,
+    # which is the whole thing being fixed. Linear stays 0.2 - autonomous
+    # driving speed is a separate decision from how fast the rover pivots.
+    max_velocity: [0.2, 0.0, 0.5]
+    min_velocity: [-0.15, 0.0, -0.5]
     max_accel: [0.5, 0.0, 0.5]
     max_decel: [-0.5, 0.0, -0.5]
     odom_topic: "/localization/odom_local"
