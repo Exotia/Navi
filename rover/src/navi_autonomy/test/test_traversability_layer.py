@@ -115,6 +115,24 @@ def test_the_traversability_grid_map_carries_all_four_layers(node):
     assert np.nanmax(step) == pytest.approx(0.3)
 
 
+def test_the_published_slope_layer_is_the_fitted_one_not_the_raw_gradient(node):
+    # The operator reads this published layer to see why ground was
+    # refused, so it has to be the slope the cost actually used - the
+    # fitted plane, not the raw two-cell gradient slope_layer still
+    # computes for anyone debugging the fit itself.
+    from navi_autonomy.traversability import slope_layer, slope_layer_fitted
+    rng = np.random.default_rng(42)
+    flat_noisy = rng.normal(0.0, 0.02, (60, 60)).astype(np.float32)
+    message = build_grid_map({'elevation': flat_noisy}, -30, -30, 0.05, 'map', Time())
+
+    node._on_map(message)
+
+    published = layer_from_message(node._traversability_publisher.messages[0], 'slope')
+    assert np.nanmax(np.degrees(published)) < 15.0
+    assert np.nanmax(np.degrees(slope_layer(flat_noisy))) > 45.0   # what it is not
+    np.testing.assert_array_equal(published, slope_layer_fitted(flat_noisy))
+
+
 def test_the_expensive_grid_map_is_not_built_when_nobody_is_listening(node):
     node._traversability_subscribers = lambda: 0
     message, _ = pit_map()
@@ -457,6 +475,20 @@ def test_a_topic_name_is_not_treated_as_a_live_parameter(node):
         [Parameter('map_topic', Parameter.Type.STRING, '/somewhere/else')])
 
     assert result.successful is True
+
+
+def test_the_slope_fit_radius_is_live_retunable(node):
+    # See traversability.SLOPE_FIT_RADIUS_M: the yard, not the desk, gets
+    # to decide how wide a neighbourhood the cost's slope is averaged over,
+    # the same as the other five numbers on this wire.
+    from navi_autonomy.traversability import SLOPE_FIT_RADIUS_M
+    assert node._slope_fit_radius_m == pytest.approx(SLOPE_FIT_RADIUS_M)
+
+    result = node._on_set_parameters(
+        [Parameter('slope_fit_radius_m', Parameter.Type.DOUBLE, 0.35)])
+
+    assert result.successful is True
+    assert node._slope_fit_radius_m == pytest.approx(0.35)
 
 
 def test_the_slope_ceiling_can_be_lowered_while_the_node_runs(node):

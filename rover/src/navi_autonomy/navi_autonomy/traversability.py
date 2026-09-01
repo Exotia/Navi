@@ -163,7 +163,11 @@ def _gradient(plus: np.ndarray, minus: np.ndarray, centre: np.ndarray,
 
 
 def slope_layer(elevation, resolution: float = RESOLUTION) -> np.ndarray:
-    """Ground inclination in radians: atan of the gradient magnitude."""
+    """Ground inclination in radians: atan of the gradient magnitude.
+
+    The raw two-cell gradient - see slope_layer_fitted for the smoothed
+    slope the cost actually judges by. This one stays available for
+    anyone debugging the fit against the noise it exists to average out."""
     grid = _as_grid(elevation)
     rows, cols = grid.shape
     padded = _padded(grid)
@@ -173,6 +177,141 @@ def slope_layer(elevation, resolution: float = RESOLUTION) -> np.ndarray:
                    grid, resolution)
     slope = np.arctan(np.hypot(gx, gy)).astype(np.float32)
     return np.where(np.isfinite(grid), slope, np.nan).astype(np.float32)
+
+
+#: The half-size of the neighbourhood a cell's ground plane is fitted
+#: over. 0.2 m matches the reference stack that beat everyone at ERC, and
+#: it is the scale at which centimetre depth noise stops looking like
+#: terrain: 2 cm over this plane's 0.4 m span is under 3 degrees, where
+#: the raw two-cell gradient read the same noise as 11.
+SLOPE_FIT_RADIUS_M = 0.2
+
+# A plane through 3 points is exact by construction, whether the 3 points
+# are real ground or 3 points of pure sensor noise - it cannot disagree
+# with itself and say so. 6 is the first count at which a least-squares
+# fit has a genuine residual: more equations than unknowns, so the fit
+# can actually be wrong about a cell rather than merely pass through it.
+_SLOPE_FIT_MIN_SUPPORT = 6
+
+
+def _windowed_sum(values: np.ndarray, half: int) -> np.ndarray:
+    """Sum of `values` over the (2*half+1) square centred on each cell,
+    clipped at the grid edge - a border cell gets a smaller, one-sided
+    window, the same convention `_padded`'s NaN neighbours use elsewhere in
+    this module: a missing cell contributes nothing, it never wraps and it
+    is never invented.
+
+    A summed-area table: the double cumulative sum turns a window query of
+    ANY radius into four array lookups, so this function's cost does not
+    grow with `half`. That is what keeps slope_fit_radius_m safe to widen
+    on a live retune - a bigger neighbourhood costs nothing extra here,
+    unlike a sliding-window convolution whose cost is the window's area.
+
+    Zero-padded by `half` on every side before the integral image is
+    built, rather than clipped by indexing into it: the padding turns
+    every window - edge cells included - into the SAME fixed (2*half+1)
+    square, so the four corners of that square are always a plain slice of
+    the integral image, never a per-pixel gather (which measured 2x slower
+    on a 960 x 960 grid). A zero contributes nothing to any of the sums
+    this function is used for (a count, or a value already zeroed at an
+    unseen cell), so the padding is exactly the missing neighbour it
+    stands in for. The padded values are written directly into the
+    integral array's own border and cumulatively summed in place
+    (`out=integral`), which is the other half of that measured saving -
+    one array carries both the padding and the running sum, instead of a
+    padded copy handed to a second, freshly allocated one."""
+    rows, cols = values.shape
+    span = 2 * half + 1
+    integral = np.zeros((rows + span, cols + span), dtype=np.float64)
+    integral[half + 1:half + 1 + rows, half + 1:half + 1 + cols] = values
+    np.cumsum(integral, axis=0, out=integral)
+    np.cumsum(integral, axis=1, out=integral)
+    return (integral[span:, span:] - integral[:-span, span:]
+            - integral[span:, :-span] + integral[:-span, :-span])
+
+
+def slope_layer_fitted(elevation, resolution: float = RESOLUTION,
+                       fit_radius_m: float = SLOPE_FIT_RADIUS_M) -> np.ndarray:
+    """Ground inclination in radians from a least-squares plane fitted to
+    each cell's neighbourhood, replacing the raw two-cell gradient as the
+    slope the costmap judges.
+
+    slope_layer takes its gradient from two adjacent cells - a 0.10 m
+    baseline at this grid's resolution - so 2 cm of ZED depth noise reads
+    as atan(0.02 / 0.10) = 11 degrees of phantom incline, and doubles when
+    the noise runs the other way on the far side. Fitting a plane over a
+    wider neighbourhood is the reference stack's whole trick (AGH's
+    kalman_robot, multiple ERC wins): the same 2 cm of noise spread over
+    `fit_radius_m`'s 0.4 m span averages down to under 3 degrees, while a
+    real slope's gradient survives the averaging unchanged, because every
+    cell in the window agrees with it.
+
+    The window is a square of half-width round(fit_radius_m / resolution)
+    cells, not a Euclidean disc: a square's row and column sums are exactly
+    what a summed-area table gives for free, where a disc's round edge
+    would need a per-radius mask rebuilt on every retune. The corners a
+    square adds over a disc are a small fraction of the window and do not
+    change which cells the fit calls noise.
+
+    A cell's own fit uses every finite cell in its window; a NaN cell
+    contributes to no fit but its own absence. The result is NaN where the
+    cell itself is unseen, or where fewer than 6 finite cells support its
+    fit - see _SLOPE_FIT_MIN_SUPPORT for why 3 is not enough."""
+    grid = _as_grid(elevation)
+    rows, cols = grid.shape
+    half = int(round(float(fit_radius_m) / float(resolution)))
+    if half < 1:
+        # A window under one cell wide cannot report a gradient at all -
+        # this only happens if a live retune sets the radius to (near)
+        # zero, and a single-cell window is a saner fallback than a
+        # guaranteed-NaN layer.
+        half = 1
+
+    finite = np.isfinite(grid)
+    z = np.where(finite, grid, 0.0).astype(np.float64)
+    m = finite.astype(np.float64)
+    # Row vectors, not two full (rows, cols) coordinate grids: x only
+    # varies along columns and y only along rows, so broadcasting keeps
+    # every array below at its natural size until the multiply that
+    # actually needs the full grid forces it. Centred on the grid's own
+    # middle rather than on cell (0, 0) - a linear fit's slope is
+    # invariant to shifting every coordinate by the same constant, so this
+    # changes no answer, it only keeps the numbers in the normal equations
+    # small regardless of how large the grid is.
+    x = (np.arange(cols, dtype=np.float64) - cols / 2.0)[None, :]
+    y = (np.arange(rows, dtype=np.float64) - rows / 2.0)[:, None]
+
+    n = _windowed_sum(m, half)
+    sx = _windowed_sum(x * m, half)
+    sy = _windowed_sum(y * m, half)
+    sxx = _windowed_sum(x * x * m, half)
+    syy = _windowed_sum(y * y * m, half)
+    sxy = _windowed_sum(x * y * m, half)
+    sz = _windowed_sum(z, half)
+    sxz = _windowed_sum(x * z, half)
+    syz = _windowed_sum(y * z, half)
+
+    # Cramer's rule on the 3x3 normal equations for z = a + b*x + c*y,
+    # solved elementwise across the whole grid at once - the vectorised
+    # stand-in for fitting each cell's plane in a Python loop. Only b and c
+    # (the gradient) are used; the intercept a is never computed.
+    det = (n * (sxx * syy - sxy * sxy)
+           - sx * (sx * syy - sxy * sy)
+           + sy * (sx * sxy - sxx * sy))
+    det_b = (n * (sxz * syy - sxy * syz)
+             - sz * (sx * syy - sxy * sy)
+             + sy * (sx * syz - sxz * sy))
+    det_c = (n * (sxx * syz - sxz * sxy)
+             - sx * (sx * syz - sxz * sy)
+             + sz * (sx * sxy - sxx * sy))
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        gx = np.where(det != 0.0, det_b / det, np.nan) / float(resolution)
+        gy = np.where(det != 0.0, det_c / det, np.nan) / float(resolution)
+
+    slope = np.arctan(np.hypot(gx, gy)).astype(np.float32)
+    supported = n >= _SLOPE_FIT_MIN_SUPPORT
+    return np.where(finite & supported, slope, np.nan).astype(np.float32)
 
 
 def roughness_layer(elevation) -> np.ndarray:
@@ -243,17 +382,34 @@ def mask_floating_cells(elevation, gap_m: float) -> np.ndarray:
     return e
 
 
-def derive(elevation, resolution: float = RESOLUTION) -> dict:
+def derive(elevation, resolution: float = RESOLUTION,
+          fit_radius_m: float = SLOPE_FIT_RADIUS_M) -> dict:
     """The four layers, in one pass over the window.
 
-    Measured on the laptop, 2026-08-30, at the full 960 x 960: step 35 ms,
-    slope 49 ms, roughness 21 ms, valid 3 ms - about 110 ms, against a 1 Hz
-    tick. The Orin's cores are 2-3x slower single-thread; SP9/SP10 measure it
-    there (spec section 5, section 11 risk 6), SP12 re-measures it in the
-    yard, and the documented fallback is spec section 5's 24 m window."""
+    'slope' is slope_layer_fitted, not the raw two-cell gradient - this is
+    the layer both the cost and the published GridMap use, because the
+    operator reads that layer to understand why ground was refused, and it
+    must be the slope the refusal was actually based on. The raw gradient
+    stays available by calling slope_layer directly, for debugging the fit
+    itself against the noise it exists to average out.
+
+    Measured on the laptop, 2026-09-01, at the full 960 x 960: step 25 ms,
+    slope (fitted, 0.2 m radius) ~290 ms, roughness 25 ms, valid 3 ms -
+    about 300 ms, against a 1 Hz tick. That is roughly 3x the old raw
+    two-cell gradient's ~110 ms total, and it is the honest cost of the
+    fit: nine windowed sums over a 9x9 window in float64, because the
+    normal equations' cross terms are exactly what cancels catastrophically
+    in float32 at grid-index magnitude. The Orin's cores are 2-3x slower
+    single-thread; SP9/SP10 measure it there (spec section 5, section 11
+    risk 6), SP12 re-measures it in the yard, and the documented fallback
+    is spec section 5's 24 m window - now joined by a second one if the
+    Orin needs it: narrowing slope_fit_radius_m shrinks the window, but
+    the summed-area table's cost does not scale with it, so the fallback
+    that actually helps is the same 24 m window the raw gradient always
+    had."""
     grid = _as_grid(elevation)
     return {
-        'slope': slope_layer(grid, resolution),
+        'slope': slope_layer_fitted(grid, resolution, fit_radius_m),
         'step': step_layer(grid),
         'roughness': roughness_layer(grid),
         'valid': valid_layer(grid),
@@ -332,13 +488,17 @@ def costmap_seed(slope, step, roughness, valid,
         r = clip(roughness / ROUGHNESS_REF_M,  0, 1)
         cost = round(99 * max(s, t, r))
         cost = -1   where valid == 0
+        cost = -1   where slope is NaN (too few cells to fit a plane)
         cost = 100  where step >= STEP_LETHAL_M or slope >= SLOPE_LETHAL_RAD
 
     `max`, not a mean: one bad indicator must not be averaged away by two
     good ones. The order of the last two lines is deliberate - a cell with a
     measured lethal step is lethal even where its neighbourhood is too
-    incomplete for `valid`, because that is the safe direction and because it
-    is exactly what a hole's frontier looks like.
+    incomplete for `valid` or for the slope fit, because that is the safe
+    direction and because it is exactly what a hole's frontier looks like.
+    An unsupported slope fit (fewer than 6 finite cells in its window) is
+    unknown for the same reason an unseen cell is: the fit has nothing to
+    say, and nothing to say is not the same as flat.
 
     `rover_z` and `rover_cell`, given together with `elevation`, turn on a
     second and independent lethal test: a cell also goes lethal when it sits
@@ -363,7 +523,16 @@ def costmap_seed(slope, step, roughness, valid,
     moved with it. Disabled whenever `elevation`, `rover_z` or `rover_cell`
     is None, or when `relative_radius_m` <= 0.
     """
-    slope = np.nan_to_num(np.asarray(slope, dtype=np.float32), nan=0.0)
+    slope = np.asarray(slope, dtype=np.float32)
+    # A NaN here now means two different things: the cell itself is
+    # unseen (valid already catches that), or the fitted plane had fewer
+    # than 6 finite cells to lean on - a real case at the mapped frontier
+    # that the 4-neighbour `valid` test does not see, because 6 cells
+    # across a 0.2 m radius is a wider ask than 4 immediate neighbours.
+    # Captured before the NaN is zeroed away, so it can still mark the
+    # cell unknown rather than silently reading as flat.
+    slope_unsupported = ~np.isfinite(slope)
+    slope = np.nan_to_num(slope, nan=0.0)
     step = np.nan_to_num(np.asarray(step, dtype=np.float32), nan=0.0)
     roughness = np.nan_to_num(np.asarray(roughness, dtype=np.float32), nan=0.0)
     valid = np.asarray(valid, dtype=np.float32)
@@ -379,6 +548,7 @@ def costmap_seed(slope, step, roughness, valid,
         np.clip(roughness / ROUGHNESS_REF_M, 0.0, 1.0))
     cost = np.rint(MAX_SCALED_COST * worst).astype(np.int8)
     cost[valid < 0.5] = UNKNOWN
+    cost[slope_unsupported] = UNKNOWN
     cost[(step >= float(step_lethal_m))
          | (slope >= float(slope_lethal_rad))] = LETHAL
 
@@ -550,6 +720,7 @@ def seed_from_elevation(elevation, resolution: float = RESOLUTION,
                         step_lethal_m: float = STEP_LETHAL_M,
                         floating_gap_m: float = 0.0,
                         slope_lethal_rad: float = SLOPE_LETHAL_RAD,
+                        slope_fit_radius_m: float = SLOPE_FIT_RADIUS_M,
                         rover_z=None,
                         rover_cell=None,
                         relative_radius_m: float = RELATIVE_RADIUS_M,
@@ -559,13 +730,15 @@ def seed_from_elevation(elevation, resolution: float = RESOLUTION,
     floating_gap_m > 0 first drops cells hanging in the air with no
     connection to the floor (see mask_floating_cells).
 
-    rover_z and rover_cell, given together, turn on the rover-relative
-    lethal test within relative_radius_m of rover_cell - see costmap_seed's
-    docstring for what it catches and why it must not run past that radius.
-    rover_z is None (the default) disables it entirely."""
+    slope_fit_radius_m is the neighbourhood the cost's slope is fitted
+    over - see slope_layer_fitted. rover_z and rover_cell, given together,
+    turn on the rover-relative lethal test within relative_radius_m of
+    rover_cell - see costmap_seed's docstring for what it catches and why
+    it must not run past that radius. rover_z is None (the default)
+    disables it entirely."""
     if floating_gap_m > 0.0:
         elevation = mask_floating_cells(elevation, floating_gap_m)
-    layers = derive(elevation, resolution)
+    layers = derive(elevation, resolution, slope_fit_radius_m)
     cost = costmap_seed(layers['slope'], layers['step'],
                         layers['roughness'], layers['valid'],
                         step_lethal_m=step_lethal_m,

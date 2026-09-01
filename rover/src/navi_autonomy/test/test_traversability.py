@@ -12,10 +12,11 @@ import pytest
 
 from navi_autonomy.traversability import (
     CLIMB_LETHAL_M, DROP_LETHAL_M, LETHAL, MAX_SCALED_COST, RELATIVE_RADIUS_M,
-    ROUGHNESS_REF_M, SLOPE_LETHAL_DEG, SLOPE_LETHAL_RAD, STEP_LETHAL_M, UNKNOWN,
-    clear_startup_patch, costmap_seed, derive, ground_under, heal_goal_patch,
-    height_relative_to, roughness_layer, seed_from_elevation, slope_layer,
-    stamp_wheel_trail, step_layer, valid_layer)
+    ROUGHNESS_REF_M, SLOPE_FIT_RADIUS_M, SLOPE_LETHAL_DEG, SLOPE_LETHAL_RAD,
+    STEP_LETHAL_M, UNKNOWN, clear_startup_patch, costmap_seed, derive,
+    ground_under, heal_goal_patch, height_relative_to, roughness_layer,
+    seed_from_elevation, slope_layer, slope_layer_fitted, stamp_wheel_trail,
+    step_layer, valid_layer)
 
 
 def pit(depth=0.2, size=6, extent=24):
@@ -133,6 +134,102 @@ def test_slope_of_flat_ground_is_zero():
 def test_a_50_degree_plane_is_over_the_slope_threshold_and_40_is_under_it():
     assert slope_layer(plane(50.0))[10, 10] > SLOPE_LETHAL_RAD
     assert slope_layer(plane(40.0))[10, 10] < SLOPE_LETHAL_RAD
+
+
+# -- the fitted slope: the plane fit that replaces the raw gradient in cost -
+
+def test_the_fitted_slope_of_a_noiseless_plane_is_exact_away_from_the_edge():
+    # The required proof this whole change rests on: a least-squares plane
+    # fit through a plane with no noise on it has zero residual, so the
+    # fitted gradient must equal the true one to float precision, not just
+    # "close" - whatever error the raw two-cell gradient carries from noise,
+    # the fit must carry none of it when there is no noise to carry.
+    for degrees in (10.0, 30.0, 44.0):
+        fitted = slope_layer_fitted(plane(degrees, extent=40))
+        assert math.degrees(fitted[20, 20]) == pytest.approx(degrees, abs=1e-4)
+
+
+def test_the_fitted_slope_averages_out_two_centimetres_of_noise_that_break_the_raw_gradient():
+    # The operator's own complaint, quantified. 2 cm of per-cell noise on
+    # flat ground reads as atan(0.02 / 0.10) = 11 degrees on the raw two-cell
+    # gradient at worst, and doubles when neighbouring noise runs opposite
+    # ways - comfortably enough to clear SLOPE_LETHAL_DEG somewhere on a
+    # big enough patch. Averaged over the fit's 0.4 m span the same noise
+    # is under 3 degrees in theory; in practice, with real Gaussian noise
+    # and a live cell of margin, well under 15.
+    rng = np.random.default_rng(42)
+    flat_noisy = rng.normal(0.0, 0.02, (60, 60)).astype(np.float32)
+
+    raw = slope_layer(flat_noisy)
+    fitted = slope_layer_fitted(flat_noisy)
+
+    assert np.nanmax(np.degrees(raw)) > SLOPE_LETHAL_DEG
+    assert np.all(np.isfinite(fitted))            # a fully-seen 60x60 grid
+    assert np.nanmax(np.degrees(fitted)) < 15.0
+
+    # Hence: the seed has no lethal cells at all, from slope or otherwise -
+    # the same noise is also far short of STEP_LETHAL_M.
+    _, cost = seed_from_elevation(flat_noisy)
+    assert (cost == LETHAL).sum() == 0
+
+
+def test_a_real_50_degree_ramp_is_still_lethal_under_the_fitted_slope():
+    _, cost = seed_from_elevation(plane(50.0))
+    assert cost[10, 10] == LETHAL
+
+
+def test_a_0_3m_one_cell_wall_is_still_lethal_through_the_step_path():
+    # The step demotion is deliberately narrow: only the slope path moved
+    # to the fitted plane. A wall one cell wide dilutes badly under a 9x9
+    # fit - the window is nine tenths flat ground on either side of it, so
+    # the fitted slope reads a few degrees, nowhere near lethal - and that
+    # dilution is exactly the risk the task calls out. step_layer takes no
+    # window at all, so the wall's own 0.3 m edge stays exactly as lethal
+    # as it always was, and the seed's LETHAL still comes from it.
+    grid = np.zeros((20, 20), dtype=np.float32)
+    grid[:, 10] = 0.3                              # one column, one cell wide
+
+    fitted_deg = math.degrees(slope_layer_fitted(grid)[10, 9])
+    assert fitted_deg < 10.0                       # the dilution, made concrete
+
+    assert step_layer(grid)[10, 9] == pytest.approx(0.3)
+    _, cost = seed_from_elevation(grid)
+    assert cost[10, 9] == LETHAL
+    assert cost[10, 10] == LETHAL
+
+
+def test_fewer_than_6_supporting_cells_is_nan_and_the_seed_calls_it_unknown_not_free():
+    # A cell can pass the OLD 4-axial-neighbour `valid` test and still lack
+    # the wider support the fit needs: valid only asks about 4 immediate
+    # neighbours, the fit's default window asks about a 9x9 neighbourhood.
+    # This is exactly that gap - a lone seen cross of 5 cells in an
+    # otherwise unseen map - and it is why costmap_seed treats an
+    # unsupported fit as its own reason to say unknown, not to fall
+    # through and read as flat, free ground.
+    grid = np.full((20, 20), np.nan, dtype=np.float32)
+    grid[10, 10] = 0.0
+    grid[9, 10] = grid[11, 10] = grid[10, 9] = grid[10, 11] = 0.0
+
+    assert valid_layer(grid)[10, 10] == 1.0        # the old test says fine
+    assert not np.isfinite(slope_layer_fitted(grid)[10, 10])   # 5 cells < 6
+
+    _, cost = seed_from_elevation(grid)
+    assert cost[10, 10] == UNKNOWN
+
+
+def test_the_square_fit_window_half_width_follows_the_radius_and_resolution():
+    # half = round(fit_radius_m / resolution) cells, per the docstring: at
+    # the default 0.05 m resolution, 0.2 m is half=4 (a 9x9 window) and
+    # 0.3 m is half=6 (a 13x13 window). Two supporting cells placed exactly
+    # 5 cells from the centre sit outside the first window and inside the
+    # second, which is the width change made observable.
+    grid = np.full((30, 30), np.nan, dtype=np.float32)
+    grid[15, 15] = 0.0
+    grid[14, 15] = grid[16, 15] = grid[15, 14] = grid[15, 16] = 0.0
+    grid[10, 15] = grid[20, 15] = 0.0        # 5 cells out - only reachable at 0.3 m
+
+    assert not np.isfinite(slope_layer_fitted(grid, fit_radius_m=0.2)[15, 15])
+    assert np.isfinite(slope_layer_fitted(grid, fit_radius_m=0.3)[15, 15])
 
 
 # -- roughness -----------------------------------------------------------

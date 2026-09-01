@@ -7,8 +7,8 @@ view - it can also drive the pit colouring in the sim) and
 /autonomy/costmap_seed (OccupancyGrid, latched)."
 
 Event-driven, not on a timer: the map arrives at about 1 Hz and there is
-nothing to recompute in between. The derive is ~150 ms at 960 x 960 on the
-laptop (see traversability.derive).
+nothing to recompute in between. The derive is ~300 ms at 960 x 960 on the
+laptop, most of it the fitted-plane slope (see traversability.derive).
 
 The four-layer GridMap is 14.7 MB per message and nothing on the rover
 subscribes to it - it is for the view and the sim - so it is built only when
@@ -62,7 +62,8 @@ from navi_autonomy.grid_map_io import (
     ELEVATION_LAYER, build_grid_map, build_occupancy_grid, layer_from_message)
 from navi_autonomy.tile_aggregator import MAP_TOPIC, POSE_TOPIC, latched_qos
 from navi_autonomy.traversability import (CLIMB_LETHAL_M, DROP_LETHAL_M,
-                                          RELATIVE_RADIUS_M, SLOPE_LETHAL_DEG,
+                                          RELATIVE_RADIUS_M, SLOPE_FIT_RADIUS_M,
+                                          SLOPE_LETHAL_DEG,
                                           STEP_LETHAL_M, clear_startup_patch,
                                           ground_under, heal_goal_patch,
                                           seed_from_elevation,
@@ -71,6 +72,12 @@ from navi_localization.elevation_grid import RESOLUTION
 
 TRAVERSABILITY_TOPIC = '/autonomy/traversability'
 COSTMAP_SEED_TOPIC = '/autonomy/costmap_seed'
+# 'slope' here is traversability.slope_layer_fitted, not the raw two-cell
+# gradient - it is the number the seed's cost is actually built from, and
+# the operator reads this published layer to see why ground was refused,
+# so it has to be the one the refusal used. The raw gradient
+# (traversability.slope_layer) is still there for anyone debugging the fit
+# itself; it is simply not on this wire.
 LAYER_ORDER = ('slope', 'step', 'roughness', 'valid')
 
 # The costmap's robot_radius (nav2_rover.yaml) is 0.80 m; the operator's
@@ -160,6 +167,13 @@ class TraversabilityLayer(Node):
         # yard decides, not the desk. Degrees on the wire because that is
         # what an operator reads off a slope, radians everywhere inside.
         self.declare_parameter('slope_lethal_deg', SLOPE_LETHAL_DEG)
+        # The neighbourhood radius the cost's slope is fitted over - see
+        # traversability.SLOPE_FIT_RADIUS_M for the noise arithmetic this
+        # number answers. Live-retunable for the same reason the other five
+        # are: the yard, not the desk, gets the last word on whether it is
+        # wide enough to average out the ZED's noise without averaging away
+        # a real slope.
+        self.declare_parameter('slope_fit_radius_m', SLOPE_FIT_RADIUS_M)
         # Rover-relative lethality: a cell more than this above the rover's
         # own current ground is something the rover cannot climb, even if
         # every individual step towards it read comfortably drivable (a
@@ -192,6 +206,8 @@ class TraversabilityLayer(Node):
             self.get_parameter('rover_heal_radius_m').value)
         self._slope_lethal_deg = float(
             self.get_parameter('slope_lethal_deg').value)
+        self._slope_fit_radius_m = float(
+            self.get_parameter('slope_fit_radius_m').value)
         self._climb_lethal_m = float(self.get_parameter('climb_lethal_m').value)
         self._drop_lethal_m = float(self.get_parameter('drop_lethal_m').value)
         self._relative_radius_m = float(
@@ -284,6 +300,7 @@ class TraversabilityLayer(Node):
         'rover_heal_radius_m': '_rover_heal_radius_m',
         'startup_clear_radius_m': '_startup_clear_radius_m',
         'slope_lethal_deg': '_slope_lethal_deg',
+        'slope_fit_radius_m': '_slope_fit_radius_m',
         'climb_lethal_m': '_climb_lethal_m',
         'drop_lethal_m': '_drop_lethal_m',
         'relative_radius_m': '_relative_radius_m',
@@ -470,6 +487,7 @@ class TraversabilityLayer(Node):
             step_lethal_m=self._step_lethal_m,
             floating_gap_m=self._floating_gap_m,
             slope_lethal_rad=math.radians(self._slope_lethal_deg),
+            slope_fit_radius_m=self._slope_fit_radius_m,
             rover_z=rover_z,
             rover_cell=rover_cell,
             relative_radius_m=self._relative_radius_m,
