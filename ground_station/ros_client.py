@@ -14,7 +14,8 @@ from ground_station.models import (Waypoint, anchor_command_json, drive_command_
                                     parse_drive_status, parse_map_status,
                                     parse_mode_status, parse_nav_status,
                                     parse_path_summary, parse_probe_result,
-                                    parse_sightings, pose_readout_from_odometry,
+                                    parse_sightings, parse_tuning_state,
+                                    pose_readout_from_odometry,
                                     probe_request_json)
 
 # /localization/pose is published at the ZED wrapper's ~30 Hz and is wanted
@@ -37,6 +38,7 @@ class RosSignals(QObject):
     nav_path_summary_received = Signal(object)
     probe_result_received = Signal(object)
     sightings_received = Signal(object)
+    tuning_state_received = Signal(object)
 
 
 def _localization_status_failure(detail: str) -> dict:
@@ -74,6 +76,8 @@ class RosBridgeClient:
         self._probe_request_topic = None
         self._landmark_sightings_topic = None
         self._anchor_command_topic = None
+        self._tuning_state_topic = None
+        self._tuning_command_topic = None
 
     def connect(self) -> None:
         self._ros.on_ready(lambda: self.signals.connection_changed.emit(True))
@@ -383,3 +387,28 @@ class RosBridgeClient:
                 self._ros, topic_name, "std_msgs/String")
         self._anchor_command_topic.publish(self._message_factory(
             {"data": anchor_command_json(action)}))
+
+    def subscribe_tuning_state(self, topic_name: str = "/autonomy/tuning_state") -> None:
+        """The rover's own account of the six values that decide what it
+        will and will not drive over. Latched, so rosbridge delivers
+        whatever the rover last published the moment this subscription
+        completes - the operator sees real numbers at once rather than
+        waiting for the next accepted change."""
+        topic = self._topic_factory(self._ros, topic_name, "std_msgs/String")
+        topic.subscribe(lambda msg: self.signals.tuning_state_received.emit(
+            parse_tuning_state(msg.get("data", ""))))
+        self._tuning_state_topic = topic
+
+    def publish_tuning(self, values: dict,
+                      topic_name: str = "/autonomy/tuning") -> None:
+        """Sends only the keys the operator actually changed - never all
+        six - so a message from this ground station never fights another
+        operator editing the same values at the same time."""
+        if not self.is_connected:
+            print("ground_station: not connected, tuning change dropped", file=sys.stderr)
+            return
+        if self._tuning_command_topic is None:
+            self._tuning_command_topic = self._topic_factory(
+                self._ros, topic_name, "std_msgs/String")
+        self._tuning_command_topic.publish(self._message_factory(
+            {"data": json.dumps(values)}))

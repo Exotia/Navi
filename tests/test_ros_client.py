@@ -517,3 +517,49 @@ def test_send_anchor_command_publishes_and_reuses_the_same_topic(qtbot):
     assert len(topics) == 1
     assert [json.loads(m["data"]) for m in topics[0].published_messages] == [
         {"action": "start"}, {"action": "stop"}]
+
+
+def test_subscribe_tuning_state_creates_topic_and_emits_parsed_state(qtbot):
+    client = make_client(qtbot)
+    received = []
+    client.signals.tuning_state_received.connect(received.append)
+    client.subscribe_tuning_state()
+    topic = next(t for t in FakeTopic.instances if t.name == "/autonomy/tuning_state")
+    assert topic.msg_type == "std_msgs/String"
+    topic.callback({"data": json.dumps({
+        "step_lethal_m": 0.25, "slope_lethal_deg": 35.0, "floating_gap_m": 0.35,
+        "wheel_trail_radius_m": 0.40, "goal_heal_radius_m": 1.4,
+        "startup_clear_radius_m": 0.90})})
+    assert received[-1]["step_lethal_m"] == 0.25
+    topic.callback({"data": "garbage"})
+    assert received[-1] is None
+
+
+def test_publish_tuning_puts_only_the_given_keys_on_the_tuning_topic(qtbot):
+    client = make_client(qtbot)
+    client.connect()
+    client.publish_tuning({"step_lethal_m": 0.30})
+    topics = [t for t in FakeTopic.instances if t.name == "/autonomy/tuning"]
+    assert len(topics) == 1
+    topic = topics[0]
+    assert topic.msg_type == "std_msgs/String"
+    sent = json.loads(topic.published_messages[-1]["data"])
+    assert sent == {"step_lethal_m": 0.30}
+
+
+def test_publish_tuning_reuses_one_topic_across_calls(qtbot):
+    client = make_client(qtbot)
+    client.connect()
+    client.publish_tuning({"step_lethal_m": 0.30})
+    client.publish_tuning({"goal_heal_radius_m": 2.0})
+    topics = [t for t in FakeTopic.instances if t.name == "/autonomy/tuning"]
+    assert len(topics) == 1
+    assert [json.loads(m["data"]) for m in topics[0].published_messages] == [
+        {"step_lethal_m": 0.30}, {"goal_heal_radius_m": 2.0}]
+
+
+def test_publish_tuning_is_dropped_when_not_connected(qtbot):
+    client = make_client(qtbot)
+    client.publish_tuning({"step_lethal_m": 0.30})
+    assert not any(t.name == "/autonomy/tuning" and t.published_messages
+                   for t in FakeTopic.instances)

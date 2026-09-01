@@ -10,6 +10,7 @@ from ground_station.ui.nav_row import NavRow
 from ground_station.ui.node_list_widget import NodeListWidget
 from ground_station.ui.site_card import SiteCard
 from ground_station.ui.speed_card import SpeedCard
+from ground_station.ui.tuning_card import TuningCard
 from ground_station.ui.video_panel import VideoPanel
 
 
@@ -41,6 +42,12 @@ class DashboardPage(QWidget):
         # toggle that shows it is wired later (T9) - this page only
         # constructs it and keeps it out of the way until then.
         self.site_card.setVisible(False)
+        self.tuning_card = TuningCard()
+        # A third right-hand drawer, a twin of node_list and site_card: the
+        # operator opens it only when a rock needs a number changed, and
+        # hidden it costs the camera and the plan grid nothing. The header
+        # toggle that shows it is wired in MainWindow.
+        self.tuning_card.setVisible(False)
         self.video_panel = VideoPanel(receiver=video_receiver)
         self.map_row = MapRow()
         self.map_row.setVisible(False)
@@ -147,6 +154,7 @@ class DashboardPage(QWidget):
         layout.addLayout(left, stretch=3)
         layout.addWidget(self.node_list)
         layout.addWidget(self.site_card)
+        layout.addWidget(self.tuning_card)
 
     def _on_mode_toggled(self, checked: bool) -> None:
         if not checked:

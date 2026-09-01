@@ -993,6 +993,7 @@ def test_a_timed_out_first_connect_still_registers_every_subscription(qtbot):
         "/localization/pose", "/localization/map_status", "/drive_status",
         "/mode_status", "/nav_status", "/nav_path_summary",
         "/site/probe_result", "/site/landmark_sightings",
+        "/autonomy/tuning_state",
     }
     client = window.ros_client
     assert client._manual_twist_topic is not None
@@ -1674,3 +1675,47 @@ def test_the_speed_cap_survives_a_view_change(qtbot):
 
     assert reader.max_linear_speeds == [pytest.approx(0.25)]
     assert window.dashboard_page.speed_card.speed == pytest.approx(0.25)
+
+
+_FULL_TUNING_STATE = {
+    "step_lethal_m": 0.25, "slope_lethal_deg": 35.0, "floating_gap_m": 0.35,
+    "wheel_trail_radius_m": 0.40, "goal_heal_radius_m": 1.4,
+    "startup_clear_radius_m": 0.90,
+}
+
+
+def test_tuning_button_toggles_the_tuning_card(qtbot):
+    window, _ = make_window(qtbot)
+    card = window.dashboard_page.tuning_card
+    assert not card.isVisibleTo(window)
+    window.tuning_button.click()
+    assert card.isVisibleTo(window)
+    assert "▾" in window.tuning_button.text()
+    window.tuning_button.click()
+    assert not card.isVisibleTo(window)
+
+
+def test_connecting_subscribes_to_the_tuning_state_topic(qtbot):
+    window = connected_window(qtbot)
+    assert any(t.name == "/autonomy/tuning_state" for t in FakeTopic.instances)
+
+
+def test_tuning_state_routes_into_the_card(qtbot):
+    window = connected_window(qtbot)
+    window.ros_client.signals.tuning_state_received.emit(_FULL_TUNING_STATE)
+
+    card = window.dashboard_page.tuning_card
+    assert card.rover_values == _FULL_TUNING_STATE
+    assert card.apply_button.isEnabled()
+
+
+def test_the_cards_applied_values_reach_publish_tuning_on_the_wire(qtbot):
+    window = connected_window(qtbot)
+    card = window.dashboard_page.tuning_card
+    window.ros_client.signals.tuning_state_received.emit(_FULL_TUNING_STATE)
+
+    card.rows["step_lethal_m"].editor.setValue(0.30)
+    card.apply_button.click()
+
+    sent = published(window, "/autonomy/tuning")
+    assert sent == [{"step_lethal_m": 0.30}]

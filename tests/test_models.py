@@ -627,3 +627,50 @@ def test_a_sighting_with_a_non_finite_coordinate_fails_the_whole_report():
                '"spread_m": 0.01, "range_m": 2.0, "last_seen_s": 0.1, '
                '"quality": "weak"}]}')
     assert parse_sightings(payload) is None
+
+
+# --- tuning: /autonomy/tuning_state's JSON --------------------------------
+
+from ground_station.models import TUNING_KEYS, parse_tuning_state
+
+_FULL_TUNING_PAYLOAD = {
+    "step_lethal_m": 0.25, "slope_lethal_deg": 35.0, "floating_gap_m": 0.35,
+    "wheel_trail_radius_m": 0.40, "goal_heal_radius_m": 1.4,
+    "startup_clear_radius_m": 0.90,
+}
+
+
+def test_parse_tuning_state_reads_a_full_good_payload():
+    values = parse_tuning_state(json.dumps(_FULL_TUNING_PAYLOAD))
+    assert values == _FULL_TUNING_PAYLOAD
+    assert set(values) == set(TUNING_KEYS)
+
+
+def test_parse_tuning_state_fails_the_whole_payload_on_a_missing_key():
+    payload = dict(_FULL_TUNING_PAYLOAD)
+    del payload["wheel_trail_radius_m"]
+    assert parse_tuning_state(json.dumps(payload)) is None
+
+
+def test_parse_tuning_state_fails_on_a_non_numeric_value():
+    payload = dict(_FULL_TUNING_PAYLOAD, slope_lethal_deg="steep")
+    assert parse_tuning_state(json.dumps(payload)) is None
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+def test_parse_tuning_state_fails_on_a_non_finite_value(literal):
+    payload = json.dumps(_FULL_TUNING_PAYLOAD).replace(
+        '"step_lethal_m": 0.25', f'"step_lethal_m": {literal}')
+    parsed = json.loads(payload)     # the payload IS valid JSON
+    assert isinstance(parsed["step_lethal_m"], float)
+    assert parse_tuning_state(payload) is None
+
+
+def test_parse_tuning_state_rejects_a_non_object_payload():
+    assert parse_tuning_state(json.dumps([1, 2, 3])) is None
+    assert parse_tuning_state(json.dumps(42)) is None
+
+
+def test_parse_tuning_state_survives_malformed_json():
+    assert parse_tuning_state("not json") is None
+    assert parse_tuning_state("{not json") is None

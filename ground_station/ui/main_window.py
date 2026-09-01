@@ -260,6 +260,13 @@ class MainWindow(QMainWindow):
             "Show or hide the site anchor: landmarks, the fit, and the lock.")
         self.site_button.toggled.connect(self._on_site_toggled)
 
+        self.tuning_button = QPushButton("Tuning ▸")
+        self.tuning_button.setCheckable(True)
+        self.tuning_button.setToolTip(
+            "Show or hide the six terrain-refusal values the rover is "
+            "using, and change them without restarting its ROS stack.")
+        self.tuning_button.toggled.connect(self._on_tuning_toggled)
+
         self.nodes_button = QPushButton("Nodes ▸")
         self.nodes_button.setCheckable(True)
         self.nodes_button.setToolTip("Show or hide the system-node list.")
@@ -302,6 +309,7 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.link_panel)
         header_layout.addWidget(self.link_button)
         header_layout.addWidget(self.site_button)
+        header_layout.addWidget(self.tuning_button)
         header_layout.addWidget(self.nodes_button)
         header_layout.addSpacing(16)
         header_layout.addWidget(self.stop_button)
@@ -369,6 +377,9 @@ class MainWindow(QMainWindow):
             lambda: self._send_anchor_command("stop"))
         site_card.anchor_reset_requested.connect(
             lambda: self._send_anchor_command("reset"))
+
+        self.dashboard_page.tuning_card.values_applied.connect(
+            self._on_tuning_values_applied)
 
         # The operator's last click in the camera view - not gated on a
         # rosbridge connection, since it is purely local until a probe is
@@ -499,6 +510,7 @@ class MainWindow(QMainWindow):
             self._on_nav_path_summary)
         self.ros_client.signals.probe_result_received.connect(self._on_probe_result)
         self.ros_client.signals.sightings_received.connect(self._on_sightings)
+        self.ros_client.signals.tuning_state_received.connect(self._on_tuning_state)
 
         try:
             # Subscribe BEFORE connecting: roslibpy's Ros.run() raises
@@ -523,6 +535,7 @@ class MainWindow(QMainWindow):
             self.ros_client.subscribe_nav_path_summary()
             self.ros_client.subscribe_probe_result()
             self.ros_client.subscribe_landmark_sightings()
+            self.ros_client.subscribe_tuning_state()
             self.ros_client.connect()
         except Exception as exc:
             print(f"ground_station: failed to connect to rosbridge: {exc}", file=sys.stderr)
@@ -829,6 +842,10 @@ class MainWindow(QMainWindow):
         self.dashboard_page.site_card.setVisible(shown)
         self.site_button.setText("Site ▾" if shown else "Site ▸")
 
+    def _on_tuning_toggled(self, shown: bool) -> None:
+        self.dashboard_page.tuning_card.setVisible(shown)
+        self.tuning_button.setText("Tuning ▾" if shown else "Tuning ▸")
+
     def _refresh_rover_mode_pill(self, state) -> None:
         """The header's rover-mode chip. The reason rides along with the
         mode: "MANUAL (localisation SEARCHING)" is the difference between
@@ -961,6 +978,24 @@ class MainWindow(QMainWindow):
         if report is None:
             return
         self.dashboard_page.site_card.apply_sightings(report)
+
+    # --- tuning -------------------------------------------------------
+
+    def _on_tuning_state(self, values) -> None:
+        """/autonomy/tuning_state: the rover's own account of the six
+        terrain-refusal values. A payload that would not parse arrives
+        here as None, and the card already knows to leave itself as it was
+        rather than show a value nobody actually reported."""
+        self.dashboard_page.tuning_card.set_tuning_state(values)
+
+    def _on_tuning_values_applied(self, values: dict) -> None:
+        """tuning_card.values_applied: the operator pressed Apply. Only the
+        rows that actually changed are in `values` - the card already did
+        that filtering - so this is a straight pass-through onto the
+        wire."""
+        if self.ros_client is None:
+            return
+        self.ros_client.publish_tuning(values)
 
     def _on_site_lock_changed(self, transform) -> None:
         """site_card.lock_changed: a solved transform to lock, or None to

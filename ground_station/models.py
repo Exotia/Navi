@@ -799,3 +799,39 @@ def new_probe_id(now_s: float, counter: int) -> str:
     per-request counter, so two probes issued in the same millisecond -
     a double-click - still get distinct ids to match replies against."""
     return f"p-{now_s:.3f}-{counter}"
+
+
+# --- tuning: the /autonomy/tuning and /autonomy/tuning_state wire ---------
+#
+# Six numbers decide what the rover will and will not drive over. The
+# inbound state is the rover's own account of what it is actually using,
+# and the same strict stance as parse_probe_result/parse_sightings applies:
+# a coordinate that is not a place is bad enough, a terrain threshold that
+# is not a number is worse, since the TuningCard would otherwise show it
+# next to five real ones with no way to tell the operator which was which.
+
+TUNING_KEYS = ("step_lethal_m", "slope_lethal_deg", "floating_gap_m",
+              "wheel_trail_radius_m", "goal_heal_radius_m",
+              "startup_clear_radius_m")
+
+
+def parse_tuning_state(payload: str):
+    """A strict dict of all six tuning values from /autonomy/tuning_state's
+    JSON, or None if any single key is missing, the wrong type, or not
+    finite. There is no partial result: a half-built dict has no way to
+    say which of the six is trustworthy, so the whole payload fails
+    exactly as parse_sightings' malformed entry does."""
+    try:
+        status = json.loads(payload)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(status, dict):
+        return None
+
+    values = {}
+    for key in TUNING_KEYS:
+        value = _safe_finite(status.get(key))
+        if value is None:
+            return None
+        values[key] = value
+    return values
