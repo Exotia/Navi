@@ -148,3 +148,21 @@ def test_an_unchanged_verdict_is_not_republished_before_the_heartbeat_interval(n
     clock.t = HEARTBEAT_S + 0.6
     node._on_image(bgra_frame(left=0, right=0))
     assert len(node._glare_pub.messages) == 2
+
+
+def test_glare_is_seen_even_when_the_alpha_channel_is_not_opaque(node):
+    # The regression this exists for: saturated_fractions calls a pixel
+    # saturated only when every channel reaches the level, so passing bgra8
+    # through unchanged makes detection depend on alpha - a channel that
+    # carries no light. With a transparent alpha the sun would be invisible
+    # to this node and the whole detour would silently never fire. Every
+    # other test here builds opaque frames, which is why this one is
+    # written with alpha at zero deliberately.
+    array = np.zeros((10, 10, 4), dtype=np.uint8)
+    array[..., 3] = 0
+    array[:, :5, :3] = 255
+
+    node._on_image(image_msg('bgra8', 10, 10, array))
+
+    assert len(node._glare_pub.messages) == 1
+    assert json.loads(node._glare_pub.messages[0].data)["side"] == "left"

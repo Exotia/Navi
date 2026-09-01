@@ -361,6 +361,8 @@ class GoalRelay(Node):
 
     def _on_detour_succeeded(self):
         try:
+            if not self._leg_still_live():
+                return
             self._runlog.event(
                 "detour_result", "SUCCEEDED - re-checking glare before the next leg")
             self._advance_toward_real_goal()
@@ -372,11 +374,26 @@ class GoalRelay(Node):
         # never cost the mission, so this falls straight through to the real
         # goal with nav_run's own callbacks rather than aborting the run.
         try:
+            if not self._leg_still_live():
+                return
             self._runlog.event(
                 "detour_result", f"FAILED - {reason} - proceeding to the real waypoint")
             self._send_real_goal()
         except Exception as exc:
             self.get_logger().error(f"detour failed callback failed: {exc!r}")
+
+    def _leg_still_live(self) -> bool:
+        """Whether a detour callback may still act on the leg it belongs to.
+
+        nav2_goals.cancel() already clears the stored callbacks, so a
+        cancelled detour's result reaches nobody and this should never fire.
+        It is here because the two detour callbacks do something no other
+        callback in this file does - they DISPATCH A NEW GOAL - and a goal
+        sent after the operator aborted would drive a rover that was told to
+        stop. The cheap guard is worth more than the argument that the port
+        makes it unreachable.
+        """
+        return self._real_goal is not None and self._run.state == rules.RUNNING
 
     def _on_detour_feedback(self, distance_remaining, eta_s):
         # Deliberately not forwarded to nav_run: this is progress toward a

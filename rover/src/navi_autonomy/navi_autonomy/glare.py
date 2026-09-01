@@ -175,5 +175,12 @@ class DetourPlanner:
             return ((goal_xy[0], goal_xy[1]), False)
 
         point = detour_point(rover_xy, goal_xy, side, self._offset_m, self._along_fraction)
+        if point == (goal_xy[0], goal_xy[1]):
+            # detour_point declined - the rover is already essentially at the
+            # goal, so there is no direction to offset from. Calling that a
+            # detour would spend one of the leg's allowance on a goal that is
+            # the real one anyway, and would send it to Nav2 under the detour
+            # callbacks, so the run would learn nothing from its arrival.
+            return (point, False)
         self._detours_taken += 1
         return (point, True)

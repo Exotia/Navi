@@ -163,3 +163,16 @@ def test_the_planner_with_rover_xy_none_returns_the_real_goal():
     assert point == goal
     assert is_detour is False
     assert planner.detours_taken == 0
+
+
+def test_a_planner_at_the_goal_does_not_call_the_real_goal_a_detour():
+    # detour_point declines when there is no direction to offset from, and
+    # calling its answer a detour would send the real goal to Nav2 under the
+    # detour callbacks - the run would learn nothing from its arrival.
+    planner = DetourPlanner()
+
+    point, is_detour = planner.next_target((4.0, 4.0), (4.0, 4.0), 'left')
+
+    assert point == (4.0, 4.0)
+    assert is_detour is False
+    assert planner.detours_taken == 0

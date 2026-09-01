@@ -125,6 +125,15 @@ class GlareWatch(Node):
                     "ignoring frames on this topic")
             return
 
+        if array.shape[2] == 4:
+            # Drop alpha before measuring. saturated_fractions calls a pixel
+            # saturated only when EVERY channel is at the level, and alpha
+            # carries no light: the ZED publishes bgra8, and an alpha the
+            # wrapper leaves at anything below the threshold would mean no
+            # pixel is ever saturated and this whole feature silently never
+            # fires. Nothing here may depend on an untested assumption about
+            # a channel that is not brightness.
+            array = array[:, :, :3]
         left_fraction, right_fraction = glare.saturated_fractions(
             array, self._saturation_level)
         side = glare.glare_side(

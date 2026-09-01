@@ -581,3 +581,25 @@ def test_glare_detour_enabled_false_disables_the_whole_feature(graph_factory):
     goal = server.received_goals[0]
     assert goal.pose.pose.position.x == pytest.approx(10.0)
     assert goal.pose.pose.position.y == pytest.approx(0.0)
+
+
+def test_a_detour_result_arriving_after_an_abort_does_not_send_a_new_goal(graph_factory):
+    # The two detour callbacks are the only ones in goal_relay that dispatch
+    # a goal of their own, so a late result must not put the rover back on
+    # the move after the operator stopped it. nav2_goals.cancel() already
+    # clears the callbacks; this pins the second lock.
+    executor, relay, server, task, clock, statuses, summaries = graph_factory()
+    relay._glare_side = "left"
+    relay._rover_xy = (0.0, 0.0)
+    relay._on_mode_status(mode("autonomous"))
+    relay._on_nav_request(go())
+    spin(executor, 2.0)
+    sent_before = len(server.received_goals)
+
+    relay._on_nav_request(_string({"action": "abort", "run_id": "gs-1"}))
+    spin(executor, 0.5)
+    relay._on_detour_succeeded()
+    relay._on_detour_failed("late")
+    spin(executor, 0.5)
+
+    assert len(server.received_goals) == sent_before
