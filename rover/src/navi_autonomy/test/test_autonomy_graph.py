@@ -46,8 +46,12 @@ class Source(Node):
             GridMap, MAP_TILE_TOPIC, tile_subscription_qos())
 
 
-def pit_tile(depth=0.2):
-    """Tile (0, 0): flat at z = 0 with a 6 x 6 pit at cells [20, 26)."""
+def pit_tile(depth=0.3):
+    """Tile (0, 0): flat at z = 0 with a 6 x 6 pit at cells [20, 26).
+
+    0.3 m deep, past the 0.25 m step threshold: this test is about the tile
+    reaching the seed as lethal cells, so the pit has to be one the layer
+    actually refuses."""
     tile = np.full((51, 51), np.nan, dtype=np.float32)
     tile[:50, :50] = 0.0
     tile[20:26, 20:26] = -depth

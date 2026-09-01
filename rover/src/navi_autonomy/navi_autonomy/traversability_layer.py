@@ -39,8 +39,11 @@ Only the OccupancyGrid seed is touched; the GridMap layers stay exactly what
 the elevation says, because elevation data is never faked.
 """
 
+import math
+
 import rclpy
 from geometry_msgs.msg import PoseStamped
+from rcl_interfaces.msg import SetParametersResult
 from grid_map_msgs.msg import GridMap
 from nav_msgs.msg import Odometry, OccupancyGrid
 from rclpy.node import Node
@@ -87,8 +90,11 @@ class TraversabilityLayer(Node):
         self.declare_parameter('costmap_seed_topic', COSTMAP_SEED_TOPIC)
         self.declare_parameter('frame_id', 'map')
         self.declare_parameter('startup_clear_radius_m', STARTUP_CLEAR_RADIUS_M)
-        # The spec's 0.14 m by default; raise for night sessions where ZED
-        # depth noise fabricates phantom steps (see costmap_seed).
+        # 0.25 m by default now, not the spec's 0.14: the chassis clears far
+        # more than the spec assumed (see traversability.STEP_LETHAL_M for
+        # the geometry). Retunable while the node runs - this is the number
+        # an operator changes in the yard when the rover refuses a rock it
+        # drives over without noticing.
         self.declare_parameter('step_lethal_m', STEP_LETHAL_M)
         # Radius of the free disc stamped along the rover's pose history.
         # MUST stay inside the footprint's inscribed circle (0.445 m half-
@@ -148,6 +154,7 @@ class TraversabilityLayer(Node):
         self.create_subscription(
             PoseStamped, str(self.get_parameter('active_goal_topic').value),
             self._on_active_goal, latched_qos())
+        self.add_on_set_parameters_callback(self._on_set_parameters)
 
     def _traversability_subscribers(self) -> int:
         return self.count_subscribers(self._traversability_topic)
@@ -161,6 +168,53 @@ class TraversabilityLayer(Node):
         if self._startup_pose is not None:
             return          # the patch is fixed at the first pose, permanently
         self._startup_pose = (x, y)
+
+    #: Parameters that may be retuned while the node runs, and the attribute
+    #: each one writes. Every one of them is a number an operator wants to
+    #: change in the yard with the rover in front of them - "it refuses that
+    #: rock, let it through" - and a restart costs the ZED's map, its pose
+    #: and the wheel trail. Topic names are deliberately absent: those are
+    #: read once when the subscriptions are made, so accepting a new value
+    #: would report a change that never happened.
+    _LIVE_PARAMETERS = {
+        'step_lethal_m': '_step_lethal_m',
+        'floating_gap_m': '_floating_gap_m',
+        'wheel_trail_radius_m': '_wheel_trail_radius_m',
+        'goal_heal_radius_m': '_goal_heal_radius_m',
+        'startup_clear_radius_m': '_startup_clear_radius_m',
+    }
+
+    def _on_set_parameters(self, parameters) -> SetParametersResult:
+        """Accept a live retune of the numbers above.
+
+        Rejected rather than clamped when a value makes no sense: a negative
+        threshold would silently make every cell lethal, and an operator who
+        typed it deserves to be told, not to watch the rover refuse the whole
+        world. Values are applied only after the whole batch validates, so a
+        rejected parameter cannot leave half a batch applied.
+        """
+        pending = []
+        for parameter in parameters:
+            attribute = self._LIVE_PARAMETERS.get(parameter.name)
+            if attribute is None:
+                continue
+            try:
+                value = float(parameter.value)
+            except (TypeError, ValueError):
+                return SetParametersResult(
+                    successful=False,
+                    reason=f"{parameter.name} must be a number")
+            if not math.isfinite(value) or value < 0.0:
+                return SetParametersResult(
+                    successful=False,
+                    reason=f"{parameter.name} must be finite and not negative")
+            pending.append((attribute, value))
+        for attribute, value in pending:
+            setattr(self, attribute, value)
+        if pending:
+            self.get_logger().info(
+                "retuned: " + ", ".join(f"{a.lstrip('_')}={v}" for a, v in pending))
+        return SetParametersResult(successful=True)
 
     def _on_active_goal(self, message: PoseStamped) -> None:
         """The goal the rover is driving to now. Replaced, never

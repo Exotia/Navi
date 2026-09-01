@@ -31,7 +31,30 @@ from navi_localization.elevation_grid import RESOLUTION
 # radius. Computed as max neighbour difference, so it catches negative steps
 # (holes) as well as positive ones." "slope lethal above 25 degrees,
 # roughness scaled below that."
-STEP_LETHAL_M = 0.14
+#
+# Raised from the spec's 0.14 to 0.25 on the operator's judgement after live
+# runs: the rover was refusing ground it drives over without noticing. The
+# number is the chassis geometry rather than a guess. Wheels are 0.125 m in
+# radius, and the belly - a 0.254 m body box centred 0.409 m up (see
+# asterope_iiI.urdf) - clears the ground by 0.282 m. So at 0.25 m an
+# obstacle is either climbed, on wheels with twice that radius' worth of
+# leverage, or passed under the chassis with 3 cm to spare. 0.282 m is the
+# wall: past it the rover high-centres, and no operator judgement moves a
+# number past the point where the body touches the rock.
+#
+# KNOWN COST, accepted deliberately: `step` is the maximum ABSOLUTE
+# difference to a neighbour, so this one number governs "a rock I can climb"
+# and "a hole I can fall into" alike. A 0.25 m hole drops a wheel in past
+# its axle, which is not the same bet as climbing a 0.25 m rock. Splitting
+# the two - a separate, tighter limit for ground that falls AWAY - is the
+# fix, and it is deliberately not in this commit.
+#
+# What this does NOT change is the slope threshold below. A step is a thing
+# to climb and getting it wrong strands a wheel; a slope is a thing to stand
+# on and getting it wrong rolls the rover onto its side. They deserve
+# different courage.
+STEP_LETHAL_M = 0.25
+
 SLOPE_LETHAL_DEG = 25.0
 SLOPE_LETHAL_RAD = math.radians(SLOPE_LETHAL_DEG)
 

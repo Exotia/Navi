@@ -10,6 +10,7 @@ import pytest
 import rclpy
 from builtin_interfaces.msg import Time
 from geometry_msgs.msg import PoseStamped
+from rclpy.parameter import Parameter
 from nav_msgs.msg import Odometry
 
 from navi_autonomy.grid_map_io import build_grid_map, layer_from_message
@@ -45,7 +46,10 @@ def node(ros):
     node.destroy_node()
 
 
-def pit_map(depth=0.2, size=6, extent=24, origin_ix=-12, origin_iy=-12):
+def pit_map(depth=0.3, size=6, extent=24, origin_ix=-12, origin_iy=-12):
+    # 0.3 m, deeper than the 0.25 m step threshold: a pit these tests
+    # need the layer to actually refuse. A 0.2 m pit is drivable now
+    # (see test_traversability.py for what that raise cost).
     grid = np.zeros((extent, extent), dtype=np.float32)
     lo = (extent - size) // 2
     grid[lo:lo + size, lo:lo + size] = -depth
@@ -100,7 +104,9 @@ def test_the_traversability_grid_map_carries_all_four_layers(node):
     assert list(published.basic_layers) == ['valid']
     assert published.info.resolution == pytest.approx(0.05)
     step = layer_from_message(published, 'step')
-    assert np.nanmax(step) == pytest.approx(0.2)
+    # The fixture's pit depth: the published layer is the measurement, and
+    # it is untouched by where the lethal threshold happens to sit.
+    assert np.nanmax(step) == pytest.approx(0.3)
 
 
 def test_the_expensive_grid_map_is_not_built_when_nobody_is_listening(node):
@@ -303,3 +309,56 @@ def test_a_zero_radius_turns_the_heal_off(node):
     node._on_map(message)
 
     assert seed_of(node)[lo - 1, lo - 1] == LETHAL
+
+
+# -- retuning in the yard, without losing the map --------------------------
+
+def test_the_step_threshold_can_be_raised_while_the_node_runs(node):
+    # A restart costs the ZED's map, its pose and the wheel trail, so the
+    # number an operator changes standing next to a rock the rover refuses
+    # must not need one.
+    message, lo = pit_map()
+    node._on_map(message)
+    assert seed_of(node)[lo - 1, lo - 1] == LETHAL
+
+    result = node._on_set_parameters(
+        [Parameter('step_lethal_m', Parameter.Type.DOUBLE, 0.5)])
+    node._on_map(message)
+
+    assert result.successful is True
+    assert node._step_lethal_m == pytest.approx(0.5)
+    assert seed_of(node)[lo - 1, lo - 1] != LETHAL
+
+
+def test_a_negative_threshold_is_refused_rather_than_quietly_applied(node):
+    # Negative would make every cell lethal and wall off the whole yard; an
+    # operator who typed it deserves to be told, not to watch the rover
+    # refuse the world.
+    before = node._step_lethal_m
+
+    result = node._on_set_parameters(
+        [Parameter('step_lethal_m', Parameter.Type.DOUBLE, -1.0)])
+
+    assert result.successful is False
+    assert node._step_lethal_m == pytest.approx(before)
+
+
+def test_a_rejected_parameter_leaves_none_of_its_batch_applied(node):
+    before_gap = node._floating_gap_m
+
+    result = node._on_set_parameters([
+        Parameter('floating_gap_m', Parameter.Type.DOUBLE, 0.9),
+        Parameter('step_lethal_m', Parameter.Type.DOUBLE, -1.0),
+    ])
+
+    assert result.successful is False
+    assert node._floating_gap_m == pytest.approx(before_gap)
+
+
+def test_a_topic_name_is_not_treated_as_a_live_parameter(node):
+    # Topics are read once when the subscriptions are made, so accepting a
+    # new one would report a change that never happened.
+    result = node._on_set_parameters(
+        [Parameter('map_topic', Parameter.Type.STRING, '/somewhere/else')])
+
+    assert result.successful is True

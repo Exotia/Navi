@@ -32,8 +32,12 @@ def plane(degrees, extent=20, resolution=0.05):
     return np.tile((xs * math.tan(math.radians(degrees))).astype(np.float32), (extent, 1))
 
 
-def test_the_thresholds_are_the_spec_numbers():
-    assert STEP_LETHAL_M == 0.14
+def test_the_thresholds_are_the_numbers_the_chassis_justifies():
+    # No longer the spec's 0.14: raised to the chassis geometry after live
+    # runs where the rover refused ground it drives over. 0.282 m is the
+    # belly clearance and the wall this must never pass.
+    assert STEP_LETHAL_M == 0.25
+    assert STEP_LETHAL_M < 0.282
     assert SLOPE_LETHAL_DEG == 25.0
     assert SLOPE_LETHAL_RAD == pytest.approx(math.radians(25.0))
 
@@ -45,12 +49,12 @@ def test_a_pit_makes_lethal_step_on_the_flat_ground_around_its_rim():
     invisible to them; a max *absolute* neighbour difference makes the flat
     cells beside a 0.2 m pit lethal, because the ground beside them drops
     away. A positive-only kernel scores those same cells exactly zero."""
-    grid, lo, size = pit()
+    grid, lo, size = pit(depth=0.3)
     step = step_layer(grid)
 
     # A flat cell diagonally off the pit's corner, and one along its edge.
-    assert step[lo - 1, lo - 1] == pytest.approx(0.2)
-    assert step[lo - 1, lo + 2] == pytest.approx(0.2)
+    assert step[lo - 1, lo - 1] == pytest.approx(0.3)
+    assert step[lo - 1, lo + 2] == pytest.approx(0.3)
     assert step[lo - 1, lo - 1] > STEP_LETHAL_M
     # A positive-only kernel would see nothing there:
     rise = np.zeros_like(grid)
@@ -168,8 +172,10 @@ def test_the_seed_values_are_the_occupancy_grid_conventions():
 
 
 def test_a_pit_rim_is_lethal_in_the_seed():
-    """End of the chain the whole sub-project exists for."""
-    grid, lo, size = pit()
+    """End of the chain the whole sub-project exists for. The pit is 0.3 m
+    now, deeper than the raised step threshold - see the test below for what
+    that raise costs."""
+    grid, lo, size = pit(depth=0.3)
     layers, cost = seed_from_elevation(grid)
     assert cost.dtype == np.int8
     assert cost[lo - 1, lo - 1] == LETHAL
@@ -211,7 +217,7 @@ def test_slope_scales_below_the_threshold_and_is_lethal_above_it():
 def test_the_scaled_band_takes_the_worst_indicator_not_their_average():
     zeros = np.zeros((4, 4), dtype=np.float32)
     ones = np.ones((4, 4), dtype=np.float32)
-    cost = costmap_seed(slope=zeros, step=np.full((4, 4), 0.07, dtype=np.float32),
+    cost = costmap_seed(slope=zeros, step=np.full((4, 4), 0.125, dtype=np.float32),
                         roughness=zeros, valid=ones)
     assert cost[1, 1] == 50                # round(99 * 0.5), not a third of it
 
@@ -409,3 +415,18 @@ def test_healing_leaves_unknown_ground_free_too():
 
     assert cost[5, 5] == 0
     assert cost[0, 0] == UNKNOWN
+
+
+def test_a_pit_shallower_than_the_raised_threshold_is_no_longer_lethal():
+    # What raising the step limit actually bought, and what it cost, in one
+    # test. `step` is the maximum ABSOLUTE difference to a neighbour, so the
+    # same number that lets the rover climb a 0.25 m rock also lets it drive
+    # into a 0.2 m hole. That is the accepted trade of this threshold, and
+    # it is written down here rather than discovered in a yard: the fix is a
+    # separate, tighter limit for ground that falls AWAY from a cell.
+    grid, lo, _size = pit(depth=0.2)
+
+    _layers, cost = seed_from_elevation(grid)
+
+    assert cost[lo - 1, lo - 1] != LETHAL
+    assert 0 < cost[lo - 1, lo - 1] < LETHAL      # costly, but not refused
