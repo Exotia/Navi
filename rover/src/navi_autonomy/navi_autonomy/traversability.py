@@ -84,20 +84,25 @@ DROP_LETHAL_M = 0.14
 # from being asked a question it cannot answer.
 RELATIVE_RADIUS_M = 3.0
 
-# 35 degrees, raised from the spec's 25 on the operator's judgement. The
-# chassis has the static margin for it: half the track is 0.444 m
-# (HPARAMS) and the body's centre sits about 0.409 m up, so the rover tips
-# at roughly atan(0.444 / 0.409) = 47 degrees sideways and 48 fore-and-aft.
-# 35 keeps about 12 degrees of that in hand for the dynamics a static sum
-# does not cover - a wheel dropping into a rut mid-traverse, braking on the
-# fall line, the load shifting.
+# 45 degrees. Raised twice on the operator's judgement: the spec said 25,
+# then 35, and the rover was still refusing ground it stands on easily -
+# the operator's own words are that 35 is easy for this chassis. The
+# geometry supports going higher: half the track is 0.444 m (HPARAMS) and
+# the body's centre sits about 0.409 m up, so the static tip is roughly
+# atan(0.444 / 0.409) = 47 degrees sideways - and the real centre of mass
+# sits below the body's centre (batteries and drivetrain low), so the true
+# figure is higher still. 45 is the last number under the worst-case
+# estimate.
 #
-# What ends a climb before tipping does is traction: on loose regolith the
-# wheels slip long before the rover leans over. That failure is recoverable
-# and visible - the rover stops making progress and the run's own progress
-# checker says so - which is why the threshold is set from the geometry
-# that is NOT recoverable.
-SLOPE_LETHAL_DEG = 35.0
+# Two things keep this honest. First, what ends a climb before tipping
+# does is traction: on loose ground the wheels slip long before the rover
+# leans over, and that failure is recoverable and visible where tipping is
+# neither. Second, a large slice of what the map calls "slope" is not
+# slope at all - at 0.05 m cells the gradient is taken over a 0.10 m
+# baseline, so two centimetres of ZED depth noise reads as eleven degrees
+# of incline. A high threshold is also a noise filter. The number is
+# live-retunable (slope_lethal_deg) for the day the yard disagrees.
+SLOPE_LETHAL_DEG = 45.0
 SLOPE_LETHAL_RAD = math.radians(SLOPE_LETHAL_DEG)
 
 # Roughness is never lethal on its own; the spec only asks for it to be
