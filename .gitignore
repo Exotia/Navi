@@ -9,3 +9,20 @@ install/
 log/
 *.egg-info/
 .pytest_cache/
+
+# Nested clones of other STAR repos, each with its own remote on
+# gitlab.star-dresden.de. Reference copies only - nothing in rover/,
+# ground_station/ or sim/ builds against them, so they are not submodules.
+# Listed here so a stray `git add` cannot turn one into a gitlink: a bare
+# commit hash with no URL beside it, which clones as an empty directory
+# that git then reports as modified forever.
+/bemacontroller/
+/coordinator/
+/libcamera/
+
+# Worktrees of this repo. `git worktree` tracks these itself; committing
+# the directory would embed copies of the repo inside the repo.
+/.worktrees/
+
+# Regenerable knowledge-graph output.
+/graphify-out/
