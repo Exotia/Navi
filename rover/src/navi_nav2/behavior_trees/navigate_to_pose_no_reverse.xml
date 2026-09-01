@@ -6,10 +6,24 @@
 -->
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
-    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+    <!-- 30, not 6. The operator's standing instruction: this rover gives up
+       only when there is no way of reaching anywhere new that could lead to
+       the waypoint, because in this yard a path is guaranteed to exist. Six
+       retries is about a minute of trying - a live run aborted with status 6
+       after the plan went empty for 22 s while the recoveries were still
+       cycling, and the ground it needed was ground a spin would have shown
+       it. Thirty is ten full turns of the Clear/Spin/Wait round robin. The
+       cost of being wrong here is the mission clock, which the operator can
+       stop with Abort at any moment; the cost of being wrong the other way
+       is a run that ends while a path was still there to find. -->
+    <RecoveryNode number_of_retries="30" name="NavigateRecovery">
       <PipelineSequence name="NavigateWithReplanning">
         <RateController hz="1.0">
-          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+          <!-- Three attempts, not one: clearing the global costmap and asking
+                 again is cheap, and the phantom lethal splashes this stack
+                 fights are exactly the kind that one clear does not always
+                 remove. -->
+          <RecoveryNode number_of_retries="3" name="ComputePathToPose">
             <!-- Theta* first; when it refuses ("Either of the start or goal
                  pose are an obstacle!" - live, a night waypoint inside a
                  phantom lethal splash), SmacBased retries the same goal
@@ -25,7 +39,9 @@
           </RecoveryNode>
         </RateController>
         <Sequence name="FollowPathVerified">
-          <RecoveryNode number_of_retries="1" name="FollowPath">
+          <!-- Same reasoning as the planner above: a local costmap cleared once
+               may still hold the noise that stalled the controller. -->
+          <RecoveryNode number_of_retries="3" name="FollowPath">
             <FollowPath path="{path}" controller_id="FollowPath"/>
             <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
           </RecoveryNode>

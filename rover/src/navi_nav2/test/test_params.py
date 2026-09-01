@@ -8,7 +8,9 @@ and say nothing at all.
 """
 
 import os
+import pathlib
 
+import pytest
 import yaml
 
 PARAMS = os.path.join(os.path.dirname(__file__), '..', 'params', 'nav2_rover.yaml')
@@ -227,3 +229,34 @@ def test_the_arrival_guard_is_looser_than_the_goal_checker_but_still_tight():
     assert xy == 0.25
     assert guard == 0.50
     assert xy < guard <= 1.0
+
+
+def _tree_text(name):
+    return (pathlib.Path(__file__).resolve().parents[1]
+            / 'behavior_trees' / name).read_text()
+
+
+@pytest.mark.parametrize('tree', ['navigate_to_pose_no_reverse.xml',
+                                  'navigate_through_poses_no_reverse.xml'])
+def test_the_rover_keeps_trying_rather_than_ending_a_run_that_still_had_a_path(tree):
+    # The operator's standing instruction: give up only when there is no way
+    # of reaching anywhere new, because a path is guaranteed to exist in this
+    # yard. A live run aborted with status 6 about a minute in, while the
+    # plan was empty and the recoveries were still cycling.
+    text = _tree_text(tree)
+
+    assert 'number_of_retries="30" name="NavigateRecovery"' in text
+    assert 'number_of_retries="6" name="NavigateRecovery"' not in text
+
+
+@pytest.mark.parametrize('tree', ['navigate_to_pose_no_reverse.xml',
+                                  'navigate_through_poses_no_reverse.xml'])
+def test_a_single_costmap_clear_is_not_the_last_word_for_either_planner_or_controller(tree):
+    text = _tree_text(tree)
+
+    # The planner node is named for what each tree computes, so the test
+    # asks for whichever of the two this tree carries.
+    assert ('number_of_retries="3" name="ComputePathToPose"' in text
+            or 'number_of_retries="3" name="ComputePathThroughPoses"' in text)
+    assert 'number_of_retries="3" name="FollowPath"' in text
+    assert 'number_of_retries="1"' not in text
