@@ -61,9 +61,11 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from navi_autonomy.grid_map_io import (
     ELEVATION_LAYER, build_grid_map, build_occupancy_grid, layer_from_message)
 from navi_autonomy.tile_aggregator import MAP_TOPIC, POSE_TOPIC, latched_qos
-from navi_autonomy.traversability import (SLOPE_LETHAL_DEG, STEP_LETHAL_M,
-                                          clear_startup_patch, heal_goal_patch,
-                                          seed_from_elevation, stamp_wheel_trail)
+from navi_autonomy.traversability import (CLIMB_LETHAL_M, DROP_LETHAL_M,
+                                          RELATIVE_RADIUS_M, SLOPE_LETHAL_DEG,
+                                          STEP_LETHAL_M, clear_startup_patch,
+                                          heal_goal_patch, seed_from_elevation,
+                                          stamp_wheel_trail)
 from navi_localization.elevation_grid import RESOLUTION
 
 TRAVERSABILITY_TOPIC = '/autonomy/traversability'
@@ -134,6 +136,21 @@ class TraversabilityLayer(Node):
         # yard decides, not the desk. Degrees on the wire because that is
         # what an operator reads off a slope, radians everywhere inside.
         self.declare_parameter('slope_lethal_deg', SLOPE_LETHAL_DEG)
+        # Rover-relative lethality: a cell more than this above the rover's
+        # own current ground is something the rover cannot climb, even if
+        # every individual step towards it read comfortably drivable (a
+        # gradual staircase). See traversability.CLIMB_LETHAL_M.
+        self.declare_parameter('climb_lethal_m', CLIMB_LETHAL_M)
+        # Tighter than the climb on purpose - see traversability.DROP_LETHAL_M
+        # for why a wrong climb strands a wheel but a wrong drop ends the
+        # run on the rover's belly.
+        self.declare_parameter('drop_lethal_m', DROP_LETHAL_M)
+        # Radius (metres) around the rover's CURRENT pose within which the
+        # two limits above apply. Not a sensitivity knob: past this radius
+        # the rover-relative test is switched off completely, because a
+        # gentle yard slope makes "height above the rover" meaningless a
+        # few metres out (see traversability.costmap_seed). 0 disables it.
+        self.declare_parameter('relative_radius_m', RELATIVE_RADIUS_M)
         self.declare_parameter('active_goal_topic', ACTIVE_GOAL_TOPIC)
         self.declare_parameter('tuning_topic', TUNING_TOPIC)
         self.declare_parameter('tuning_state_topic', TUNING_STATE_TOPIC)
@@ -149,6 +166,10 @@ class TraversabilityLayer(Node):
             self.get_parameter('goal_heal_radius_m').value)
         self._slope_lethal_deg = float(
             self.get_parameter('slope_lethal_deg').value)
+        self._climb_lethal_m = float(self.get_parameter('climb_lethal_m').value)
+        self._drop_lethal_m = float(self.get_parameter('drop_lethal_m').value)
+        self._relative_radius_m = float(
+            self.get_parameter('relative_radius_m').value)
         # (x, y) metres of the goal currently being driven to, or None. Kept
         # in metres, converted per tick like the startup patch, because the
         # rolling window's origin moves under it.
@@ -164,6 +185,12 @@ class TraversabilityLayer(Node):
         # Fixed for the node's lifetime - see the module docstring for why a
         # single patch, not a disc that follows the rover around.
         self._startup_pose = None
+        # (x, y, z) metres of the MOST RECENT pose, unlike _startup_pose
+        # above which is deliberately frozen at the first one. This is what
+        # the rover-relative lethal test needs: "can I mount the thing in
+        # front of me right now" is a question about where the rover is
+        # now, not where it started. None until the first pose arrives.
+        self._current_pose = None
         # The reason last logged for a rejected /autonomy/tuning payload
         # (None until one has been). Compared, not counted: a ground
         # station retrying the same bad payload at 2 Hz must not fill the
@@ -204,9 +231,14 @@ class TraversabilityLayer(Node):
     def _on_pose(self, message: Odometry) -> None:
         x = float(message.pose.pose.position.x)
         y = float(message.pose.pose.position.y)
+        z = float(message.pose.pose.position.z)
         # Every pose feeds the wheel trail (world-lattice cells, deduped);
-        # the startup patch below stays fixed at the first pose only.
+        # the startup patch below stays fixed at the first pose only. The
+        # current pose, unlike the startup one, is overwritten every time -
+        # it is the rover's ground for the rover-relative lethal test, which
+        # is only meaningful about where the rover is now.
         self._trail.add((int(round(y / RESOLUTION)), int(round(x / RESOLUTION))))
+        self._current_pose = (x, y, z)
         if self._startup_pose is not None:
             return          # the patch is fixed at the first pose, permanently
         self._startup_pose = (x, y)
@@ -225,6 +257,9 @@ class TraversabilityLayer(Node):
         'goal_heal_radius_m': '_goal_heal_radius_m',
         'startup_clear_radius_m': '_startup_clear_radius_m',
         'slope_lethal_deg': '_slope_lethal_deg',
+        'climb_lethal_m': '_climb_lethal_m',
+        'drop_lethal_m': '_drop_lethal_m',
+        'relative_radius_m': '_relative_radius_m',
     }
 
     def _on_set_parameters(self, parameters) -> SetParametersResult:
@@ -368,11 +403,27 @@ class TraversabilityLayer(Node):
         origin_ix = int(round(float(message.info.pose.position.x) / resolution - n_x / 2.0))
         origin_iy = int(round(float(message.info.pose.position.y) / resolution - n_y / 2.0))
 
+        rover_z = None
+        rover_cell = None
+        if self._current_pose is not None:
+            # Per-tick conversion, never cached, same as the startup patch
+            # and the goal heal just below: the rolling window's origin
+            # moves under it even though the pose itself has not changed.
+            x, y, z = self._current_pose
+            rover_z = z
+            rover_cell = (int(round(y / resolution)) - origin_iy,
+                         int(round(x / resolution)) - origin_ix)
+
         layers, cost = seed_from_elevation(
             elevation, resolution,
             step_lethal_m=self._step_lethal_m,
             floating_gap_m=self._floating_gap_m,
-            slope_lethal_rad=math.radians(self._slope_lethal_deg))
+            slope_lethal_rad=math.radians(self._slope_lethal_deg),
+            rover_z=rover_z,
+            rover_cell=rover_cell,
+            relative_radius_m=self._relative_radius_m,
+            climb_lethal_m=self._climb_lethal_m,
+            drop_lethal_m=self._drop_lethal_m)
         if self._startup_pose is not None:
             # The stored pose is metres; the seed's cells are indexed from
             # this tick's origin, which moves as the rolling window

@@ -17,7 +17,9 @@ from nav_msgs.msg import Odometry
 from std_msgs.msg import String
 
 from navi_autonomy.grid_map_io import build_grid_map, layer_from_message
-from navi_autonomy.traversability import LETHAL, UNKNOWN, clear_startup_patch
+from navi_autonomy.traversability import (
+    CLIMB_LETHAL_M, DROP_LETHAL_M, LETHAL, RELATIVE_RADIUS_M, UNKNOWN,
+    clear_startup_patch)
 from navi_autonomy.traversability_layer import (
     ACTIVE_GOAL_TOPIC, COSTMAP_SEED_TOPIC, GOAL_HEAL_RADIUS_M, MAP_TOPIC,
     TRAVERSABILITY_TOPIC, TUNING_STATE_TOPIC, TUNING_TOPIC, TraversabilityLayer)
@@ -139,10 +141,11 @@ def test_a_map_without_an_elevation_layer_is_refused(node):
 
 # -- "the wheels have been here" (one startup patch) ------------------------
 
-def pose_at(x, y):
+def pose_at(x, y, z=0.0):
     message = Odometry()
     message.pose.pose.position.x = float(x)
     message.pose.pose.position.y = float(y)
+    message.pose.pose.position.z = float(z)
     return message
 
 
@@ -313,6 +316,89 @@ def test_a_zero_radius_turns_the_heal_off(node):
     node._on_map(message)
 
     assert seed_of(node)[lo - 1, lo - 1] == LETHAL
+
+
+# -- rover-relative lethality: can THIS rover mount the thing in front of it -
+
+def rise_map(height=0.4, rows=60, ramp_cells=40, flat_tail=20, resolution=0.05):
+    """A map corner-anchored at (x, y) = (0, 0), flat at 0 out to
+    `ramp_cells`, then climbing smoothly to `height` - each single neighbour
+    transition stays far under STEP_LETHAL_M no matter how large `height`
+    is, so nothing here trips step_layer's own lethal test. Mirrors
+    test_traversability.py's _gentle_rise, built as a GridMap message."""
+    width = ramp_cells + flat_tail
+    grid = np.zeros((rows, width), dtype=np.float32)
+    grid[:, :ramp_cells] = np.linspace(0.0, height, ramp_cells, dtype=np.float32)
+    grid[:, ramp_cells:] = height
+    return build_grid_map({'elevation': grid}, 0, 0, resolution, 'map', Time())
+
+
+def test_no_pose_yet_means_no_change_from_todays_seed(node):
+    message = rise_map()
+    row, col = 30, 55            # flat top, comfortably inside a 3 m radius
+
+    node._on_map(message)
+
+    assert seed_of(node)[row, col] != LETHAL      # today's behaviour: unset rover_z
+
+
+def test_a_pose_arriving_activates_the_rover_relative_test_and_changes_the_seed(node):
+    message = rise_map(height=0.4)
+    row, col = 30, 55             # 0.4 m up the ramp - past CLIMB_LETHAL_M(0.25)
+
+    node._on_map(message)
+    assert seed_of(node)[row, col] != LETHAL      # before any pose
+
+    node._on_pose(pose_at(0.0, 1.5))              # rover standing at (row 30, col 0)
+    node._on_map(message)
+
+    assert seed_of(node)[row, col] == LETHAL      # same map, now lethal
+
+
+def test_a_zero_relative_radius_disables_the_rover_relative_test(node):
+    message = rise_map(height=0.4)
+    node._on_pose(pose_at(0.0, 1.5))
+    node._relative_radius_m = 0.0
+
+    node._on_map(message)
+
+    assert seed_of(node)[30, 55] != LETHAL
+
+
+def test_the_wheel_trail_still_overrides_a_cell_the_rover_relative_test_calls_lethal(node):
+    # The night finding this whole ordering exists for: wheels outrank every
+    # camera opinion, and this new test is a camera opinion like any other.
+    # The rover drove from (row 30, col 42) to (row 30, col 0); its CURRENT
+    # ground (col 0, height 0.0) makes the far side of the ramp (height 0.4)
+    # lethal - but col 42 is on the driven trail, so the trail must win there
+    # while an equally-lethal, never-driven cell elsewhere stays lethal.
+    message = rise_map(height=0.4)
+
+    node._on_pose(pose_at(2.1, 1.5))     # first pose: col 42 joins the trail
+    node._on_pose(pose_at(0.0, 1.5))     # current pose: col 0, the rover's now-ground
+
+    node._on_map(message)
+    cost = seed_of(node)
+
+    assert cost[30, 42] == 0             # on the trail: wheels win over the new test
+    assert cost[30, 55] == LETHAL        # off the trail: the new test's opinion stands
+
+
+def test_the_three_relative_lethality_limits_are_live_retunable(node):
+    assert node._climb_lethal_m == pytest.approx(CLIMB_LETHAL_M)
+    assert node._drop_lethal_m == pytest.approx(DROP_LETHAL_M)
+    assert node._relative_radius_m == pytest.approx(RELATIVE_RADIUS_M)
+
+    result = node._on_set_parameters([
+        Parameter('climb_lethal_m', Parameter.Type.DOUBLE, 0.4),
+        Parameter('drop_lethal_m', Parameter.Type.DOUBLE, 0.2),
+        Parameter('relative_radius_m', Parameter.Type.DOUBLE, 5.0),
+    ])
+
+    assert result.successful is True
+    assert node._climb_lethal_m == pytest.approx(0.4)
+    assert node._drop_lethal_m == pytest.approx(0.2)
+    assert node._relative_radius_m == pytest.approx(5.0)
 
 
 # -- retuning in the yard, without losing the map --------------------------

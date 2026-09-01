@@ -55,6 +55,35 @@ from navi_localization.elevation_grid import RESOLUTION
 # different courage.
 STEP_LETHAL_M = 0.25
 
+# Rover-relative lethality, alongside `step` rather than instead of it.
+# `step` is local by construction - the max difference to a cell's own eight
+# neighbours - and that has a blind spot: a rise that accumulates gradually
+# is invisible to it. A staircase of five 0.10 m steps climbs half a metre,
+# and every individual step reads comfortably under STEP_LETHAL_M, so every
+# cell along it comes back drivable while the rover cannot in fact mount
+# what is in front of it. What actually determines whether the rover can
+# mount something is that thing's height above the ground the rover is
+# standing on, not its height above its own neighbours - see
+# `height_relative_to` and the `rover_z`/`rover_cell` arguments below.
+#
+# How far above the rover's own ground a cell may sit and still be
+# something the rover could mount. Same 0.25 m as STEP_LETHAL_M and for
+# the same chassis reason.
+CLIMB_LETHAL_M = 0.25
+
+# How far BELOW the rover's ground a cell may sit. Tighter than the climb
+# on purpose: a wheel 0.125 m in radius climbs a 0.25 m rock with help
+# from the chassis, but drops into a 0.25 m hole past its axle and lands
+# the belly on the rim. Getting a climb wrong strands a wheel; getting a
+# drop wrong ends the run on the rover's stomach.
+DROP_LETHAL_M = 0.14
+
+# Default radius (metres) within which the rover-relative test above is
+# allowed to say anything at all. See costmap_seed's docstring - this
+# number is not a tuning knob for sensitivity, it is what keeps the test
+# from being asked a question it cannot answer.
+RELATIVE_RADIUS_M = 3.0
+
 # 35 degrees, raised from the spec's 25 on the operator's judgement. The
 # chassis has the static margin for it: half the track is 0.444 m
 # (HPARAMS) and the body's centre sits about 0.409 m up, so the rover tips
@@ -225,6 +254,18 @@ def derive(elevation, resolution: float = RESOLUTION) -> dict:
     }
 
 
+def height_relative_to(elevation, rover_z: float) -> np.ndarray:
+    """Each cell's height above (positive) or below (negative) the ground
+    the rover is standing on. NaN stays NaN.
+
+    Plain subtraction already has that property: an unseen cell is NaN in
+    `elevation`, and NaN minus anything is NaN, so there is nothing here that
+    needs to special-case it. What keeps this meaningful is the caller
+    restricting it to cells near the rover - see costmap_seed."""
+    grid = _as_grid(elevation)
+    return (grid - np.float32(rover_z)).astype(np.float32)
+
+
 # nav_msgs/OccupancyGrid conventions: 0..100 cost, -1 unknown. 100 is
 # reserved for lethal, so the scaled band tops out at 99 and a planner can
 # tell "as bad as it gets while still driveable" from "do not".
@@ -235,7 +276,14 @@ MAX_SCALED_COST = 99
 
 def costmap_seed(slope, step, roughness, valid,
                  step_lethal_m: float = STEP_LETHAL_M,
-                 slope_lethal_rad: float = SLOPE_LETHAL_RAD) -> np.ndarray:
+                 slope_lethal_rad: float = SLOPE_LETHAL_RAD,
+                 elevation=None,
+                 resolution: float = RESOLUTION,
+                 rover_z=None,
+                 rover_cell=None,
+                 relative_radius_m: float = RELATIVE_RADIUS_M,
+                 climb_lethal_m: float = CLIMB_LETHAL_M,
+                 drop_lethal_m: float = DROP_LETHAL_M) -> np.ndarray:
     """The four layers as one int8 cost grid for /autonomy/costmap_seed.
 
         s = clip(slope     / SLOPE_LETHAL_RAD, 0, 1)
@@ -250,6 +298,29 @@ def costmap_seed(slope, step, roughness, valid,
     measured lethal step is lethal even where its neighbourhood is too
     incomplete for `valid`, because that is the safe direction and because it
     is exactly what a hole's frontier looks like.
+
+    `rover_z` and `rover_cell`, given together with `elevation`, turn on a
+    second and independent lethal test: a cell also goes lethal when it sits
+    more than `climb_lethal_m` above the rover's own ground, or more than
+    `drop_lethal_m` below it (see `height_relative_to`). This is what
+    catches a rise `step` cannot: a staircase of small steps, each one under
+    STEP_LETHAL_M, that nonetheless climbs more than the rover can mount
+    between where it stands and the cell in question.
+
+    This test is masked to `relative_radius_m` of `rover_cell` and
+    contributes NOTHING outside it - not a cost, not a lethal. That radius is
+    not a tuning knob, it is the whole safeguard: applied to the entire map,
+    a gentle 5 degree yard slope rises 0.87 m over 10 m, so every cell more
+    than about 3 m uphill would read as more than CLIMB_LETHAL_M above the
+    rover and the rover would wall itself into a small disc of the world and
+    refuse to plan anywhere. Extended terrain is exactly what `slope_layer`
+    is for, and it already handles it correctly (lethal above
+    SLOPE_LETHAL_RAD). The rover-relative test answers a narrower question -
+    "can I mount the thing immediately in front of me" - which is only
+    meaningful nearby: far away the rover will have climbed or descended
+    before it arrives, and its own reference ground (`rover_z`) will have
+    moved with it. Disabled whenever `elevation`, `rover_z` or `rover_cell`
+    is None, or when `relative_radius_m` <= 0.
     """
     slope = np.nan_to_num(np.asarray(slope, dtype=np.float32), nan=0.0)
     step = np.nan_to_num(np.asarray(step, dtype=np.float32), nan=0.0)
@@ -269,6 +340,30 @@ def costmap_seed(slope, step, roughness, valid,
     cost[valid < 0.5] = UNKNOWN
     cost[(step >= float(step_lethal_m))
          | (slope >= float(slope_lethal_rad))] = LETHAL
+
+    if (elevation is not None and rover_z is not None and rover_cell is not None
+            and relative_radius_m > 0.0):
+        # Confined to a disc around the rover, on purpose - see the
+        # docstring above. _disc_offsets is the same Euclidean-disc helper
+        # the startup patch and the wheel trail use, so "near the rover"
+        # means the same thing everywhere in this module.
+        relative = height_relative_to(elevation, rover_z)
+        rows, cols = relative.shape
+        row, col = rover_cell
+        radius_cells = int(round(float(relative_radius_m) / float(resolution)))
+        offsets = _disc_offsets(radius_cells)
+        ry = offsets[:, 0] + int(row)
+        rx = offsets[:, 1] + int(col)
+        in_bounds = (ry >= 0) & (ry < rows) & (rx >= 0) & (rx < cols)
+        ry = ry[in_bounds]
+        rx = rx[in_bounds]
+        local = relative[ry, rx]
+        # NaN (unseen) local cells are left exactly as `valid` already put
+        # them - this test only ever adds a lethal, never a guess.
+        bad = np.isfinite(local) & ((local > float(climb_lethal_m))
+                                    | (local < -float(drop_lethal_m)))
+        cost[ry[bad], rx[bad]] = LETHAL
+
     return cost
 
 
@@ -406,15 +501,32 @@ def heal_goal_patch(cost: np.ndarray, centre_cell, radius_cells: int) -> np.ndar
 def seed_from_elevation(elevation, resolution: float = RESOLUTION,
                         step_lethal_m: float = STEP_LETHAL_M,
                         floating_gap_m: float = 0.0,
-                        slope_lethal_rad: float = SLOPE_LETHAL_RAD) -> tuple:
+                        slope_lethal_rad: float = SLOPE_LETHAL_RAD,
+                        rover_z=None,
+                        rover_cell=None,
+                        relative_radius_m: float = RELATIVE_RADIUS_M,
+                        climb_lethal_m: float = CLIMB_LETHAL_M,
+                        drop_lethal_m: float = DROP_LETHAL_M) -> tuple:
     """(the four layers, the int8 cost grid) - the whole derive in one call.
     floating_gap_m > 0 first drops cells hanging in the air with no
-    connection to the floor (see mask_floating_cells)."""
+    connection to the floor (see mask_floating_cells).
+
+    rover_z and rover_cell, given together, turn on the rover-relative
+    lethal test within relative_radius_m of rover_cell - see costmap_seed's
+    docstring for what it catches and why it must not run past that radius.
+    rover_z is None (the default) disables it entirely."""
     if floating_gap_m > 0.0:
         elevation = mask_floating_cells(elevation, floating_gap_m)
     layers = derive(elevation, resolution)
     cost = costmap_seed(layers['slope'], layers['step'],
                         layers['roughness'], layers['valid'],
                         step_lethal_m=step_lethal_m,
-                        slope_lethal_rad=slope_lethal_rad)
+                        slope_lethal_rad=slope_lethal_rad,
+                        elevation=elevation,
+                        resolution=resolution,
+                        rover_z=rover_z,
+                        rover_cell=rover_cell,
+                        relative_radius_m=relative_radius_m,
+                        climb_lethal_m=climb_lethal_m,
+                        drop_lethal_m=drop_lethal_m)
     return layers, cost

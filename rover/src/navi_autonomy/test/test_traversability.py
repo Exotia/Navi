@@ -11,9 +11,10 @@ import numpy as np
 import pytest
 
 from navi_autonomy.traversability import (
-    LETHAL, MAX_SCALED_COST, ROUGHNESS_REF_M, SLOPE_LETHAL_DEG, SLOPE_LETHAL_RAD,
-    STEP_LETHAL_M, UNKNOWN, clear_startup_patch, costmap_seed, derive,
-    heal_goal_patch, roughness_layer, seed_from_elevation, slope_layer,
+    CLIMB_LETHAL_M, DROP_LETHAL_M, LETHAL, MAX_SCALED_COST, RELATIVE_RADIUS_M,
+    ROUGHNESS_REF_M, SLOPE_LETHAL_DEG, SLOPE_LETHAL_RAD, STEP_LETHAL_M, UNKNOWN,
+    clear_startup_patch, costmap_seed, derive, heal_goal_patch,
+    height_relative_to, roughness_layer, seed_from_elevation, slope_layer,
     stamp_wheel_trail, step_layer, valid_layer)
 
 
@@ -450,3 +451,135 @@ def test_a_pit_shallower_than_the_raised_threshold_is_no_longer_lethal():
 
     assert cost[lo - 1, lo - 1] != LETHAL
     assert 0 < cost[lo - 1, lo - 1] < LETHAL      # costly, but not refused
+
+
+# -- rover-relative lethality: can THIS rover mount the thing in front of it --
+
+def _gentle_rise(height, rows=40, ramp_cells=40, flat_tail=4):
+    """Flat at 0, then a climb to `height` spread over `ramp_cells` columns -
+    each single neighbour transition is height / ramp_cells, far under
+    STEP_LETHAL_M no matter how large `height` is - followed by a short flat
+    top so the cell under test keeps full neighbour support. This isolates
+    the rover-relative test from the neighbour-difference one: whatever
+    fires here cannot be step_layer noticing a local jump."""
+    width = ramp_cells + flat_tail
+    grid = np.zeros((rows, width), dtype=np.float32)
+    grid[:, :ramp_cells] = np.linspace(0.0, height, ramp_cells, dtype=np.float32)
+    grid[:, ramp_cells:] = height
+    return grid
+
+
+def test_the_rover_relative_thresholds_match_the_spec_reasoning():
+    assert CLIMB_LETHAL_M == 0.25
+    assert CLIMB_LETHAL_M == STEP_LETHAL_M          # same chassis reason
+    assert DROP_LETHAL_M == 0.14
+    assert DROP_LETHAL_M < CLIMB_LETHAL_M           # a wheel climbs more than it drops
+    assert RELATIVE_RADIUS_M == 3.0
+
+
+def test_height_relative_to_is_signed_and_keeps_nan_unseen():
+    grid = np.array([[1.0, np.nan], [0.5, -0.2]], dtype=np.float32)
+    relative = height_relative_to(grid, rover_z=0.5)
+    assert relative[0, 0] == pytest.approx(0.5)
+    assert relative[1, 0] == pytest.approx(0.0)
+    assert relative[1, 1] == pytest.approx(-0.7)
+    assert np.isnan(relative[0, 1])
+
+
+def test_a_staircase_of_small_steps_is_lethal_even_though_no_single_step_is():
+    """The motivating case. A staircase of five 0.10 m steps climbs half a
+    metre - more than the rover can mount - yet every individual step is
+    comfortably under STEP_LETHAL_M, so step_layer calls the whole thing
+    drivable. Only the rover-relative test, which looks at height above the
+    rover rather than height above a neighbour, catches it."""
+    step_m, steps, width = 0.10, 5, 4
+    extent = steps * width + 10
+    grid = np.zeros((extent, extent), dtype=np.float32)
+    for i in range(steps):
+        lo = 5 + i * width
+        grid[:, lo:lo + width] = (i + 1) * step_m
+    grid[:, 5 + steps * width:] = steps * step_m
+
+    row = extent // 2
+    boundary_col = 5 + width            # the first 0.10 -> 0.20 riser
+    top_col = extent - 2                # well up the top tread, half a metre up
+    assert grid[row, top_col] == pytest.approx(0.5)
+
+    step = step_layer(grid)
+    assert step[row, boundary_col] == pytest.approx(step_m)
+    assert step[row, boundary_col] < STEP_LETHAL_M
+    assert step[row, top_col] < STEP_LETHAL_M       # step_layer calls this drivable
+
+    _, cost_without = seed_from_elevation(grid)
+    assert cost_without[row, top_col] != LETHAL     # today's blind spot, reproduced
+
+    _, cost = seed_from_elevation(grid, rover_z=0.0, rover_cell=(row, 0),
+                                  relative_radius_m=3.0)
+    assert cost[row, top_col] == LETHAL
+
+
+def test_a_cell_0_30m_above_the_rover_within_the_radius_is_lethal_but_0_20m_is_not():
+    high = _gentle_rise(0.30)
+    low = _gentle_rise(0.20)
+    row, col = 20, 41                   # the flat top, well inside a 3 m radius
+
+    assert step_layer(high)[row, col] < STEP_LETHAL_M
+    assert step_layer(low)[row, col] < STEP_LETHAL_M
+
+    _, cost_high = seed_from_elevation(high, rover_z=0.0, rover_cell=(row, 0),
+                                       relative_radius_m=3.0)
+    _, cost_low = seed_from_elevation(low, rover_z=0.0, rover_cell=(row, 0),
+                                      relative_radius_m=3.0)
+
+    assert cost_high[row, col] == LETHAL
+    assert cost_low[row, col] != LETHAL
+
+
+def test_a_cell_0_20m_below_the_rover_is_lethal_but_0_10m_is_not_the_drop_limit_is_tighter():
+    deep = _gentle_rise(-0.20)
+    shallow = _gentle_rise(-0.10)
+    row, col = 20, 41
+
+    _, cost_deep = seed_from_elevation(deep, rover_z=0.0, rover_cell=(row, 0),
+                                       relative_radius_m=3.0)
+    _, cost_shallow = seed_from_elevation(shallow, rover_z=0.0, rover_cell=(row, 0),
+                                          relative_radius_m=3.0)
+
+    assert cost_deep[row, col] == LETHAL
+    assert cost_shallow[row, col] != LETHAL
+
+
+def test_the_slope_trap_a_gentle_ramp_gets_no_lethal_cells_beyond_the_radius():
+    """What the radius exists to prevent. A 5 degree yard slope - the
+    operator's own example - rises 0.87 m over 10 m, which is far past
+    CLIMB_LETHAL_M; applied to the whole map the rover-relative test would
+    condemn most of a perfectly drivable slope. slope_layer already handles
+    extended terrain correctly (lethal above 35 degrees), so the
+    rover-relative test must contribute nothing this far from the rover."""
+    grid = plane(5.0, extent=240, resolution=0.05)     # 12 m of gentle ramp
+    row = grid.shape[0] // 2
+    far_col = 200                                       # 10 m up the ramp
+
+    rise = grid[row, far_col] - grid[row, 0]
+    assert rise == pytest.approx(0.874, abs=1e-2)       # the operator's number
+    assert rise > CLIMB_LETHAL_M                        # would be lethal unbounded
+
+    _, cost = seed_from_elevation(grid, rover_z=float(grid[row, 0]),
+                                  rover_cell=(row, 0), relative_radius_m=3.0)
+    assert cost[row, far_col] != LETHAL
+
+
+def test_rover_z_none_reproduces_todays_output_byte_for_byte():
+    grid, lo, _size = pit(depth=0.3)
+    _, cost_before = seed_from_elevation(grid)
+    _, cost_after = seed_from_elevation(grid, rover_z=None, rover_cell=(lo, lo),
+                                        relative_radius_m=3.0)
+    assert np.array_equal(cost_before, cost_after)
+
+
+def test_a_zero_relative_radius_reproduces_todays_output_byte_for_byte():
+    grid, lo, _size = pit(depth=0.3)
+    _, cost_before = seed_from_elevation(grid)
+    _, cost_after = seed_from_elevation(grid, rover_z=0.0, rover_cell=(lo, lo),
+                                        relative_radius_m=0.0)
+    assert np.array_equal(cost_before, cost_after)
