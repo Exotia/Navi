@@ -32,7 +32,7 @@ from time import monotonic
 
 import rclpy
 from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import Path
+from nav_msgs.msg import Odometry, Path
 from rclpy.node import Node
 from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
                        ReliabilityPolicy)
@@ -40,6 +40,7 @@ from std_msgs.msg import String
 
 from navi_autonomy import nav_run as rules
 from navi_autonomy import path_summary
+from navi_autonomy.glare import DetourPlanner
 from navi_autonomy.nav_run import NavRun
 from navi_autonomy.run_log import RunLog
 from navi_autonomy.nav2_goals import ActionClientNav2Goals
@@ -78,6 +79,20 @@ class GoalRelay(Node):
         # every decision of the LAST ride (operator request, night session).
         self.declare_parameter("run_log_path", "/tmp/navi_last_ride.log")
 
+        # The glare-aware detour: glare_watch's verdict and the rover's own
+        # pose are the two inputs DetourPlanner needs to decide whether the
+        # next Nav2 goal is the real waypoint or a tack around the sun. This
+        # stays entirely between goal_relay and Nav2 - nav_run is never told
+        # about a detour, because a detour "arriving" would otherwise be
+        # reported as a waypoint reached, which puts the coordinator in
+        # Waiting and forces the operator to press Resume at every tack.
+        self.declare_parameter("glare_topic", "/autonomy/glare")
+        self.declare_parameter("pose_topic", "/localization/pose")
+        self.declare_parameter("glare_detour_enabled", True)
+        self.declare_parameter("glare_detour_offset_m", 2.0)
+        self.declare_parameter("glare_detour_along_fraction", 0.5)
+        self.declare_parameter("glare_detour_max_per_leg", 4)
+
         # NOT self._clock: rclpy.node.Node already owns that name (see
         # mode_supervisor.py's identical note).
         self._now = clock
@@ -94,6 +109,21 @@ class GoalRelay(Node):
         # a value merely cached from before this node subscribed is not
         # evidence the coordinator just stopped something.
         self._last_stop_seq = None
+
+        self._glare_detour_enabled = bool(self.get_parameter("glare_detour_enabled").value)
+        self._glare_detour_max_per_leg = int(self.get_parameter("glare_detour_max_per_leg").value)
+        self._planner = DetourPlanner(
+            offset_m=float(self.get_parameter("glare_detour_offset_m").value),
+            along_fraction=float(self.get_parameter("glare_detour_along_fraction").value),
+            max_detours=self._glare_detour_max_per_leg)
+        # None means "no glare reported yet" - the same value glare_side
+        # itself returns for "no side to steer by", so no glare and never
+        # having heard from glare_watch are indistinguishable, which is the
+        # correct default: drive straight at the waypoint until told
+        # otherwise.
+        self._glare_side = None
+        self._rover_xy = None            # (x, y) from /localization/pose, or None before the first one
+        self._real_goal = None           # (index, x, y, yaw) of the waypoint currently in play
 
         self._runlog = RunLog(str(self.get_parameter("run_log_path").value))
         # What was last written to the diary, so only CHANGES land there:
@@ -123,6 +153,12 @@ class GoalRelay(Node):
         self.create_subscription(
             String, str(self.get_parameter("navi_rpc_status_topic").value),
             self._on_navi_rpc_status, 10)
+        self.create_subscription(
+            String, str(self.get_parameter("glare_topic").value),
+            self._on_glare, 10)
+        self.create_subscription(
+            Odometry, str(self.get_parameter("pose_topic").value),
+            self._on_pose, 10)
 
         self.create_timer(1.0 / TICK_HZ, self._tick)
         self.create_timer(1.0 / STATUS_HZ, self._status_tick)
@@ -214,6 +250,33 @@ class GoalRelay(Node):
         except Exception as exc:
             self.get_logger().error(f"navi_rpc status callback failed: {exc!r}")
 
+    def _on_glare(self, msg: String):
+        # Parsed strictly, the way this file already parses every wire
+        # payload (_on_nav_request, _on_mode_status): a malformed message or
+        # an unknown side leaves the last known verdict untouched rather
+        # than being read as "no glare" - a glitch on this topic must not
+        # silently steer the rover back at the sun.
+        try:
+            payload = json.loads(msg.data)
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            self.get_logger().warn(f"unreadable glare payload: {msg.data!r}")
+            return
+        try:
+            side = payload.get("side") if isinstance(payload, dict) else None
+            if side not in ("left", "right", "none"):
+                self.get_logger().warn(f"unreadable glare payload: {msg.data!r}")
+                return
+            self._glare_side = None if side == "none" else side
+        except Exception as exc:
+            self.get_logger().error(f"glare callback failed: {exc!r}")
+
+    def _on_pose(self, msg: Odometry) -> None:
+        try:
+            p = msg.pose.pose.position
+            self._rover_xy = (float(p.x), float(p.y))
+        except Exception as exc:
+            self.get_logger().error(f"pose callback failed: {exc!r}")
+
     def _publish_active_goal(self, x: float, y: float) -> None:
         """Tell the traversability layer which point to heal a disc around.
 
@@ -255,6 +318,71 @@ class GoalRelay(Node):
             self._after_run_mutation()
         except Exception as exc:
             self.get_logger().error(f"feedback callback failed: {exc!r}")
+
+    # -- the glare detour, entirely between here and Nav2 - nav_run is never
+    # told about a detour goal, so it can never put the coordinator into
+    # Waiting for one (see the constructor's comment on why). ----------------
+    def _advance_toward_real_goal(self):
+        """Decide the next Nav2 goal for the leg in `_real_goal`: another
+        detour, or - once the planner is out of glare or out of detours -
+        the real waypoint itself. Called once when a leg starts and again
+        every time a detour goal succeeds, which is what makes successive
+        calls tack rather than bow: the rover has moved and the bearing to
+        the goal has changed, so the planner is asked fresh each time."""
+        index, x, y, _yaw = self._real_goal
+        if not self._glare_detour_enabled:
+            self._send_real_goal()
+            return
+        point, is_detour = self._planner.next_target(
+            self._rover_xy, (x, y), self._glare_side)
+        if not is_detour:
+            self._send_real_goal()
+            return
+        px, py = point
+        self._runlog.event(
+            "detour_sent",
+            f"waypoint {index + 1}/{len(self._mission_waypoints)}: glare on "
+            f"the {self._glare_side} half of the frame - steering to "
+            f"({px:.2f}, {py:.2f}) [detour {self._planner.detours_taken}/"
+            f"{self._glare_detour_max_per_leg}]")
+        self._publish_active_goal(px, py)
+        self._nav2.send_goal(px, py, None, self._on_detour_succeeded,
+                             self._on_detour_failed, self._on_detour_feedback)
+
+    def _send_real_goal(self):
+        index, x, y, yaw = self._real_goal
+        yaw_txt = "free (+x)" if yaw is None else f"{yaw:.2f}"
+        self._runlog.event(
+            "goal_sent", f"waypoint {index + 1}/{len(self._mission_waypoints)}"
+                         f" -> ({x:.2f}, {y:.2f}) yaw {yaw_txt}")
+        self._publish_active_goal(x, y)
+        self._nav2.send_goal(x, y, yaw, self._on_goal_succeeded,
+                             self._on_goal_failed, self._on_feedback)
+
+    def _on_detour_succeeded(self):
+        try:
+            self._runlog.event(
+                "detour_result", "SUCCEEDED - re-checking glare before the next leg")
+            self._advance_toward_real_goal()
+        except Exception as exc:
+            self.get_logger().error(f"detour succeeded callback failed: {exc!r}")
+
+    def _on_detour_failed(self, reason):
+        # A detour is an optimisation, not a requirement: losing one must
+        # never cost the mission, so this falls straight through to the real
+        # goal with nav_run's own callbacks rather than aborting the run.
+        try:
+            self._runlog.event(
+                "detour_result", f"FAILED - {reason} - proceeding to the real waypoint")
+            self._send_real_goal()
+        except Exception as exc:
+            self.get_logger().error(f"detour failed callback failed: {exc!r}")
+
+    def _on_detour_feedback(self, distance_remaining, eta_s):
+        # Deliberately not forwarded to nav_run: this is progress toward a
+        # detour point, not toward the real waypoint, and _run.on_feedback
+        # would report a wrong distance/eta on the status line if it were.
+        pass
 
     # -- timers ---------------------------------------------------------------
     def _tick(self):
@@ -334,13 +462,13 @@ class GoalRelay(Node):
         elif action == rules.SEND_GOAL:
             index, x, y, yaw = payload
             yaw = self._resolve_yaw(index, x, y, yaw)
-            yaw_txt = "free (+x)" if yaw is None else f"{yaw:.2f}"
-            self._runlog.event(
-                "goal_sent", f"waypoint {index + 1}/{len(self._mission_waypoints)}"
-                             f" -> ({x:.2f}, {y:.2f}) yaw {yaw_txt}")
-            self._publish_active_goal(x, y)
-            self._nav2.send_goal(x, y, yaw, self._on_goal_succeeded,
-                                 self._on_goal_failed, self._on_feedback)
+            # A new real waypoint: reset the detour counter for it (spec
+            # section on DetourPlanner - "a leg" is one real waypoint) and
+            # let the planner decide whether the first Nav2 goal is this
+            # point or a tack away from the glare.
+            self._real_goal = (index, x, y, yaw)
+            self._planner.begin_leg()
+            self._advance_toward_real_goal()
         elif action == rules.CANCEL_GOAL:
             self._runlog.event("goal_cancelled", str(payload))
             self._nav2.cancel(payload)

@@ -29,7 +29,7 @@ import pytest
 import rclpy
 from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateToPose
-from nav_msgs.msg import Path
+from nav_msgs.msg import Odometry, Path
 from rclpy.action import ActionServer, CancelResponse
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
@@ -447,3 +447,137 @@ def test_the_active_goal_is_announced_for_the_traversability_layer(graph_factory
     assert published[0].header.frame_id == "map"
     assert published[0].pose.position.x == pytest.approx(
         server.received_goals[0].pose.pose.position.x)
+
+
+# -- the glare-aware detour ---------------------------------------------------
+#
+# Rover at the map origin, a single leg straight down +x to (10.0, 0.0): the
+# same rover/goal pair test_glare.py's detour_point tests use, so the
+# expected detour point - (5.0, -2.0), glare on the left steers right - is
+# the documented geometry rather than a number reverse-engineered from the
+# implementation.
+
+def odom_at(x, y):
+    msg = Odometry()
+    msg.pose.pose.position.x = float(x)
+    msg.pose.pose.position.y = float(y)
+    return msg
+
+
+def glare_msg(side, left_fraction=0.05, right_fraction=0.0):
+    return _string({"side": side, "left_fraction": left_fraction,
+                    "right_fraction": right_fraction})
+
+
+def straight_leg(run_id="gs-1"):
+    return go(waypoints=((10.0, 0.0), (20.0, 0.0)), run_id=run_id)
+
+
+def test_with_glare_present_the_first_goal_nav2_receives_is_a_detour_not_the_waypoint(graph_factory):
+    executor, relay, server, task, clock, statuses, summaries = graph_factory()
+    relay._on_pose(odom_at(0.0, 0.0))
+    relay._on_glare(glare_msg("left"))
+    relay._on_mode_status(mode("autonomous"))
+    relay._on_nav_request(straight_leg())
+    spin(executor, 2.0)
+
+    assert len(server.received_goals) == 1
+    goal = server.received_goals[0]
+    # Glare on the left steers right (away from it), not the operator's
+    # waypoint at (10.0, 0.0).
+    assert goal.pose.pose.position.x == pytest.approx(5.0)
+    assert goal.pose.pose.position.y == pytest.approx(-2.0)
+
+
+def test_after_the_detour_succeeds_nav2_receives_the_real_waypoint(graph_factory):
+    executor, relay, server, task, clock, statuses, summaries = graph_factory()
+    relay._on_pose(odom_at(0.0, 0.0))
+    relay._on_glare(glare_msg("left"))
+    relay._on_mode_status(mode("autonomous"))
+    relay._on_nav_request(straight_leg())
+    spin(executor, 2.0)
+    assert len(server.received_goals) == 1
+
+    # The sun has moved on by the time the detour is reached: the planner is
+    # asked fresh and, with no glare left, hands back the real waypoint.
+    relay._on_glare(glare_msg("none"))
+    server.succeed(0)
+    spin(executor, 2.0)
+
+    assert len(server.received_goals) == 2
+    goal = server.received_goals[1]
+    assert goal.pose.pose.position.x == pytest.approx(10.0)
+    assert goal.pose.pose.position.y == pytest.approx(0.0)
+
+
+def test_a_detour_reaching_its_point_is_not_reported_to_nav_run_as_the_waypoint(graph_factory):
+    executor, relay, server, task, clock, statuses, summaries = graph_factory()
+    relay._on_pose(odom_at(0.0, 0.0))
+    relay._on_glare(glare_msg("left"))
+    relay._on_mode_status(mode("autonomous"))
+    relay._on_nav_request(straight_leg())
+    spin(executor, 2.0)
+    assert len(server.received_goals) == 1
+
+    relay._on_glare(glare_msg("none"))
+    server.succeed(0)          # the detour goal succeeds
+    spin(executor, 2.0)
+
+    # The real waypoint has now been sent to Nav2 (the previous test covers
+    # that), but nav_run must not have heard about the detour arrival as if
+    # it were the waypoint: no waypoint notification to the coordinator, and
+    # the run stays RUNNING rather than being put in PAUSED to wait for an
+    # operator Resume.
+    assert ("waypoint", 0) not in task.calls
+    assert statuses[-1]["state"] == "running"
+
+
+def test_a_failed_detour_still_sends_the_real_goal_and_does_not_abort_the_run(graph_factory):
+    executor, relay, server, task, clock, statuses, summaries = graph_factory()
+    relay._on_pose(odom_at(0.0, 0.0))
+    relay._on_glare(glare_msg("left"))
+    relay._on_mode_status(mode("autonomous"))
+    relay._on_nav_request(straight_leg())
+    spin(executor, 2.0)
+    assert len(server.received_goals) == 1
+
+    server.abort(0)             # the detour goal fails
+    spin(executor, 2.0)
+
+    assert len(server.received_goals) == 2
+    goal = server.received_goals[1]
+    assert goal.pose.pose.position.x == pytest.approx(10.0)
+    assert goal.pose.pose.position.y == pytest.approx(0.0)
+    assert statuses[-1]["state"] != "aborted"
+
+
+def test_with_no_glare_the_goal_nav2_receives_is_unchanged_from_before_this_feature(graph_factory):
+    # A regression guard: this feature must be invisible when the sun is not
+    # in frame. No _on_glare and no _on_pose call at all, exactly like every
+    # pre-existing test above this section - byte-for-byte the same waypoint
+    # Nav2 always received.
+    executor, relay, server, task, clock, statuses, summaries = graph_factory()
+    relay._on_mode_status(mode("autonomous"))
+    relay._on_nav_request(go())
+    spin(executor, 2.0)
+
+    assert len(server.received_goals) == 1
+    goal = server.received_goals[0]
+    assert goal.pose.pose.position.x == pytest.approx(3.0)
+    assert goal.pose.pose.position.y == pytest.approx(-1.5)
+    assert goal.pose.header.frame_id == "map"
+
+
+def test_glare_detour_enabled_false_disables_the_whole_feature(graph_factory):
+    executor, relay, server, task, clock, statuses, summaries = graph_factory()
+    relay._glare_detour_enabled = False
+    relay._on_pose(odom_at(0.0, 0.0))
+    relay._on_glare(glare_msg("left"))
+    relay._on_mode_status(mode("autonomous"))
+    relay._on_nav_request(straight_leg())
+    spin(executor, 2.0)
+
+    assert len(server.received_goals) == 1
+    goal = server.received_goals[0]
+    assert goal.pose.pose.position.x == pytest.approx(10.0)
+    assert goal.pose.pose.position.y == pytest.approx(0.0)

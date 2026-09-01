@@ -21,9 +21,12 @@
 #   9. nav2_bringup.launch.py - Nav2: Theta*/RPP planning to /autonomy_twist,
 #      which only mode_supervisor reads. With it come the perception pair
 #      (tile_aggregator + traversability_layer, the elevation tiles stitched
-#      and turned into /autonomy/costmap_seed) and goal_relay (the /nav_request
-#      listener that drives Nav2 and the coordinator task together) - Nav2
-#      without them has empty costmaps and no one to give it a goal.
+#      and turned into /autonomy/costmap_seed), goal_relay (the /nav_request
+#      listener that drives Nav2 and the coordinator task together) and
+#      glare_watch (the ZED left image turned into /autonomy/glare, so
+#      goal_relay can tack the rover away from the sun before it loses
+#      tracking) - Nav2 without them has empty costmaps, no one to give it a
+#      goal, and no warning that the camera is about to go blind.
 #      Nav2 needs the frames and the
 #      odometry localisation publishes, so it is skipped when --no-localization
 #      is given.
@@ -321,7 +324,7 @@ if [ "$CLEAN_STALE" -eq 1 ]; then
     kill_stale "navi_teleop nodes" "navi_teleop/(manual_twist_listener|video_sender|bema_bridge)"
     kill_stale "navi_supervisor nodes" "navi_supervisor/(mode_supervisor|navi_rpc_server)"
     kill_stale "navi_shaper nodes" "navi_shaper/twist_shaper"
-    kill_stale "navi_autonomy nodes" "navi_autonomy/(tile_aggregator|traversability_layer|goal_relay)"
+    kill_stale "navi_autonomy nodes" "navi_autonomy/(tile_aggregator|traversability_layer|goal_relay|glare_watch)"
     kill_stale "autonomy perception launches" "ros2 launch navi_autonomy"
     kill_stale "nav2 launches" "ros2 launch navi_nav2"
     kill_stale "ros2 run wrappers" "ros2 run navi_(teleop|supervisor|shaper|autonomy)"
@@ -447,6 +450,9 @@ if [ "$START_NAV2" -eq 1 ]; then
         BACKGROUND_PIDS+=("$!")
         echo "starting goal_relay (/nav_request -> Nav2 + coordinator task)"
         ros2 run navi_autonomy goal_relay &
+        BACKGROUND_PIDS+=("$!")
+        echo "starting glare_watch (ZED left image -> /autonomy/glare)"
+        ros2 run navi_autonomy glare_watch &
         BACKGROUND_PIDS+=("$!")
     fi
 fi
