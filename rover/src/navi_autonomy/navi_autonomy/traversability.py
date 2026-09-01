@@ -85,25 +85,16 @@ DROP_LETHAL_M = 0.14
 # from being asked a question it cannot answer.
 RELATIVE_RADIUS_M = 3.0
 
-# 45 degrees. Raised twice on the operator's judgement: the spec said 25,
-# then 35, and the rover was still refusing ground it stands on easily -
-# the operator's own words are that 35 is easy for this chassis. The
-# geometry supports going higher: half the track is 0.444 m (HPARAMS) and
-# the body's centre sits about 0.409 m up, so the static tip is roughly
-# atan(0.444 / 0.409) = 47 degrees sideways - and the real centre of mass
-# sits below the body's centre (batteries and drivetrain low), so the true
-# figure is higher still. 45 is the last number under the worst-case
-# estimate.
-#
-# Two things keep this honest. First, what ends a climb before tipping
-# does is traction: on loose ground the wheels slip long before the rover
-# leans over, and that failure is recoverable and visible where tipping is
-# neither. Second, a large slice of what the map calls "slope" is not
-# slope at all - at 0.05 m cells the gradient is taken over a 0.10 m
-# baseline, so two centimetres of ZED depth noise reads as eleven degrees
-# of incline. A high threshold is also a noise filter. The number is
-# live-retunable (slope_lethal_deg) for the day the yard disagrees.
-SLOPE_LETHAL_DEG = 45.0
+# 30 degrees - the operator's final number, after a full tour: the spec
+# said 25, live runs pushed it to 35 and then 45 while measurement noise
+# was inflating every reading, and once the fitted slope removed the noise
+# the operator settled on 30 as what the rover actually climbs. It is also
+# exactly the ground/obstacle boundary the reference stack that keeps
+# winning ERC uses (kalman_robot, max_ground_angle 0.7 rad). The static
+# tip is ~47 degrees sideways, so 30 carries a wide margin; with the
+# fitted slope a 30 here is a real 30, not 30 minus whatever the noise
+# added. Live-retunable (slope_lethal_deg) as ever.
+SLOPE_LETHAL_DEG = 30.0
 SLOPE_LETHAL_RAD = math.radians(SLOPE_LETHAL_DEG)
 
 # Roughness is never lethal on its own; the spec only asks for it to be

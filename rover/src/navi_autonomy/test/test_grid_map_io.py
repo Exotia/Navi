@@ -11,7 +11,7 @@ import pytest
 from builtin_interfaces.msg import Time
 
 from navi_autonomy.grid_map_io import (
-    ELEVATION_LAYER, build_grid_map, build_occupancy_grid, layer_from_message,
+    AGE_LAYER, ELEVATION_LAYER, build_grid_map, build_occupancy_grid, layer_from_message,
     tile_from_message)
 from navi_localization.elevation_mapper import build_tile_message
 
@@ -29,9 +29,33 @@ def a_tile():
 def test_what_the_rover_publishes_is_what_the_aggregator_reads():
     tile = a_tile()
     message = build_tile_message((3, -2), tile, 'map', Time())
-    got, ix, iy = tile_from_message(message)
+    got, age, ix, iy = tile_from_message(message)
     assert np.array_equal(got, tile, equal_nan=True)
+    assert age is None                    # no age_s layer was ever given
     assert (ix, iy) == (3, -2)
+
+
+def test_tile_from_message_reads_back_the_age_layer_when_present():
+    elevation = a_tile()
+    age = np.full((51, 51), np.nan, dtype=np.float32)
+    age[25, 25] = 12.5
+    message = build_tile_message((0, 0), elevation, 'map', Time(), age=age)
+
+    got_elevation, got_age, ix, iy = tile_from_message(message)
+    assert np.array_equal(got_elevation, elevation, equal_nan=True)
+    assert np.array_equal(got_age, age, equal_nan=True)
+    assert (ix, iy) == (0, 0)
+
+
+def test_tile_from_message_refuses_an_age_layer_of_the_wrong_shape():
+    # build_tile_message does not itself require age to match the tile's
+    # shape - it just serialises whatever array it is given - so a message
+    # with the two layers at different sizes is a real, well-formed
+    # message this function still has to catch.
+    message = build_tile_message((0, 0), a_tile(), 'map', Time(),
+                                 age=np.zeros((3, 3), dtype=np.float32))
+    with pytest.raises(ValueError, match='age_s'):
+        tile_from_message(message)
 
 
 def test_a_tile_at_a_foreign_resolution_is_refused_not_resampled():

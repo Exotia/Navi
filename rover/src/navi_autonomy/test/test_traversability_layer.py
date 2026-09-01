@@ -78,7 +78,10 @@ def test_a_pit_publishes_lethal_cells_on_its_rim(node):
     assert cost[lo - 1, lo - 1] == LETHAL
     assert cost[lo - 1, lo + 2] == LETHAL
     assert cost[2, 2] == 0
-    assert (cost == LETHAL).sum() == 48
+    # 84 with the fitted slope at the 30 degree ceiling: the pit's skirt -
+    # the last fit-radius of approach to the lip - is condemned too. See
+    # test_traversability.py's pit-rim test for the full argument.
+    assert (cost == LETHAL).sum() == 84
 
 
 def test_the_seed_carries_the_maps_geometry(node):
@@ -435,7 +438,11 @@ def test_the_step_threshold_can_be_raised_while_the_node_runs(node):
     assert seed_of(node)[lo - 1, lo - 1] == LETHAL
 
     result = node._on_set_parameters(
-        [Parameter('step_lethal_m', Parameter.Type.DOUBLE, 0.5)])
+        [Parameter('step_lethal_m', Parameter.Type.DOUBLE, 0.5),
+         # The fitted slope at the 30 degree ceiling condemns this rim cell
+         # on its own; lifted out of the way so what this test observes is
+         # the STEP retune, which is its whole point.
+         Parameter('slope_lethal_deg', Parameter.Type.DOUBLE, 89.0)])
     node._on_map(message)
 
     assert result.successful is True

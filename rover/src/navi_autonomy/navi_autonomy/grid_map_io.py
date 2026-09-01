@@ -32,6 +32,12 @@ from navi_localization.elevation_grid import RESOLUTION
 from navi_localization.tiles import TILE_SAMPLES, tile_index_of
 
 ELEVATION_LAYER = 'elevation'
+# Seconds since each cell's observation, as of publish time - NaN where
+# never observed, absent entirely from a message built by a node old
+# enough not to know about it. Paired with
+# navi_localization.elevation_mapper.AGE_LAYER, duplicated rather than
+# imported for the same layering reason ELEVATION_LAYER/LAYER are.
+AGE_LAYER = 'age_s'
 
 
 def layer_from_message(message: GridMap, name: str) -> np.ndarray:
@@ -52,7 +58,8 @@ def layer_from_message(message: GridMap, name: str) -> np.ndarray:
 
 
 def tile_from_message(message: GridMap) -> tuple:
-    """(elevation (51, 51) float32, ix, iy) from one /localization/map_tile.
+    """(elevation (51, 51) float32, age_s (51, 51) float32 or None, ix, iy)
+    from one /localization/map_tile.
 
     The tile's identity is not in the message anywhere except its centre:
     unlike an obstacle tile, a map tile's header.frame_id is the plain map
@@ -63,6 +70,15 @@ def tile_from_message(message: GridMap) -> tuple:
     Resolution is checked, never resampled: spec section 5 puts the costmap
     at 0.05 m precisely because "resampling smears the step edges that matter
     most", and a tile at another resolution means the mapper changed under us.
+
+    `age_s` comes back as `None`, not an error, when the message has no
+    such layer - a publisher from before this feature existed, or a mixed
+    deploy where it has not been upgraded yet. That is the documented
+    backwards-compatible reading: `layer_from_message` itself still raises
+    ValueError if asked for `age_s` by name on a message that lacks it
+    (exactly as it would for any other missing layer), which is why this
+    function checks `message.layers` first rather than letting that raise
+    escape as if age_s were mandatory.
     """
     resolution = float(message.info.resolution)
     if abs(resolution - RESOLUTION) > 1e-9:
@@ -73,9 +89,16 @@ def tile_from_message(message: GridMap) -> tuple:
     if elevation.shape != (TILE_SAMPLES, TILE_SAMPLES):
         raise ValueError(
             f"a map tile is {TILE_SAMPLES}x{TILE_SAMPLES} samples, got {elevation.shape}")
+    age = None
+    if AGE_LAYER in message.layers:
+        age = layer_from_message(message, AGE_LAYER)
+        if age.shape != elevation.shape:
+            raise ValueError(
+                f"a map tile's age_s layer must match its elevation shape, "
+                f"got {age.shape} vs {elevation.shape}")
     ix, iy = tile_index_of(float(message.info.pose.position.x),
                            float(message.info.pose.position.y))
-    return elevation, ix, iy
+    return elevation, age, ix, iy
 
 
 def _layer_message(grid: np.ndarray) -> Float32MultiArray:
