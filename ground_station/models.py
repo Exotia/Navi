@@ -621,15 +621,31 @@ def _safe_str(value) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _safe_finite(value):
+    """`_safe_float`, but NaN and the infinities are failures too.
+
+    Python's `json` accepts the non-standard literals `NaN`, `Infinity`
+    and `-Infinity` and hands them back as floats, so `_safe_float` alone
+    lets a coordinate through that is not a place: it would reach the SITE
+    card as a measurement, be drawn, and only be caught (if at all) by the
+    solver refusing the whole fit. Strict means finite here.
+    """
+    value = _safe_float(value)
+    if value is None or not math.isfinite(value):
+        return None
+    return value
+
+
 def parse_probe_result(payload: str):
     """A strict ProbeResult from /site/probe_result's JSON.
 
     `request_id`, `label` and `ok` must be present with the right type, or
     the whole payload is rejected - there is no sane default for "which
     request is this a reply to". On success (`ok: true`) x/y/z/range_m must
-    each coerce to a finite number via `_safe_float`; a `None` back from
+    each coerce to a finite number via `_safe_finite`; a `None` back from
     that coercion fails the whole payload rather than landing a landmark at
-    (0, 0). On failure (`ok: false`) those same four fields are required to
+    (0, 0) - or, for a NaN that JSON is happy to carry, nowhere at all. On
+    failure (`ok: false`) those same four fields are required to
     be null - a failure that quietly carries a number is a bug worth
     surfacing as a dropped message, not a value worth keeping.
     """
@@ -647,7 +663,7 @@ def parse_probe_result(payload: str):
         return None
 
     samples = _safe_int(status.get("samples"), default=None)
-    valid_fraction = _safe_float(status.get("valid_fraction"))
+    valid_fraction = _safe_finite(status.get("valid_fraction"))
     if samples is None or valid_fraction is None:
         return None
 
@@ -656,10 +672,10 @@ def parse_probe_result(payload: str):
         return None
 
     if ok:
-        x = _safe_float(status.get("x"))
-        y = _safe_float(status.get("y"))
-        z = _safe_float(status.get("z"))
-        range_m = _safe_float(status.get("range_m"))
+        x = _safe_finite(status.get("x"))
+        y = _safe_finite(status.get("y"))
+        z = _safe_finite(status.get("z"))
+        range_m = _safe_finite(status.get("range_m"))
         if x is None or y is None or z is None or range_m is None:
             return None
     else:
@@ -684,12 +700,12 @@ def _parse_sighting(entry):
     quality = _safe_str(entry.get("quality"))
     if id_ is None or quality is None:
         return None
-    x = _safe_float(entry.get("x"))
-    y = _safe_float(entry.get("y"))
-    z = _safe_float(entry.get("z"))
-    spread_m = _safe_float(entry.get("spread_m"))
-    range_m = _safe_float(entry.get("range_m"))
-    last_seen_s = _safe_float(entry.get("last_seen_s"))
+    x = _safe_finite(entry.get("x"))
+    y = _safe_finite(entry.get("y"))
+    z = _safe_finite(entry.get("z"))
+    spread_m = _safe_finite(entry.get("spread_m"))
+    range_m = _safe_finite(entry.get("range_m"))
+    last_seen_s = _safe_finite(entry.get("last_seen_s"))
     n = _safe_int(entry.get("n"), default=None)
     if None in (x, y, z, spread_m, range_m, last_seen_s, n):
         return None

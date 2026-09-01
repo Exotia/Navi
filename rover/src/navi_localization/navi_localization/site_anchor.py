@@ -53,6 +53,53 @@ STOPPED = "stopped"
 # and take the median of what is left - needs more than one sample to work.
 DEPTH_PATCH_RADIUS = 3
 
+# sensor_msgs/Image encodings this node can hand to the ArUco detector, and
+# how many bytes each pixel takes. The channel count is read from the
+# encoding rather than inferred from the buffer length: a row-padded image
+# (step > width * channels, which the ZED wrapper does not send today but
+# any republisher may) makes `len(data) // (width * height)` a wrong answer
+# that silently reshapes the picture into diagonal garbage.
+_IMAGE_CHANNELS = {
+    'mono8': 1, '8UC1': 1,
+    'bgr8': 3, 'rgb8': 3,
+    'bgra8': 4, 'rgba8': 4,
+}
+_MONO_ENCODINGS = ('mono8', '8UC1')
+# Looked up lazily against the cv2 module so importing this file never
+# needs OpenCV (the detector-unavailable path has to keep publishing).
+_GRAY_CONVERSIONS = {
+    'bgr8': lambda cv2: cv2.COLOR_BGR2GRAY,
+    'rgb8': lambda cv2: cv2.COLOR_RGB2GRAY,
+    'bgra8': lambda cv2: cv2.COLOR_BGRA2GRAY,
+    'rgba8': lambda cv2: cv2.COLOR_RGBA2GRAY,
+}
+
+
+def image_to_array(image_msg):
+    """`(height, width, channels)` uint8 view of a sensor_msgs/Image, plus
+    its encoding - or None if the encoding is not one this node handles or
+    the buffer does not match the header.
+
+    The row stride is `step` BYTES, so the buffer is reshaped to
+    `(height, step)` and each row trimmed to `width * channels` bytes
+    before the channel axis is split out. Reshaping to anything derived
+    from `step // channels` is a size error on every multi-channel image -
+    which is what this function exists to keep from happening again.
+    """
+    import numpy as np
+
+    channels = _IMAGE_CHANNELS.get(image_msg.encoding)
+    if channels is None:
+        return None
+    w, h, step = image_msg.width, image_msg.height, image_msg.step
+    if w <= 0 or h <= 0 or step < w * channels:
+        return None
+    buf = np.frombuffer(image_msg.data, dtype=np.uint8)
+    if buf.size < h * step:
+        return None
+    arr = buf[:h * step].reshape(h, step)[:, :w * channels]
+    return arr.reshape(h, w, channels), image_msg.encoding
+
 
 def _median(values):
     if not values:
@@ -182,16 +229,13 @@ class SiteAnchor(Node):
         if not self._detector_ok or self._aruco_dict is None:
             return []
         import cv2
-        import numpy as np
 
-        w, h = image_msg.width, image_msg.height
-        buf = np.frombuffer(image_msg.data, dtype=np.uint8)
-        channels = len(buf) // (w * h) if w and h else 0
-        if channels <= 0:
+        decoded = image_to_array(image_msg)
+        if decoded is None:
             return []
-        arr = buf.reshape(h, image_msg.step // max(channels, 1))[:, :w * channels]
-        arr = arr.reshape(h, w, channels)
-        gray = cv2.cvtColor(arr, cv2.COLOR_BGRA2GRAY if channels == 4 else cv2.COLOR_BGR2GRAY)
+        arr, encoding = decoded
+        gray = arr[:, :, 0] if encoding in _MONO_ENCODINGS else cv2.cvtColor(
+            arr, _GRAY_CONVERSIONS[encoding](cv2))
         params = cv2.aruco.DetectorParameters_create() if hasattr(
             cv2.aruco, 'DetectorParameters_create') else cv2.aruco.DetectorParameters()
         corners, ids, _ = cv2.aruco.detectMarkers(gray, self._aruco_dict, parameters=params)

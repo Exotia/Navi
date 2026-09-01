@@ -355,6 +355,18 @@ class MainWindow(QMainWindow):
         site_card.probe_requested.connect(self._on_probe_requested)
         site_card.lock_changed.connect(self._on_site_lock_changed)
         site_card.camera_restarted.connect(self._on_camera_restarted)
+        # Stage 3's three buttons. Without these the card's Anchor and
+        # Reset are dead controls and /site/anchor_command is never
+        # published, so site_anchor.py sits in `idle` forever and the
+        # operator guide's "Press Start anchor" (docs/site/README.md, step
+        # 6) does nothing. None of the three commands motion (correction
+        # 3): they start, freeze and clear an accumulator.
+        site_card.anchor_start_requested.connect(
+            lambda: self._send_anchor_command("start"))
+        site_card.anchor_stop_requested.connect(
+            lambda: self._send_anchor_command("stop"))
+        site_card.anchor_reset_requested.connect(
+            lambda: self._send_anchor_command("reset"))
 
         # The operator's last click in the camera view - not gated on a
         # rosbridge connection, since it is purely local until a probe is
@@ -929,6 +941,15 @@ class MainWindow(QMainWindow):
         self.ros_client.send_probe_request(request_id, landmark_id, u, v, width, height,
                                            target=target)
 
+    def _send_anchor_command(self, action: str) -> None:
+        """start / stop / reset for the stage-3 accumulator. The client's
+        own guard drops it with a line on stderr when the link is down, so
+        this only has to survive there being no client at all (the window
+        runs without one in tests and with --no-ros)."""
+        if self.ros_client is None:
+            return
+        self.ros_client.send_anchor_command(action)
+
     def _on_probe_result(self, result) -> None:
         if result is None:
             return
@@ -982,6 +1003,14 @@ class MainWindow(QMainWindow):
         new_transform = reexpress_at_lock_pose(
             self._site_transform, pose["x"], pose["y"], pose["yaw"])
         self._site_transform = new_transform
+        # The transform now speaks the NEW map frame, and in that frame the
+        # rover-at-lock pose is the origin - the frame was just born there.
+        # Recording that makes a second press (a fat finger, or an operator
+        # who restarts the wrapper twice) a no-op instead of a silent
+        # second subtraction of a pose that no longer exists: the same
+        # failure §3.10 exists to prevent, arriving through the button
+        # meant to fix it.
+        self._site_lock_pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
 
         site_card = self.dashboard_page.site_card
         site_card.transform = new_transform

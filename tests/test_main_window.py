@@ -1581,3 +1581,55 @@ def test_camera_restarted_without_a_captured_lock_pose_does_nothing(qtbot):
     window.dashboard_page.site_card.camera_restarted.emit()
 
     assert window._site_transform is transform
+
+
+def test_the_anchor_buttons_reach_the_rover(qtbot):
+    """Stage 3's three commands, wired to /site/anchor_command.
+
+    Found unwired in review: the card's `anchor_button` and `reset_button`
+    emitted their signals into nothing, so `send_anchor_command` was dead
+    code, `site_anchor.py` stayed in `idle` forever, and the operator
+    guide's step 6 ("Press Start anchor") could not work.
+    """
+    window = connected_window(qtbot)
+    card = window.dashboard_page.site_card
+
+    card.anchor_button.setChecked(True)
+    card.anchor_button.setChecked(False)
+    card.reset_button.click()
+
+    assert published(window, "/site/anchor_command") == [
+        {"action": "start"}, {"action": "stop"}, {"action": "reset"}]
+
+
+def test_the_anchor_button_carries_the_labels_the_operator_guide_names(qtbot):
+    window, _ = make_window(qtbot)
+    card = window.dashboard_page.site_card
+    assert card.anchor_button.text() == "Start anchor"
+    card.anchor_button.setChecked(True)
+    assert card.anchor_button.text() == "Stop anchor"
+
+
+def test_pressing_camera_restarted_twice_re_expresses_exactly_once(qtbot):
+    """The second press must be a no-op, not a second subtraction.
+
+    After the first press the transform speaks the NEW map frame, in which
+    the rover-at-lock pose is the origin. Re-applying the OLD frame's lock
+    pose would move the anchor by that pose all over again - silently, and
+    at drive-config decode range with no landmark left to catch it, which
+    is the exact failure the button exists to prevent.
+    """
+    window = connected_window(qtbot)
+    transform = SiteTransform(x=1.0, y=2.0, yaw=0.2, rms_m=0.05,
+                              max_residual_m=0.06, worst_id=None, n_points=2,
+                              scale_hint=1.0, ids=("51", "52"))
+    window.ros_client.signals.localization_pose_received.emit(
+        {"x": 0.5, "y": -0.3, "yaw": 0.1})
+    _lock(window, transform)
+
+    window.dashboard_page.site_card.camera_restarted.emit()
+    once = window._site_transform
+    window.dashboard_page.site_card.camera_restarted.emit()
+
+    assert window._site_transform == once
+    assert once == reexpress_at_lock_pose(transform, 0.5, -0.3, 0.1)

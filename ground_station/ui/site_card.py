@@ -144,7 +144,9 @@ class SiteCard(QWidget):
             "landmark, at the point the operator clicks on the camera.")
         self.probe_button.clicked.connect(self._on_probe_clicked)
 
-        self.anchor_button = QPushButton("Anchor")
+        # "Start anchor" / "Stop anchor" - the two labels the operator
+        # guide names verbatim (docs/site/README.md, steps 6 and 10).
+        self.anchor_button = QPushButton("Start anchor")
         self.anchor_button.setCheckable(True)
         self.anchor_button.setToolTip(
             "Start or stop the ArUco anchor accumulator. Commands no "
@@ -438,7 +440,7 @@ class SiteCard(QWidget):
             self.anchor_button.setText("Stop anchor")
             self.anchor_start_requested.emit()
         else:
-            self.anchor_button.setText("Anchor")
+            self.anchor_button.setText("Start anchor")
             self.anchor_stop_requested.emit()
 
     def _on_lock_toggled(self, checked: bool) -> None:

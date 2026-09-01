@@ -275,3 +275,76 @@ def test_garbage_on_the_command_topic_is_ignored(node):
 
     node._on_command(command("sideways"))
     assert node._phase == "running"
+
+
+# --- the colour-image decode `_detect` feeds to cv2 ---------------------
+#
+# `_detect` itself needs OpenCV, but the buffer arithmetic in front of it
+# does not - and that arithmetic is where a review found the whole of
+# stage 3 broken: a bgra8 frame was reshaped to (height, step // channels),
+# which is a numpy size error on every multi-channel image, so detectMarkers
+# was never reached at all. These tests own that arithmetic directly.
+
+
+def colour_image_msg(encoding, width, height, pad_bytes=0, fill=None):
+    channels = {'mono8': 1, 'bgr8': 3, 'bgra8': 4, 'rgba8': 4}[encoding]
+    step = width * channels + pad_bytes
+    rows = []
+    for row in range(height):
+        body = np.arange(row * width * channels,
+                          (row + 1) * width * channels, dtype=np.uint8)
+        if fill is not None:
+            body = np.full(width * channels, fill, dtype=np.uint8)
+        rows.append(np.concatenate([body, np.zeros(pad_bytes, dtype=np.uint8)]))
+    msg = Image()
+    msg.width = width
+    msg.height = height
+    msg.encoding = encoding
+    msg.step = step
+    msg.data = np.concatenate(rows).tobytes()
+    return msg
+
+
+@pytest.mark.parametrize("encoding,channels",
+                         [("mono8", 1), ("bgr8", 3), ("bgra8", 4), ("rgba8", 4)])
+def test_image_to_array_shapes_every_supported_encoding(encoding, channels):
+    from navi_localization.site_anchor import image_to_array
+
+    msg = colour_image_msg(encoding, 7, 5)
+    arr, found = image_to_array(msg)
+    assert found == encoding
+    assert arr.shape == (5, 7, channels)
+    # Row 2, pixel 3, first channel: the byte the header says it is.
+    assert arr[2, 3, 0] == np.uint8((2 * 7 * channels) + 3 * channels)
+
+
+def test_image_to_array_honours_a_padded_row_stride():
+    from navi_localization.site_anchor import image_to_array
+
+    msg = colour_image_msg("bgr8", 4, 3, pad_bytes=5)
+    arr, _ = image_to_array(msg)
+    assert arr.shape == (3, 4, 3)
+    # With the padding mistaken for picture, row 1 would start 5 bytes early.
+    assert arr[1, 0, 0] == np.uint8(1 * 4 * 3)
+
+
+def test_image_to_array_refuses_an_encoding_it_cannot_convert():
+    from navi_localization.site_anchor import image_to_array
+
+    msg = colour_image_msg("bgr8", 4, 3)
+    msg.encoding = "16UC1"
+    assert image_to_array(msg) is None
+
+
+def test_image_to_array_refuses_a_truncated_buffer():
+    from navi_localization.site_anchor import image_to_array
+
+    msg = colour_image_msg("bgra8", 4, 3)
+    msg.data = msg.data[:-8]
+    assert image_to_array(msg) is None
+
+
+def test_detect_returns_nothing_without_a_detector_rather_than_raising(node):
+    node._detector_ok = False
+    node._aruco_dict = None
+    assert node._detect(colour_image_msg("bgra8", 8, 6)) == []

@@ -590,3 +590,40 @@ def test_new_probe_id_is_unique_for_the_same_timestamp():
     second = new_probe_id(1756738800.412, 4)
     assert first != second
     assert isinstance(first, str)
+
+
+# --- non-finite coordinates on the wire -------------------------------
+#
+# Python's json emits and accepts the non-standard literals NaN, Infinity
+# and -Infinity, and any rover-side json.dumps of a float('nan') produces
+# one. `_safe_float` alone let those straight through as "numbers": the
+# strict stance of §3.1 exists precisely so a coordinate that is not a
+# place never reaches the SITE card or the fit.
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+def test_a_probe_result_with_a_non_finite_coordinate_is_dropped(literal):
+    payload = ('{"request_id": "p-1", "ok": true, "label": "51", '
+               f'"x": {literal}, "y": -1.03, "z": 0.44, "range_m": 4.27, '
+               '"samples": 37, "valid_fraction": 0.31, "error": null}')
+    assert json.loads(payload)["ok"] is True     # the payload IS valid JSON
+    assert parse_probe_result(payload) is None
+
+
+def test_a_probe_result_with_a_non_finite_valid_fraction_is_dropped():
+    payload = ('{"request_id": "p-1", "ok": true, "label": "51", '
+               '"x": 1.0, "y": 2.0, "z": 0.4, "range_m": 4.27, '
+               '"samples": 37, "valid_fraction": NaN, "error": null}')
+    assert parse_probe_result(payload) is None
+
+
+def test_a_sighting_with_a_non_finite_coordinate_fails_the_whole_report():
+    payload = ('{"phase": "running", "dictionary": "DICT_5X5_100", '
+               '"detector_ok": true, "error": null, "sightings": ['
+               '{"id": "51", "x": 4.12, "y": -1.03, "z": 0.42, "n": 63, '
+               '"spread_m": 0.031, "range_m": 4.27, "last_seen_s": 0.4, '
+               '"quality": "good"}, '
+               '{"id": "52", "x": Infinity, "y": 0.0, "z": 0.0, "n": 3, '
+               '"spread_m": 0.01, "range_m": 2.0, "last_seen_s": 0.1, '
+               '"quality": "weak"}]}')
+    assert parse_sightings(payload) is None

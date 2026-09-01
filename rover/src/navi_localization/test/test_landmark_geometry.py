@@ -1,4 +1,5 @@
 import math
+import subprocess
 import sys
 
 import pytest
@@ -213,10 +214,23 @@ def test_sighting_accumulator_reset_empties_it():
 
 
 def test_import_pulls_in_no_ros_or_opencv():
-    assert "rclpy" not in sys.modules
-    assert "cv2" not in sys.modules
-    assert "zed_msgs" not in sys.modules
-    import navi_localization.landmark_geometry  # noqa: F401
-    assert "rclpy" not in sys.modules
-    assert "cv2" not in sys.modules
-    assert "zed_msgs" not in sys.modules
+    """A FRESH interpreter, not this one.
+
+    Asserting on this process's `sys.modules` only tested the order pytest
+    happened to collect files in: run beside test_site_probe.py (which
+    imports rclpy at module scope, as a node test must), the very first
+    assertion failed - not because landmark_geometry pulled anything in,
+    but because a sibling test file already had. A subprocess is the only
+    honest way to ask what one import costs.
+    """
+    source = (
+        "import sys\n"
+        "import navi_localization.landmark_geometry\n"
+        "leaked = [m for m in ('rclpy', 'cv2', 'zed_msgs', 'numpy')\n"
+        "          if m in sys.modules]\n"
+        "print(','.join(leaked))\n"
+    )
+    result = subprocess.run([sys.executable, "-c", source],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == ""

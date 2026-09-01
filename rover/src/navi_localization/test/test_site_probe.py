@@ -284,3 +284,70 @@ def test_two_requests_in_a_row_each_get_their_own_result(node):
     ids = [m["request_id"] for m in node._result_publisher.messages]
     assert ids == ["p-1.000-0", "p-1.000-1"]
     assert all(m["ok"] for m in node._result_publisher.messages)
+
+
+# --- edges of the buffer, and the byte order it is written in ------------
+#
+# Neither had a test. A landmark near the frame edge is an ordinary
+# operator click (the ERC landmarks are spread across a yard, not centred
+# in the view), and a patch that walked off the end of a row would read
+# the NEXT row's depths as if they were beside the pixel - or, at the last
+# row, index past the buffer and raise inside a subscription callback.
+
+
+def test_a_click_in_the_corner_clips_the_patch_to_the_image(node):
+    width, height = 64, 48
+    values = [4.0] * (width * height)
+    node._on_camera_info(camera_info(50.0, 50.0, 32.0, 24.0, width, height))
+    node._on_depth(depth_image(width, height, values))
+    node._on_status(status_string("OK"))
+    node._on_pose(odometry(0.0, 0.0, 0.0))
+
+    node._on_request(request_string(make_request(
+        u=0, v=0, width=width, height=height, patch_px=11)))
+
+    result = node._result_publisher.messages[-1]
+    assert result["ok"] is True
+    # 11x11 centred on (0, 0) clipped to the image is 6x6 - not 121, and
+    # not a read that ran off the row into the one below.
+    assert result["samples"] == 36
+    assert result["valid_fraction"] == pytest.approx(1.0)
+
+
+def test_the_bottom_right_pixel_does_not_read_past_the_buffer(node):
+    width, height = 64, 48
+    node._on_camera_info(camera_info(50.0, 50.0, 32.0, 24.0, width, height))
+    node._on_depth(depth_image(width, height, [4.0] * (width * height)))
+    node._on_status(status_string("OK"))
+    node._on_pose(odometry(0.0, 0.0, 0.0))
+
+    node._on_request(request_string(make_request(
+        u=width - 1, v=height - 1, width=width, height=height, patch_px=11)))
+
+    result = node._result_publisher.messages[-1]
+    assert result["ok"] is True
+    assert result["samples"] == 36
+
+
+def test_a_big_endian_depth_image_decodes_to_the_same_point(node):
+    width, height = 64, 48
+    args = (50.0, 50.0, 32.0, 24.0, width, height)
+    node._on_camera_info(camera_info(*args))
+    node._on_status(status_string("OK"))
+    node._on_pose(odometry(0.0, 0.0, 0.0))
+
+    node._on_depth(depth_image(width, height, [4.0] * (width * height)))
+    node._on_request(request_string(make_request(
+        u=32, v=24, width=width, height=height)))
+    little = node._result_publisher.messages[-1]
+
+    node._on_depth(depth_image(width, height, [4.0] * (width * height),
+                               is_bigendian=True))
+    node._on_request(request_string(make_request(
+        u=32, v=24, width=width, height=height)))
+    big = node._result_publisher.messages[-1]
+
+    assert big["ok"] is True
+    assert big["range_m"] == pytest.approx(little["range_m"])
+    assert (big["x"], big["y"], big["z"]) == pytest.approx(
+        (little["x"], little["y"], little["z"]))
