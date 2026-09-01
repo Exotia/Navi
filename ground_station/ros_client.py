@@ -8,12 +8,14 @@ import sys
 import roslibpy
 from PySide6.QtCore import QObject, Signal
 
-from ground_station.models import (Waypoint, drive_command_json, estop_request_json,
-                                    map_command_json, mode_request_json,
-                                    nav_request_json, parse_drive_status,
-                                    parse_map_status, parse_mode_status,
-                                    parse_nav_status, parse_path_summary,
-                                    pose_readout_from_odometry)
+from ground_station.models import (Waypoint, anchor_command_json, drive_command_json,
+                                    estop_request_json, map_command_json,
+                                    mode_request_json, nav_request_json,
+                                    parse_drive_status, parse_map_status,
+                                    parse_mode_status, parse_nav_status,
+                                    parse_path_summary, parse_probe_result,
+                                    parse_sightings, pose_readout_from_odometry,
+                                    probe_request_json)
 
 # /localization/pose is published at the ZED wrapper's ~30 Hz and is wanted
 # here for one header readout. rosbridge's own throttle_rate (milliseconds)
@@ -33,6 +35,8 @@ class RosSignals(QObject):
     mode_status_received = Signal(object)
     nav_status_received = Signal(object)
     nav_path_summary_received = Signal(object)
+    probe_result_received = Signal(object)
+    sightings_received = Signal(object)
 
 
 def _localization_status_failure(detail: str) -> dict:
@@ -66,6 +70,10 @@ class RosBridgeClient:
         self._nav_status_topic = None
         self._nav_path_summary_topic = None
         self._nav_request_topic = None
+        self._probe_result_topic = None
+        self._probe_request_topic = None
+        self._landmark_sightings_topic = None
+        self._anchor_command_topic = None
 
     def connect(self) -> None:
         self._ros.on_ready(lambda: self.signals.connection_changed.emit(True))
@@ -320,3 +328,58 @@ class RosBridgeClient:
                 self._ros, topic_name, "std_msgs/String")
         self._nav_request_topic.publish(self._message_factory(
             {"data": nav_request_json(action, waypoints, run_id)}))
+
+    def subscribe_probe_result(self, topic_name: str = "/site/probe_result") -> None:
+        """The rover's reply to a depth-probe click: a map-frame point on
+        success, or a sentence for the operator on failure. JSON in a
+        std_msgs/String, published once per /site/probe_request - a probe
+        is a single deliberate click, not a periodic status, and a result
+        is always published so the button is never left hanging."""
+        topic = self._topic_factory(self._ros, topic_name, "std_msgs/String")
+        topic.subscribe(lambda msg: self.signals.probe_result_received.emit(
+            parse_probe_result(msg.get("data", ""))))
+        self._probe_result_topic = topic
+
+    def subscribe_landmark_sightings(
+            self, topic_name: str = "/site/landmark_sightings") -> None:
+        """The stage-3 ArUco accumulator's account of itself: which
+        landmarks it has seen, their median map-frame position and a
+        robust quality figure. JSON in a std_msgs/String at 1 Hz while the
+        phase is anything but idle, and once on every phase transition."""
+        topic = self._topic_factory(self._ros, topic_name, "std_msgs/String")
+        topic.subscribe(lambda msg: self.signals.sightings_received.emit(
+            parse_sightings(msg.get("data", ""))))
+        self._landmark_sightings_topic = topic
+
+    def send_probe_request(self, request_id: str, label: str, u, v, width, height,
+                           target: str = "pole", patch_px: int = 11,
+                           topic_name: str = "/site/probe_request") -> None:
+        """One click on the camera view, forwarded as a pixel in the image
+        the operator actually clicked. This is not optional pedantry: the
+        GS camera view is an independent H.264 stream from video_sender
+        and its size has no fixed relationship to the depth image's, so
+        the rover rescales u/v itself using width/height."""
+        if not self.is_connected:
+            print("ground_station: not connected, probe request dropped", file=sys.stderr)
+            return
+        if self._probe_request_topic is None:
+            self._probe_request_topic = self._topic_factory(
+                self._ros, topic_name, "std_msgs/String")
+        self._probe_request_topic.publish(self._message_factory(
+            {"data": probe_request_json(request_id, label, u, v, width, height,
+                                        target=target, patch_px=patch_px)}))
+
+    def send_anchor_command(self, action: str,
+                            topic_name: str = "/site/anchor_command") -> None:
+        """start / stop / reset the stage-3 sighting accumulator. Never a
+        motion command: the anchor sweep is an operator action on the
+        gamepad in manual mode, and mode_supervisor stays the sole
+        publisher of /rover_twist (correction 3)."""
+        if not self.is_connected:
+            print("ground_station: not connected, anchor command dropped", file=sys.stderr)
+            return
+        if self._anchor_command_topic is None:
+            self._anchor_command_topic = self._topic_factory(
+                self._ros, topic_name, "std_msgs/String")
+        self._anchor_command_topic.publish(self._message_factory(
+            {"data": anchor_command_json(action)}))

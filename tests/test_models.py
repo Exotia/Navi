@@ -437,3 +437,156 @@ def test_view_transform_zoom_keeps_the_centre_still():
     view = ViewTransform(4.0, -2.0, 0.05, 400, 300).zoomed(2.0)
     assert view.metres_per_pixel == 0.1
     assert view.to_pixel(4.0, -2.0) == (200.0, 150.0)
+
+
+from ground_station.models import (ProbeResult, Sighting, SightingsReport,
+                                   anchor_command_json, new_probe_id,
+                                   parse_probe_result, parse_sightings,
+                                   probe_request_json)
+
+
+def test_parse_probe_result_reads_a_full_success():
+    payload = json.dumps({
+        "request_id": "p-1756738800.412-3", "ok": True, "label": "51",
+        "x": 4.12, "y": -1.03, "z": 0.44, "frame_id": "map",
+        "range_m": 4.27, "samples": 37, "valid_fraction": 0.31,
+        "stamp_s": 1234.5, "error": None})
+    result = parse_probe_result(payload)
+    assert result == ProbeResult(request_id="p-1756738800.412-3", ok=True,
+                                 label="51", x=4.12, y=-1.03, z=0.44,
+                                 range_m=4.27, samples=37, valid_fraction=0.31,
+                                 error=None)
+
+
+def test_parse_probe_result_reads_a_failure_with_null_coordinates():
+    payload = json.dumps({
+        "request_id": "p-1", "ok": False, "label": "51",
+        "x": None, "y": None, "z": None, "range_m": None,
+        "samples": 0, "valid_fraction": 0.0,
+        "error": "no valid depth at that pixel"})
+    result = parse_probe_result(payload)
+    assert result.ok is False
+    assert result.x is None and result.y is None
+    assert result.z is None and result.range_m is None
+    assert result.error == "no valid depth at that pixel"
+
+
+def test_parse_probe_result_survives_rubbish():
+    assert parse_probe_result("not json") is None
+    assert parse_probe_result(json.dumps([1, 2, 3])) is None
+
+
+def test_parse_probe_result_fails_the_whole_payload_on_a_missing_request_id():
+    payload = json.dumps({
+        "ok": True, "label": "51", "x": 1.0, "y": 1.0, "z": 1.0,
+        "range_m": 1.0, "samples": 10, "valid_fraction": 0.9, "error": None})
+    assert parse_probe_result(payload) is None
+
+
+def test_parse_probe_result_fails_on_a_non_numeric_required_coordinate():
+    payload = json.dumps({
+        "request_id": "p-1", "ok": True, "label": "51",
+        "x": "not a number", "y": 1.0, "z": 1.0,
+        "range_m": 1.0, "samples": 10, "valid_fraction": 0.9, "error": None})
+    assert parse_probe_result(payload) is None
+
+
+def test_parse_sightings_reads_a_full_report_in_wire_order():
+    payload = json.dumps({
+        "stamp_s": 1234.5, "phase": "running", "frame_id": "map",
+        "dictionary": "DICT_5X5_100", "image_size": [1280, 720],
+        "detector_ok": True, "error": None,
+        "sightings": [
+            {"id": "51", "x": 4.12, "y": -1.03, "z": 0.42, "n": 63,
+             "spread_m": 0.031, "range_m": 4.27, "last_seen_s": 0.4,
+             "quality": "good"},
+            {"id": "52", "x": 1.0, "y": 2.0, "z": 0.4, "n": 10,
+             "spread_m": 0.2, "range_m": 3.0, "last_seen_s": 1.1,
+             "quality": "weak"}]})
+    report = parse_sightings(payload)
+    assert report.phase == "running"
+    assert report.dictionary == "DICT_5X5_100"
+    assert report.detector_ok is True
+    assert report.error is None
+    assert report.sightings == [
+        Sighting(id="51", x=4.12, y=-1.03, z=0.42, n=63, spread_m=0.031,
+                 range_m=4.27, last_seen_s=0.4, quality="good"),
+        Sighting(id="52", x=1.0, y=2.0, z=0.4, n=10, spread_m=0.2,
+                 range_m=3.0, last_seen_s=1.1, quality="weak")]
+
+
+def test_parse_sightings_with_detector_not_ok_keeps_the_error_and_is_empty():
+    payload = json.dumps({
+        "phase": "running", "dictionary": "DICT_5X5_250",
+        "detector_ok": False,
+        "error": "unknown ArUco dictionary 'DICT_5X5_250'",
+        "sightings": []})
+    report = parse_sightings(payload)
+    assert report.detector_ok is False
+    assert report.error == "unknown ArUco dictionary 'DICT_5X5_250'"
+    assert report.sightings == []
+
+
+def test_parse_sightings_survives_rubbish():
+    assert parse_sightings("not json") is None
+    assert parse_sightings(json.dumps([1, 2, 3])) is None
+
+
+def test_parse_sightings_fails_the_whole_payload_when_sightings_is_not_a_list():
+    payload = json.dumps({"phase": "running", "dictionary": "DICT_5X5_100",
+                          "detector_ok": True, "error": None,
+                          "sightings": "not a list"})
+    assert parse_sightings(payload) is None
+
+
+def test_parse_sightings_fails_the_whole_payload_on_a_non_numeric_x():
+    payload = json.dumps({
+        "phase": "running", "dictionary": "DICT_5X5_100",
+        "detector_ok": True, "error": None,
+        "sightings": [{"id": "51", "x": "nope", "y": 1.0, "z": 0.4, "n": 10,
+                       "spread_m": 0.1, "range_m": 3.0, "last_seen_s": 0.1,
+                       "quality": "good"}]})
+    assert parse_sightings(payload) is None
+
+
+def test_probe_request_json_has_exactly_the_documented_keys():
+    payload = json.loads(probe_request_json(
+        "p-1", "51", 812, 431, 1280, 720))
+    assert payload == {"request_id": "p-1", "label": "51", "u": 812,
+                       "v": 431, "width": 1280, "height": 720,
+                       "target": "pole", "patch_px": 11}
+
+
+def test_probe_request_json_clamps_patch_px_odd_and_in_range():
+    assert json.loads(probe_request_json(
+        "p-1", "51", 0, 0, 1, 1, patch_px=100))["patch_px"] == 51
+    assert json.loads(probe_request_json(
+        "p-1", "51", 0, 0, 1, 1, patch_px=2))["patch_px"] == 3
+    assert json.loads(probe_request_json(
+        "p-1", "51", 0, 0, 1, 1, patch_px=-4))["patch_px"] == 1
+
+
+def test_probe_request_json_accepts_box_face_target():
+    payload = json.loads(probe_request_json(
+        "p-1", "51", 0, 0, 1, 1, target="box_face"))
+    assert payload["target"] == "box_face"
+
+
+def test_probe_request_json_rejects_an_unknown_target():
+    with pytest.raises(ValueError):
+        probe_request_json("p-1", "51", 0, 0, 1, 1, target="sideways")
+
+
+def test_anchor_command_json_accepts_only_the_three_actions():
+    assert json.loads(anchor_command_json("start")) == {"action": "start"}
+    assert json.loads(anchor_command_json("stop")) == {"action": "stop"}
+    assert json.loads(anchor_command_json("reset")) == {"action": "reset"}
+    with pytest.raises(ValueError):
+        anchor_command_json("sideways")
+
+
+def test_new_probe_id_is_unique_for_the_same_timestamp():
+    first = new_probe_id(1756738800.412, 3)
+    second = new_probe_id(1756738800.412, 4)
+    assert first != second
+    assert isinstance(first, str)

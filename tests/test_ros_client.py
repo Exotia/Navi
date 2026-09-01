@@ -444,3 +444,76 @@ def test_send_nav_request_is_dropped_when_not_connected(qtbot):
     client.send_nav_request("abort", run_id="gs-1")
     assert not any(t.name == "/nav_request" and t.published_messages
                    for t in FakeTopic.instances)
+
+
+def test_subscribe_probe_result_creates_topic_and_emits_parsed_result(qtbot):
+    client = make_client(qtbot)
+    received = []
+    client.signals.probe_result_received.connect(received.append)
+    client.subscribe_probe_result()
+    topic = next(t for t in FakeTopic.instances if t.name == "/site/probe_result")
+    assert topic.msg_type == "std_msgs/String"
+    topic.callback({"data": json.dumps({
+        "request_id": "p-1", "ok": True, "label": "51",
+        "x": 1.0, "y": 2.0, "z": 0.4, "range_m": 3.0,
+        "samples": 20, "valid_fraction": 0.8, "error": None})})
+    assert received[-1].ok is True and received[-1].label == "51"
+    topic.callback({"data": "garbage"})
+    assert received[-1] is None
+
+
+def test_subscribe_landmark_sightings_creates_topic_and_emits_parsed_report(qtbot):
+    client = make_client(qtbot)
+    received = []
+    client.signals.sightings_received.connect(received.append)
+    client.subscribe_landmark_sightings()
+    topic = next(t for t in FakeTopic.instances
+                 if t.name == "/site/landmark_sightings")
+    assert topic.msg_type == "std_msgs/String"
+    topic.callback({"data": json.dumps({
+        "phase": "running", "dictionary": "DICT_5X5_100",
+        "detector_ok": True, "error": None, "sightings": []})})
+    assert received[-1].phase == "running"
+    topic.callback({"data": "garbage"})
+    assert received[-1] is None
+
+
+def test_send_probe_request_is_dropped_when_not_connected(qtbot):
+    client = make_client(qtbot)
+    client.send_probe_request("p-1", "51", 100, 200, 1280, 720)
+    assert not any(t.name == "/site/probe_request" and t.published_messages
+                   for t in FakeTopic.instances)
+
+
+def test_send_probe_request_publishes_and_reuses_the_same_topic(qtbot):
+    client = make_client(qtbot)
+    client.connect()
+    client.send_probe_request("p-1", "51", 100, 200, 1280, 720, target="box_face")
+    client.send_probe_request("p-2", "52", 50, 60, 1280, 720)
+    topics = [t for t in FakeTopic.instances if t.name == "/site/probe_request"]
+    assert len(topics) == 1
+    topic = topics[0]
+    assert topic.msg_type == "std_msgs/String"
+    assert len(topic.published_messages) == 2
+    first = json.loads(topic.published_messages[0]["data"])
+    assert first == {"request_id": "p-1", "label": "51", "u": 100, "v": 200,
+                     "width": 1280, "height": 720, "target": "box_face",
+                     "patch_px": 11}
+
+
+def test_send_anchor_command_is_dropped_when_not_connected(qtbot):
+    client = make_client(qtbot)
+    client.send_anchor_command("start")
+    assert not any(t.name == "/site/anchor_command" and t.published_messages
+                   for t in FakeTopic.instances)
+
+
+def test_send_anchor_command_publishes_and_reuses_the_same_topic(qtbot):
+    client = make_client(qtbot)
+    client.connect()
+    client.send_anchor_command("start")
+    client.send_anchor_command("stop")
+    topics = [t for t in FakeTopic.instances if t.name == "/site/anchor_command"]
+    assert len(topics) == 1
+    assert [json.loads(m["data"]) for m in topics[0].published_messages] == [
+        {"action": "start"}, {"action": "stop"}]

@@ -560,3 +560,226 @@ class ViewTransform:
     def resized(self, width_px: int, height_px: int) -> "ViewTransform":
         return ViewTransform(self.centre_x, self.centre_y,
                              self.metres_per_pixel, width_px, height_px)
+
+
+# --- site anchor: /site/probe_result and /site/landmark_sightings wire ----
+#
+# These payloads carry coordinates, and the defensive stance used above
+# (fall back to a field's default: 0.0, "", None) is wrong here: a
+# truncated frame that defaults a missing x to 0.0 would put a landmark at
+# the map origin and poison the rigid-fit solver that consumes it. So the
+# parsers below are deliberately STRICTER than parse_nav_status et al.:
+# any required field that is missing or the wrong type fails the WHOLE
+# payload (returns None), rather than filling in a safe-looking default.
+# The one relaxation is a failed probe (`ok: false`), where x/y/z/range_m
+# are required to be null, not numbers - that is what a failure looks
+# like on the wire, not a malformed message.
+
+
+@dataclass
+class ProbeResult:
+    """A depth-probe reply from /site/probe_result. See parse_probe_result
+    for why this parses strictly rather than defensively."""
+    request_id: str
+    ok: bool
+    label: str
+    x: float | None
+    y: float | None
+    z: float | None
+    range_m: float | None
+    samples: int
+    valid_fraction: float
+    error: str | None
+
+
+@dataclass
+class Sighting:
+    """One accumulated landmark out of a /site/landmark_sightings report -
+    the component-wise median of every map-frame detection of that id."""
+    id: str
+    x: float
+    y: float
+    z: float
+    n: int
+    spread_m: float
+    range_m: float
+    last_seen_s: float
+    quality: str
+
+
+@dataclass
+class SightingsReport:
+    """The stage-3 ArUco accumulator's whole account of itself."""
+    phase: str
+    dictionary: str
+    detector_ok: bool
+    error: str | None
+    sightings: list          # list[Sighting]
+
+
+def _safe_str(value) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def parse_probe_result(payload: str):
+    """A strict ProbeResult from /site/probe_result's JSON.
+
+    `request_id`, `label` and `ok` must be present with the right type, or
+    the whole payload is rejected - there is no sane default for "which
+    request is this a reply to". On success (`ok: true`) x/y/z/range_m must
+    each coerce to a finite number via `_safe_float`; a `None` back from
+    that coercion fails the whole payload rather than landing a landmark at
+    (0, 0). On failure (`ok: false`) those same four fields are required to
+    be null - a failure that quietly carries a number is a bug worth
+    surfacing as a dropped message, not a value worth keeping.
+    """
+    try:
+        status = json.loads(payload)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(status, dict):
+        return None
+
+    request_id = _safe_str(status.get("request_id"))
+    label = _safe_str(status.get("label"))
+    ok = status.get("ok")
+    if request_id is None or label is None or not isinstance(ok, bool):
+        return None
+
+    samples = _safe_int(status.get("samples"), default=None)
+    valid_fraction = _safe_float(status.get("valid_fraction"))
+    if samples is None or valid_fraction is None:
+        return None
+
+    error = status.get("error")
+    if error is not None and not isinstance(error, str):
+        return None
+
+    if ok:
+        x = _safe_float(status.get("x"))
+        y = _safe_float(status.get("y"))
+        z = _safe_float(status.get("z"))
+        range_m = _safe_float(status.get("range_m"))
+        if x is None or y is None or z is None or range_m is None:
+            return None
+    else:
+        if any(status.get(key) is not None
+               for key in ("x", "y", "z", "range_m")):
+            return None
+        x = y = z = range_m = None
+
+    return ProbeResult(request_id=request_id, ok=ok, label=label,
+                       x=x, y=y, z=z, range_m=range_m, samples=samples,
+                       valid_fraction=valid_fraction, error=error)
+
+
+def _parse_sighting(entry):
+    """One /site/landmark_sightings entry, or None if any required field
+    is missing or the wrong type. The caller fails the whole report on a
+    None here - a report is a batch, and there is no id to blame a dropped
+    entry on downstream."""
+    if not isinstance(entry, dict):
+        return None
+    id_ = _safe_str(entry.get("id"))
+    quality = _safe_str(entry.get("quality"))
+    if id_ is None or quality is None:
+        return None
+    x = _safe_float(entry.get("x"))
+    y = _safe_float(entry.get("y"))
+    z = _safe_float(entry.get("z"))
+    spread_m = _safe_float(entry.get("spread_m"))
+    range_m = _safe_float(entry.get("range_m"))
+    last_seen_s = _safe_float(entry.get("last_seen_s"))
+    n = _safe_int(entry.get("n"), default=None)
+    if None in (x, y, z, spread_m, range_m, last_seen_s, n):
+        return None
+    return Sighting(id=id_, x=x, y=y, z=z, n=n, spread_m=spread_m,
+                    range_m=range_m, last_seen_s=last_seen_s, quality=quality)
+
+
+def parse_sightings(payload: str):
+    """A strict SightingsReport from /site/landmark_sightings' JSON. Same
+    stance as parse_probe_result: a malformed sighting - a non-numeric x,
+    say - fails the whole report, because a partial one has no way to say
+    which id got dropped.
+
+    `detector_ok: false` needs no sightings at all: OpenCV or the
+    dictionary name failed to resolve, so there cannot be a real
+    detection, and the report still parses with an empty list and the
+    `error` string intact - a stage 3 that fails silently is worse than
+    one that visibly does not run.
+    """
+    try:
+        status = json.loads(payload)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(status, dict):
+        return None
+
+    phase = _safe_str(status.get("phase"))
+    dictionary = _safe_str(status.get("dictionary"))
+    detector_ok = status.get("detector_ok")
+    if phase is None or dictionary is None or not isinstance(detector_ok, bool):
+        return None
+
+    error = status.get("error")
+    if error is not None and not isinstance(error, str):
+        return None
+
+    if not detector_ok:
+        return SightingsReport(phase=phase, dictionary=dictionary,
+                               detector_ok=False, error=error, sightings=[])
+
+    raw_sightings = status.get("sightings")
+    if not isinstance(raw_sightings, list):
+        return None
+    sightings = []
+    for entry in raw_sightings:
+        sighting = _parse_sighting(entry)
+        if sighting is None:
+            return None
+        sightings.append(sighting)
+
+    return SightingsReport(phase=phase, dictionary=dictionary,
+                           detector_ok=True, error=error, sightings=sightings)
+
+
+def probe_request_json(request_id: str, label: str, u, v, width, height,
+                       target: str = "pole", patch_px: int = 11) -> str:
+    """The operator's click, as /site/probe_request reads it.
+
+    `patch_px` is clamped odd and to [1, 51] here, at the wire boundary,
+    so a malformed slider value never reaches the rover. `target` is
+    validated with a raised ValueError rather than clamped: an unknown
+    target is a programming error in this ground station (the combo box
+    only ever offers "pole" or "box face"), not operator input the rover
+    has to be tolerant of.
+    """
+    if target not in ("pole", "box_face"):
+        raise ValueError(f"unknown probe target: {target!r}")
+    patch_px = max(1, min(51, int(patch_px)))
+    if patch_px % 2 == 0:
+        patch_px = min(51, patch_px + 1)
+    return json.dumps({
+        "request_id": request_id, "label": label,
+        "u": int(u), "v": int(v), "width": int(width), "height": int(height),
+        "target": target, "patch_px": patch_px,
+    })
+
+
+def anchor_command_json(action: str) -> str:
+    """start / stop / reset, as /site/anchor_command reads it. Rejecting
+    anything else is the same programming-error guard as
+    probe_request_json's target check: nothing in this codebase should
+    ever construct a value outside the three the rover understands, and
+    correction 3 in the plan means this JSON can never carry a motion."""
+    if action not in ("start", "stop", "reset"):
+        raise ValueError(f"unknown anchor action: {action!r}")
+    return json.dumps({"action": action})
+
+
+def new_probe_id(now_s: float, counter: int) -> str:
+    """A request id from the ground station's own monotonic clock plus a
+    per-request counter, so two probes issued in the same millisecond -
+    a double-click - still get distinct ids to match replies against."""
+    return f"p-{now_s:.3f}-{counter}"
