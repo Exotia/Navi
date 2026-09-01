@@ -1,0 +1,142 @@
+# Anchor-mode overrides for the site-anchor stage 3 (ArUco) procedure.
+#
+# DATA ONLY. No code in this repo loads, launches or switches to this file -
+# `grep -rn 'zed_front_anchor' rover/src/navi_localization/navi_localization/
+# rover/src/navi_localization/launch/` must always come back empty (R6: a
+# node that can restart the camera is a node that can take it away during a
+# run). The operator applies this by hand, per docs/site/README.md's
+# competition-day procedure (§9 steps 5 and 15): stop the ZED wrapper,
+# relaunch it with THIS file in place of zed_front.yaml for the stationary
+# anchor phase, then relaunch again with zed_front.yaml (the drive config)
+# before driving.
+#
+# Copied from zed_front.yaml. Three things differ from that file, each
+# commented below with why and what it costs. Everything else - depth
+# mode/clamp, pos_tracking, mapping, the image_transport plugin list - is
+# identical, because the anchor phase still needs pose, depth and mapping
+# working the same way the drive config does.
+#
+# grab_resolution: 'HD2K' is enabled, not left commented out. Task 10's own
+# text called this optional ("document, commented out, not enabled") because
+# it was written against the two-lens bracket in §0 correction 1 (2.7-5.3 m
+# at 1280x720). §0's later "Measured on the live rover" block (review round
+# 3) settles which end of that bracket is real: fx = 530 @ 1280x720 puts
+# decode range at ~3.2 m, and landmarks sit 3-8 m out, so 1280x720 barely
+# reaches the nearest one. That section's own words are "plan on HD2K for
+# the anchor config" - this file does. §0's rule for the whole plan is
+# "reality wins" when a live measurement disagrees with an earlier bracket.
+/**:
+    ros__parameters:
+        general:
+            camera_name: 'zed_front'
+            grab_resolution: 'HD2K'       # 2208x1242 grab. Measured live (review round 3,
+                                          # 2026-09-01): fx = 265.06 px @ 640x360, i.e.
+                                          # fx = 530 @ 1280x720 (the 2.1 mm / 110-deg lens).
+                                          # A 150 mm 5x5 tag needs ~25 px to decode, so decode
+                                          # range is fx/167 metres: only ~3.2 m at 1280x720
+                                          # against landmarks measured at 3-8 m away - HD2K
+                                          # roughly doubles fx again, pushing decode range to
+                                          # ~5.5 m. See docs/superpowers/plans/
+                                          # 2026-09-01-site-anchor.md §0 correction 1. The
+                                          # frame rate this costs is fine here because nothing
+                                          # else (Nav2, the video sender) is running during
+                                          # the stationary anchor phase.
+            grab_frame_rate: 15
+            pub_resolution: 'CUSTOM'
+            pub_downscale_factor: 1.0     # 1280x720 images. At the drive config's 2.0
+                                          # (640x360) a 150 mm 5x5 tag needs 25 px to decode
+                                          # and gets fx/167 metres of range - 1.3 to 2.6 m
+                                          # depending on which ZED 2i lens is fitted (see §0
+                                          # correction 1). Landmarks are 3-8 m away. This costs
+                                          # bandwidth the video sender does not want during a
+                                          # run, which is exactly why this file is only for the
+                                          # stationary anchor phase and the drive config keeps
+                                          # 2.0.
+            # Gates pose and odom publishing too, not just the images: at 15.0 the camera still grabs at 30 but /localization/pose ran at 14 Hz.
+            pub_frame_rate: 15.0
+        region_of_interest:
+            # NOT '[]'. The drive config's own comment says the top-half mask exists
+            # because the sun shade above the lens would otherwise be tracked by VIO
+            # as a "stationary" object that moves with the camera. The anchor phase
+            # measures landmarks IN THE ZED'S MAP FRAME, so a VIO that goes bad here
+            # does not degrade the anchor - it invalidates it, silently (R9). Lower the
+            # boundary instead of removing it: y = 0.35 buys ~11 degrees of headroom
+            # at 720 rows, which is far more than the couple of degrees of pitch that
+            # R2 is about, and still keeps the shade and most of the sky out.
+            # Checklist item 9 confirms 0.35 is low enough (shade still masked) and
+            # not too low (localization stays OK through an anchor phase) on the real
+            # rover; if it is not, raise the number and record what was used.
+            automatic_roi: false
+            manual_polygon: '[[0.0,0.35],[1.0,0.35],[1.0,1.0],[0.0,1.0]]'
+            apply_to_depth: true
+        depth:
+            depth_mode: 'NEURAL'           # calibrated 2026-08-29, see the spec's table; NEURAL at 30 fps drops frames on this Orin
+            min_depth: 0.3
+            max_depth: 10.0
+            point_cloud_freq: 5.0         # nobody consumes it in sub-project 1; kept cheap, not off, so sub-project 3 can turn it up
+        pos_tracking:
+            pos_tracking_enabled: true
+            pos_tracking_mode: 'GEN_1'
+            imu_fusion: true
+            publish_tf: true
+            publish_map_tf: true
+            area_memory: true             # the SDK's loop closure
+            reset_odom_with_loop_closure: true
+            set_gravity_as_origin: true
+            two_d_mode: false
+            floor_alignment: false
+        sensors:
+            publish_imu_tf: true
+            sensors_pub_rate: 100.0
+        mapping:
+            # Sub-project 3. The wrapper only spends GPU time on this while
+            # elevation_mapper is subscribed to mapping/fused_cloud
+            # (the count_subscribers guard in callback_pubFusedPc), so
+            # leaving it enabled costs nothing when nothing is mapping.
+            mapping_enabled: true
+            resolution: 0.05              # SDK range 0.01 - 0.2; the grid's cell size
+            max_mapping_range: 8.0        # SDK range 2.0 - 20.0; inside depth.max_depth (10.0)
+            fused_pointcloud_freq: 1.0    # Hz - the map is published at the rate it changes
+        object_detection:
+            od_enabled: false
+        body_tracking:
+            bt_enabled: false
+        stream_server:
+            stream_enabled: false
+
+        # Image transport plugins, one parameter per image topic. Raw only.
+        # Nothing on the rover consumes the compressed streams: the ground
+        # station gets video from the video sender.
+        #
+        # Without these, every image topic also gets an ffmpeg publisher, which
+        # is 15 more publishers to create. That is nearly free on a quiet ROS
+        # domain (measured 2026-08-29: 4.9 s to odometry with them, 4.7 s
+        # without) but it is not free on this rover's domain 0, where creating
+        # publishers is slow for reasons outside this package - 88.6 s to
+        # odometry with them, ~21 s without. See localization.launch.py's
+        # docstring for the measurements and the cause.
+        #
+        # The name is what image_transport actually declares, read off the live
+        # node with `ros2 param list /zed_front/zed_node | grep enable_pub_plugins`:
+        # the node's namespace (/zed_front) is stripped but its name is not, and
+        # there is no leading dot - unlike ffmpeg_image_transport's own
+        # parameters, which are named `.zed_node.<topic>.ffmpeg.*`. The value is
+        # the transport name, i.e. the pluginlib class with '_pub' removed, so
+        # 'image_transport/raw_pub' is written 'image_transport/raw'.
+        #
+        # Keep this list in step with IMAGE_TOPICS in launch/localization.launch.py.
+        zed_node.depth.depth_registered.enable_pub_plugins: ['image_transport/raw']
+        zed_node.left.image_rect_color.enable_pub_plugins: ['image_transport/raw']
+        zed_node.left_gray.image_rect_gray.enable_pub_plugins: ['image_transport/raw']
+        zed_node.left_raw.image_raw_color.enable_pub_plugins: ['image_transport/raw']
+        zed_node.left_raw_gray.image_raw_gray.enable_pub_plugins: ['image_transport/raw']
+        zed_node.rgb.image_rect_color.enable_pub_plugins: ['image_transport/raw']
+        zed_node.rgb_gray.image_rect_gray.enable_pub_plugins: ['image_transport/raw']
+        zed_node.rgb_raw.image_raw_color.enable_pub_plugins: ['image_transport/raw']
+        zed_node.rgb_raw_gray.image_raw_gray.enable_pub_plugins: ['image_transport/raw']
+        zed_node.right.image_rect_color.enable_pub_plugins: ['image_transport/raw']
+        zed_node.right_gray.image_rect_gray.enable_pub_plugins: ['image_transport/raw']
+        zed_node.right_raw.image_raw_color.enable_pub_plugins: ['image_transport/raw']
+        zed_node.right_raw_gray.image_raw_gray.enable_pub_plugins: ['image_transport/raw']
+        zed_node.stereo.image_rect_color.enable_pub_plugins: ['image_transport/raw']
+        zed_node.stereo_raw.image_raw_color.enable_pub_plugins: ['image_transport/raw']
