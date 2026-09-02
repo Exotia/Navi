@@ -174,7 +174,14 @@ class TraversabilityLayer(Node):
         # not walled off, merely no longer asserted. 0 disables. The
         # age_s layer arrives from the aggregator; a map without it (an
         # old publisher mid-deploy) decays nothing.
-        self.declare_parameter('observation_decay_s', 45.0)
+        # 75, deliberately ABOVE the progress checker's 60 s
+        # movement_time_allowance: at 45 the map forgot a stalled rover's
+        # surroundings before Nav2 even noticed the stall, so recovery
+        # replanned across ground that had been forgotten rather than
+        # cleared - and the Spin behaviour, whose collision checker DOES
+        # refuse unknown, could refuse to turn in the blank it was standing
+        # in. Decay must outlast the stall detector, always.
+        self.declare_parameter('observation_decay_s', 75.0)
         # What UNKNOWN costs the GLOBAL planner, on the coarse seed only.
         # Unknown is passable (allow_unknown) but arrives at the planner as
         # near-maximum cost, so a short route through unseen ground loses
