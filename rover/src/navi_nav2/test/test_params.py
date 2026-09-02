@@ -301,4 +301,6 @@ def test_the_arrival_guard_admits_the_smac_shifts_the_heal_leaves_likely():
     bt = node('bt_navigator')
     smac = node('planner_server')['SmacBased']
     assert bt['goal_reached_tol'] == 1.0
-    assert bt['goal_reached_tol'] < smac['tolerance']
+    # Equal, not merely below: a shift the planner may make that the guard
+    # will not accept is a churn loop, found by review on 2026-09-02.
+    assert bt['goal_reached_tol'] == smac['tolerance']

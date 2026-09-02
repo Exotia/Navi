@@ -590,7 +590,13 @@ class TraversabilityLayer(Node):
         # 0.05 m shift the 0.10 m planner cannot resolve anyway.
         coarse = coarsen_cost(cost)
         if self._unknown_plan_cost > 0.0:
-            coarse[coarse == UNKNOWN] = np.int8(round(self._unknown_plan_cost))
+            # Clamped to the scaled band's ceiling: np.int8 WRAPS on
+            # overflow, so an operator typing 200 on a hunch would have
+            # silently made every unknown cell read as negative garbage,
+            # and 356 would have landed exactly on LETHAL - reverting the
+            # whole unknown-is-affordable behaviour with no warning.
+            coarse[coarse == UNKNOWN] = np.int8(
+                min(99, max(1, round(self._unknown_plan_cost))))
         self._coarse_seed_publisher.publish(build_occupancy_grid(
             coarse, origin_ix // 2, origin_iy // 2,
             resolution * 2.0, self._frame_id, stamp))

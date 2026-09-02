@@ -827,3 +827,20 @@ def test_zero_unknown_plan_cost_keeps_unknown_unknown_everywhere(node):
         coarse_msg.info.height, coarse_msg.info.width)
 
     assert (coarse == UNKNOWN).any()
+
+
+def test_an_overlarge_unknown_price_clamps_instead_of_wrapping_into_a_wall(node):
+    # np.int8 wraps: 356 landed exactly on LETHAL and 200 went negative -
+    # an operator hunch away from silently reverting unknown-is-affordable.
+    node._unknown_plan_cost = 356.0
+    grid = np.zeros((10, 10), dtype=np.float32)
+    grid[6:, :] = np.nan
+    node._on_map(build_grid_map({'elevation': grid}, 0, 0, 0.05, 'map', Time()))
+
+    coarse_msg = node._coarse_seed_publisher.messages[-1]
+    coarse = np.asarray(coarse_msg.data, dtype=np.int8).reshape(
+        coarse_msg.info.height, coarse_msg.info.width)
+
+    assert (coarse == 99).any()
+    assert not (coarse == LETHAL).any()
+    assert not (coarse < -1).any()

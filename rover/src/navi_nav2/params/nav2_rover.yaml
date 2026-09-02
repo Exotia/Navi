@@ -76,7 +76,13 @@ planner_server:
     SmacBased:
       # The A/B second opinion (spec section 5).  Same costmap, same goal.
       plugin: "nav2_smac_planner/SmacPlanner2D"
-      tolerance: 2.5    # how far Smac may shift an obstructed goal to the nearest
+      # 1.0, matched to goal_reached_tol EXACTLY: any shift Smac is
+      # allowed to make must be a shift the arrival guard accepts, or
+      # FollowPath succeeds at the shifted pose, the guard refuses it, and
+      # the tree churns its full retry budget against ground the rover is
+      # already standing on. The goal-heal disc (1.4 m) is what keeps real
+      # shifts small enough for 1.0 to cover.
+      tolerance: 1.0    # how far Smac may shift an obstructed goal to the nearest
       # standable pose. 0.5 failed live: a corner's inflation blanketed the
       # whole half-metre ring around the clicked goal and Smac gave up -
       # 1.5 means "stop as close to the click as the world allows", which
