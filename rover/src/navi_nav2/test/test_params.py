@@ -71,6 +71,7 @@ def test_the_controller_never_asks_for_more_than_the_smoother_passes():
 
 def test_the_controller_may_not_reverse():
     assert node('controller_server')['FollowPath']['allow_reversing'] is False
+    assert 'backup' not in node('behavior_server')['behavior_plugins']
 
 
 def test_reverse_speed_is_capped_at_the_spec_floor():
@@ -131,8 +132,11 @@ def test_unseen_ground_is_plannable_but_still_tracked_as_unknown():
     # stays TRACKED (not silently free) so seen holes and steps remain
     # lethal - the planner may merely route through ground no sensor has
     # reported on yet.
-    for which in ('global_costmap', 'local_costmap'):
-        assert costmap(which)['track_unknown_space'] is True
+    # Global only: the local map reads unknown as free ON PURPOSE, so the
+    # recovery behaviours can act inside decayed ground instead of refusing
+    # to recover (review, 2026-09-02). Planning knowledge lives globally.
+    assert costmap('global_costmap')['track_unknown_space'] is True
+    assert costmap('local_costmap')['track_unknown_space'] is False
     assert node('planner_server')['GridBased']['allow_unknown'] is True
     assert node('planner_server')['SmacBased']['allow_unknown'] is True
 

@@ -142,7 +142,7 @@ class GoalRelay(Node):
         # the goal in flight is the real waypoint.
         self._detour_started_at = None
 
-        self._runlog = RunLog(str(self.get_parameter("run_log_path").value))
+        self._runlog = RunLog(str(self.get_parameter("run_log_path").value), clock=clock)
         # What was last written to the diary, so only CHANGES land there:
         # (state, error), (mode, reason), coordinator state.
         self._logged_run = (None, None)
@@ -199,9 +199,23 @@ class GoalRelay(Node):
                 # already replaced the live run's waypoint mirror (yaw
                 # resolution and the drawn plan both read it).
                 waypoints = request.get("waypoints") or []
-                self._mission_waypoints = [
-                    (float(w["x"]), float(w["y"]), w.get("yaw"))
-                    for w in waypoints if isinstance(w, dict)]
+                try:
+                    parsed = [(float(w["x"]), float(w["y"]), w.get("yaw"))
+                              for w in waypoints if isinstance(w, dict)]
+                except (KeyError, TypeError, ValueError) as bad:
+                    # A malformed waypoint used to raise here, BEFORE the
+                    # run state machine ever saw the request - so nothing
+                    # refused it, /nav_status said nothing, and the
+                    # operator watched a Go button that silently did
+                    # nothing. One explicit refusal on the wire instead.
+                    self._runlog.event("go_refused", f"bad waypoint: {bad!r}")
+                    refusal = String()
+                    refusal.data = json.dumps({
+                        "state": "refused",
+                        "error": f"a waypoint is not numeric: {bad}"})
+                    self._nav_status_pub.publish(refusal)
+                    return
+                self._mission_waypoints = parsed
                 self._plan_points = []
             self._run.on_request(self._now(), request)
             if (isinstance(request, dict) and request.get("action") == "go"

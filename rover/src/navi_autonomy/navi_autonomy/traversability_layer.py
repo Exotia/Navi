@@ -349,6 +349,27 @@ class TraversabilityLayer(Node):
         'relative_radius_m': '_relative_radius_m',
     }
 
+    #: The largest value each live-tunable may take. Finite-and-positive is
+    #: not enough: slope_fit_radius_m mistyped as 200 builds nine ~640 MB
+    #: integral images per map tick - 5.8 GB of allocations that kill this
+    #: node and freeze the latched seed under a Nav2 that keeps planning on
+    #: it. Every ceiling is generous next to its physical meaning.
+    _PARAMETER_CEILINGS = {
+        'step_lethal_m': 1.0,
+        'slope_lethal_deg': 89.0,
+        'floating_gap_m': 5.0,
+        'wheel_trail_radius_m': 1.0,
+        'goal_heal_radius_m': 5.0,
+        'startup_clear_radius_m': 5.0,
+        'climb_lethal_m': 1.0,
+        'drop_lethal_m': 1.0,
+        'relative_radius_m': 10.0,
+        'rover_heal_radius_m': 3.0,
+        'observation_decay_s': 600.0,
+        'unknown_plan_cost': 99.0,
+        'slope_fit_radius_m': 1.0,
+    }
+
     def _on_set_parameters(self, parameters) -> SetParametersResult:
         """Accept a live retune of the numbers above.
 
@@ -373,6 +394,11 @@ class TraversabilityLayer(Node):
                 return SetParametersResult(
                     successful=False,
                     reason=f"{parameter.name} must be finite and not negative")
+            ceiling = self._PARAMETER_CEILINGS.get(parameter.name)
+            if ceiling is not None and value > ceiling:
+                return SetParametersResult(
+                    successful=False,
+                    reason=f"{parameter.name} must be at most {ceiling}")
             pending.append((attribute, value))
         for attribute, value in pending:
             setattr(self, attribute, value)
@@ -484,6 +510,15 @@ class TraversabilityLayer(Node):
                              float(message.pose.position.y))
 
     def _on_map(self, message: GridMap) -> None:
+        # The whole pipeline, guarded like every sibling callback in this
+        # package: a raise in here takes the executor down and freezes the
+        # latched seed on its last value while Nav2 keeps planning on it.
+        try:
+            self._on_map_inner(message)
+        except Exception as exc:                      # noqa: BLE001
+            self.get_logger().error(f"map callback failed: {exc!r}")
+
+    def _on_map_inner(self, message: GridMap) -> None:
         resolution = float(message.info.resolution)
         try:
             if abs(resolution - RESOLUTION) > 1e-9:

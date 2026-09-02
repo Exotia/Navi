@@ -20,13 +20,6 @@ from rclpy.action import ActionClient
 # port must not import navi_autonomy.nav_run just to read one string.
 PLAN_FRAME = "map"
 
-# The operator's Go must not hang: half a second is generous for a Nav2
-# that is actually up (discovery is near instant on the loopback-ish field
-# link) and short enough that a missing Nav2 is reported well inside one
-# 5 Hz tick of goal_relay's own timer.
-SERVER_WAIT_S = 0.5
-
-
 class Nav2Goals:
     """The interface. Do not change the two names."""
 
@@ -118,14 +111,34 @@ class ActionClientNav2Goals(Nav2Goals):
         slot = [None, on_succeeded, on_failed, on_feedback]
         self._active = slot
 
-        if not self._client.wait_for_server(timeout_sec=SERVER_WAIT_S):
-            if self._active is slot:
+        # Never wait_for_server here: that call BLOCKS the single-threaded
+        # executor this runs on, and 500 ms of frozen node means 500 ms in
+        # which the operator's Abort, the 5 Hz tick and every status timer
+        # are all dead - the exact failure this class's docstring forbids.
+        # Readiness is polled on short one-shot timers instead, so the
+        # executor keeps turning while Nav2 finishes discovering.
+        self._send_when_ready(slot, x, y, yaw, attempts_left=10)
+
+    def _send_when_ready(self, slot, x, y, yaw, attempts_left):
+        if self._active is not slot:
+            return          # superseded or cancelled while we waited
+        if not self._client.server_is_ready():
+            if attempts_left <= 0:
                 self._active = None
-            on_failed("Nav2 is not running")
+                slot[2]("Nav2 is not running")
+                return
+            timer = None
+
+            def retry():
+                timer.cancel()
+                self._send_when_ready(slot, x, y, yaw, attempts_left - 1)
+
+            timer = self._node.create_timer(0.2, retry)
             return
 
         goal = NavigateToPose.Goal()
         goal.pose = self._pose(x, y, yaw)
+        on_succeeded, on_failed, on_feedback = slot[1], slot[2], slot[3]
 
         def feedback_cb(feedback_msg):
             if self._active is not slot:

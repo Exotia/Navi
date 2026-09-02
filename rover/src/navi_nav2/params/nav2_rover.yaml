@@ -7,9 +7,9 @@
 # one clean yard run per stage, and an explicit instruction.
 #
 # Nothing here reverses.  allow_reversing is false, the reverse floor at the
-# smoother is -0.15 m/s, the collision monitor's polygons start at x = +0.10
-# and the BackUp behaviour in both behaviour trees is 0.30 m - the spec caps
-# it at 0.6 m.  Nothing on this rover looks backwards.
+# smoother is -0.15 m/s, the collision monitor's polygons start at x = +0.10,
+# BOTH behaviour trees carry no BackUp node at all, and the backup behaviour
+# plugin is not even loaded.  Nothing on this rover looks backwards.
 #
 # The cloud layers (global obstacle_layer, local voxel_layer, and the
 # collision monitor's points_filtered source) are written out in full and
@@ -208,7 +208,10 @@ behavior_server:
     # No assisted_teleop (a second cmd_vel source), no drive_on_heading
     # (a negative distance is a reversal).  The behaviour trees call
     # exactly these three.
-    behavior_plugins: ["spin", "backup", "wait"]
+    # No backup: nothing on this rover looks backwards, neither tree
+    # carries a BackUp node any more, and a loaded plugin is a live
+    # /backup action any stray client could call into unmonitored space.
+    behavior_plugins: ["spin", "wait"]
     spin:
       plugin: "nav2_behaviors/Spin"
     backup:
@@ -377,7 +380,16 @@ local_costmap:
       rolling_window: true
       width: 8
       height: 8
-      track_unknown_space: true
+      # False for the LOCAL map only, on the operator's instruction: the
+      # recovery behaviours' collision checker treats NO_INFORMATION as
+      # lethal, so once the decay turned a stalled rover's surroundings to
+      # unknown, Spin could refuse to turn inside the very blank the rover
+      # stood in - a recovery that refuses to recover. Unknown reads as
+      # free here; the GLOBAL map keeps tracking it, so planning still
+      # knows the difference, and the rover-heal disc plus the camera's
+      # forward view keep the ground actually under and ahead of the
+      # chassis measured rather than guessed.
+      track_unknown_space: false
       transform_tolerance: 0.5
       footprint: "[[0.46, 0.445], [0.46, -0.445], [-0.46, -0.445], [-0.46, 0.445]]"
       footprint_padding: 0.03

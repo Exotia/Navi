@@ -17,7 +17,7 @@
        is a run that ends while a path was still there to find. -->
     <RecoveryNode number_of_retries="30" name="NavigateRecovery">
       <PipelineSequence name="NavigateWithReplanning">
-        <RateController hz="0.333">
+        <RateController hz="1.0">
           <!-- Three attempts, not one: clearing the global costmap and asking
                  again is cheap, and the phantom lethal splashes this stack
                  fights are exactly the kind that one clear does not always
