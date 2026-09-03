@@ -1,0 +1,82 @@
+Setzkasten 6x 
+PLA 4x 
+ASA 1x 
+TPU 1x
+PSU + Kabel 2x 
+ET POC 15x 
+Steckerleiste 1x
+Probe Cache
+Bohrer (Consti)
+Werkzeug Koffer 8x
+  Winkelschleifer  
+  Akkuschraber 
+  Thermalcam 
+  Labelmaschiene 
+  KS Tools 
+  Makita Koffer 
+  Stichsäge 
+  Drehmel 
+  Heli Coil set
+Kabelbinder Consti
+Ifixit Set  
+Klebebankiste 
+Litzen Kiste
+Jmper cable box 
+Demo Stack 
+Müllsäcke 
+Schrumpfschlauch Boxen 2x
+Multimeter (Fluke)
+Handheld Oszi 
+Hanschubox 
+Tissue Box 
+Sicker + Visitenkarten 
+Testkabelordner 
+PVC Rohr  4x 
+Gewindestangen 2x
+Edelstahl stange 
+Carbon stange 
+kabeltester 
+Lockrasterplatienen Kiste
+battarien  (AAA AA)
+Doku Hefter Harnest 
+Passfeder Setzkasten 
+Senkkopfschrauben Setzkasten 
+4mm² Kabel 
+Isoprop 
+Spritzflaschen 
+TNC - Dev Kiste 
+POE switch 
+Pinettenset 
+Handschuhe M (nitril)
+Reinraumtücher
+PA Equip 2x 
+Arm Holkiste 
+Power Debugger 
+Ersatz PCB's 28x
+Testkabel kiste 
+GPR 
+Drill 
+
+PCB BIT platte 
+Probes 5x 
+Spitze Spitzen Box 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Insert Lötkolben
