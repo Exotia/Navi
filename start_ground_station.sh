@@ -109,7 +109,22 @@ if [ "$USE_MOCK" -eq 1 ]; then
     # The GUI's initial connect fires as soon as the event loop starts, so the
     # server has to be accepting before we hand off to it.
     sleep 1
-elif ! timeout 3 bash -c "</dev/tcp/$ROVER_HOST/$ROVER_PORT" 2>/dev/null; then
+elif ! "$PYTHON" -c 'import socket, sys
+try:
+    socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=3).close()
+except OSError:
+    sys.exit(1)' "$ROVER_HOST" "$ROVER_PORT" 2>/dev/null; then
+    # Probed through Python rather than `timeout 3 bash -c "</dev/tcp/host/port"`:
+    # timeout(1) is GNU coreutils and simply does not exist on macOS, where the
+    # ground station also runs. A missing command exits 127, `!` turns that into
+    # success, and the 2>/dev/null swallows the "command not found" - so on a Mac
+    # the old probe reported "nothing listening" on every single launch, including
+    # when the Orin was up and the app connected to it fine. A warning that is
+    # always wrong is worse than no warning: it trains you to ignore the one case
+    # it exists to catch. $PYTHON is the venv interpreter checked for above, so it
+    # is guaranteed present here, and socket.create_connection carries its own
+    # timeout on both platforms.
+    #
     # Not fatal: the app opens unconnected and you can retry from its header.
     echo "warning: nothing listening on $ROVER_HOST:$ROVER_PORT" >&2
     echo "         is ~/navi/start_navi.sh running on the Orin?" >&2
